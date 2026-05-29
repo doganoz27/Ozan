@@ -24,6 +24,10 @@ try:
 except ImportError:
     MISSING.append("numpy")
 try:
+    import yfinance as yf
+except ImportError:
+    MISSING.append("yfinance")
+try:
     from rich.console import Console
     from rich.table import Table
     from rich.panel import Panel
@@ -47,19 +51,27 @@ CRYPTO_SYMBOLS = [
     "BINANCE:BTCUSDT", "BINANCE:ETHUSDT", "BINANCE:SOLUSDT",
     "BINANCE:BNBUSDT",  "BINANCE:XRPUSDT", "BINANCE:ADAUSDT",
 ]
-FOREX_SYMBOLS = [
-    "OANDA:EUR_USD","OANDA:GBP_USD","OANDA:USD_JPY","OANDA:USD_CHF",
-    "OANDA:AUD_USD","OANDA:USD_CAD","OANDA:NZD_USD",
-    "OANDA:EUR_GBP","OANDA:EUR_JPY","OANDA:GBP_JPY",
-    "OANDA:EUR_CHF","OANDA:AUD_JPY","OANDA:GBP_CHF",
-    "OANDA:XAU_USD","OANDA:XAG_USD",
-    "OANDA:BCO_USD","OANDA:WTICO_USD",
-]
+# Yahoo Finance tickers for forex majors, crosses, metals, oil
+FOREX_YF = {
+    # Majors
+    "EUR/USD": "EURUSD=X", "GBP/USD": "GBPUSD=X", "USD/JPY": "JPY=X",
+    "USD/CHF": "CHF=X",    "AUD/USD": "AUDUSD=X", "USD/CAD": "CAD=X",
+    "NZD/USD": "NZDUSD=X",
+    # Crosses
+    "EUR/GBP": "EURGBP=X", "EUR/JPY": "EURJPY=X", "GBP/JPY": "GBPJPY=X",
+    "EUR/CHF": "EURCHF=X", "AUD/JPY": "AUDJPY=X", "GBP/CHF": "GBPCHF=X",
+    # Metals & Oil
+    "XAU/USD": "GC=F",  "XAG/USD": "SI=F",
+    "WTI OIL": "CL=F",  "BRENT":   "BZ=F",
+}
+# Internal keys used throughout the system
+FOREX_SYMBOLS  = list(FOREX_YF.keys())
 EQUITY_SYMBOLS = ["NVDA","AAPL","SPY","QQQ","MSFT","TSLA","AMD","META"]
 
-ALL_SUBSCRIBE  = CRYPTO_SYMBOLS + FOREX_SYMBOLS
+ALL_SUBSCRIBE  = CRYPTO_SYMBOLS   # WebSocket only for crypto
 CANDLE_EQUITY  = EQUITY_SYMBOLS
 CANDLE_CRYPTO  = ["BINANCE:BTCUSDT","BINANCE:ETHUSDT","BINANCE:SOLUSDT","BINANCE:XRPUSDT"]
+CANDLE_FOREX   = list(FOREX_YF.keys())   # yfinance candles
 CANDLE_HISTORY    = 200
 REFRESH_RATE      = 1.5
 ANALYSIS_INTERVAL = 30
@@ -78,20 +90,20 @@ CFTC_API = "https://publicreporting.cftc.gov/resource/jun7-fc8e.json"
 
 # Maps our symbols to CFTC market/contract names (legacy COT report)
 COT_MARKET_MAP = {
-    "BINANCE:BTCUSDT":  "BITCOIN - CHICAGO MERCANTILE EXCHANGE",
-    "OANDA:EUR_USD":    "EURO FX - CHICAGO MERCANTILE EXCHANGE",
-    "OANDA:GBP_USD":    "BRITISH POUND - CHICAGO MERCANTILE EXCHANGE",
-    "OANDA:USD_JPY":    "JAPANESE YEN - CHICAGO MERCANTILE EXCHANGE",
-    "OANDA:USD_CHF":    "SWISS FRANC - CHICAGO MERCANTILE EXCHANGE",
-    "OANDA:AUD_USD":    "AUSTRALIAN DOLLAR - CHICAGO MERCANTILE EXCHANGE",
-    "OANDA:USD_CAD":    "CANADIAN DOLLAR - CHICAGO MERCANTILE EXCHANGE",
-    "OANDA:NZD_USD":    "NEW ZEALAND DOLLAR - CHICAGO MERCANTILE EXCHANGE",
-    "OANDA:XAU_USD":    "GOLD - COMMODITY EXCHANGE INC.",
-    "OANDA:XAG_USD":    "SILVER - COMMODITY EXCHANGE INC.",
-    "OANDA:WTICO_USD":  "CRUDE OIL, LIGHT SWEET - NEW YORK MERCANTILE EXCHANGE",
-    "OANDA:BCO_USD":    "BRENT LAST DAY FINANCIAL - ICE FUTURES EUROPE",
-    "SPY":              "S&P 500 STOCK INDEX - CHICAGO MERCANTILE EXCHANGE",
-    "QQQ":              "NASDAQ-100 STOCK INDEX (MINI) - CHICAGO MERCANTILE EXCHANGE",
+    "BINANCE:BTCUSDT": "BITCOIN - CHICAGO MERCANTILE EXCHANGE",
+    "EUR/USD":  "EURO FX - CHICAGO MERCANTILE EXCHANGE",
+    "GBP/USD":  "BRITISH POUND - CHICAGO MERCANTILE EXCHANGE",
+    "USD/JPY":  "JAPANESE YEN - CHICAGO MERCANTILE EXCHANGE",
+    "USD/CHF":  "SWISS FRANC - CHICAGO MERCANTILE EXCHANGE",
+    "AUD/USD":  "AUSTRALIAN DOLLAR - CHICAGO MERCANTILE EXCHANGE",
+    "USD/CAD":  "CANADIAN DOLLAR - CHICAGO MERCANTILE EXCHANGE",
+    "NZD/USD":  "NEW ZEALAND DOLLAR - CHICAGO MERCANTILE EXCHANGE",
+    "XAU/USD":  "GOLD - COMMODITY EXCHANGE INC.",
+    "XAG/USD":  "SILVER - COMMODITY EXCHANGE INC.",
+    "WTI OIL":  "CRUDE OIL, LIGHT SWEET - NEW YORK MERCANTILE EXCHANGE",
+    "BRENT":    "BRENT LAST DAY FINANCIAL - ICE FUTURES EUROPE",
+    "SPY":      "S&P 500 STOCK INDEX - CHICAGO MERCANTILE EXCHANGE",
+    "QQQ":      "NASDAQ-100 STOCK INDEX (MINI) - CHICAGO MERCANTILE EXCHANGE",
 }
 
 # Global COT cache: symbol → latest COT snapshot dict
@@ -121,23 +133,23 @@ SYMBOL_KEYWORDS = {
     "BINANCE:BNBUSDT":  ["binance","bnb","bnb chain"],
     "BINANCE:XRPUSDT":  ["ripple","xrp","sec ripple"],
     "BINANCE:ADAUSDT":  ["cardano","ada","hoskinson"],
-    "OANDA:XAU_USD":    ["gold","xau","bullion","fed","inflation","safe haven","dxy"],
-    "OANDA:XAG_USD":    ["silver","xag","precious metal"],
-    "OANDA:BCO_USD":    ["brent","crude oil","opec","oil price","energy"],
-    "OANDA:WTICO_USD":  ["wti","crude","oil","opec","petroleum","barrel"],
-    "OANDA:EUR_USD":    ["euro","eur","ecb","eurozone","european central bank","lagarde"],
-    "OANDA:GBP_USD":    ["pound","gbp","boe","bank of england","uk inflation","sterling"],
-    "OANDA:USD_JPY":    ["yen","jpy","boj","bank of japan","ueda","japan"],
-    "OANDA:USD_CHF":    ["franc","chf","snb","swiss","switzerland"],
-    "OANDA:AUD_USD":    ["aussie","aud","rba","australia","reserve bank of australia"],
-    "OANDA:USD_CAD":    ["loonie","cad","boc","canada","bank of canada"],
-    "OANDA:NZD_USD":    ["kiwi","nzd","rbnz","new zealand"],
-    "OANDA:EUR_GBP":    ["euro","pound","ecb","boe"],
-    "OANDA:EUR_JPY":    ["euro","yen","ecb","boj"],
-    "OANDA:GBP_JPY":    ["pound","yen","boe","boj"],
-    "OANDA:EUR_CHF":    ["euro","franc","ecb","snb"],
-    "OANDA:AUD_JPY":    ["aussie","yen","rba","boj","risk appetite","risk-on","risk-off"],
-    "OANDA:GBP_CHF":    ["pound","franc","boe","snb"],
+    "XAU/USD":  ["gold","xau","bullion","fed","inflation","safe haven","dxy"],
+    "XAG/USD":  ["silver","xag","precious metal"],
+    "BRENT":    ["brent","crude oil","opec","oil price","energy"],
+    "WTI OIL":  ["wti","crude","oil","opec","petroleum","barrel"],
+    "EUR/USD":  ["euro","eur","ecb","eurozone","european central bank","lagarde"],
+    "GBP/USD":  ["pound","gbp","boe","bank of england","uk inflation","sterling"],
+    "USD/JPY":  ["yen","jpy","boj","bank of japan","ueda","japan"],
+    "USD/CHF":  ["franc","chf","snb","swiss","switzerland"],
+    "AUD/USD":  ["aussie","aud","rba","australia","reserve bank of australia"],
+    "USD/CAD":  ["loonie","cad","boc","canada","bank of canada"],
+    "NZD/USD":  ["kiwi","nzd","rbnz","new zealand"],
+    "EUR/GBP":  ["euro","pound","ecb","boe"],
+    "EUR/JPY":  ["euro","yen","ecb","boj"],
+    "GBP/JPY":  ["pound","yen","boe","boj"],
+    "EUR/CHF":  ["euro","franc","ecb","snb"],
+    "AUD/JPY":  ["aussie","yen","rba","boj","risk appetite","risk-on","risk-off"],
+    "GBP/CHF":  ["pound","franc","boe","snb"],
     "NVDA":  ["nvidia","nvda","gpu","ai chip","cuda","blackwell","jensen huang","data center"],
     "AAPL":  ["apple","aapl","iphone","ios","tim cook","app store","mac"],
     "SPY":   ["s&p 500","sp500","spx","equity market","stock market","fed","interest rate"],
@@ -173,8 +185,7 @@ class MarketData:
     def short_name(self):
         s = self.symbol
         if "BINANCE:" in s: return s.replace("BINANCE:","")
-        if "OANDA:"   in s: return s.replace("OANDA:","").replace("_","/")
-        return s
+        return s   # forex already stored as "EUR/USD" etc.
 
 # Global state
 market_data: dict[str, MarketData] = {}
@@ -191,7 +202,7 @@ adaptive_weights = {}   # feature → weight multiplier (1.0 = neutral)
 last_stats_time  = 0
 STATS_INTERVAL   = 300  # recompute stats every 5 min
 
-for sym in ALL_SUBSCRIBE + CANDLE_EQUITY:
+for sym in ALL_SUBSCRIBE + CANDLE_EQUITY + FOREX_SYMBOLS:
     market_data[sym] = MarketData(sym)
 
 # ── news engine ───────────────────────────────────────────────────────────────
@@ -559,7 +570,7 @@ def compute_stats() -> dict:
         # By symbol (top 5 by trade count)
         sym_counts: dict = {}
         for r in closed:
-            s = r["symbol"].replace("BINANCE:","").replace("OANDA:","").replace("_","/")
+            s = r["symbol"].replace("BINANCE:","")
             if s not in sym_counts: sym_counts[s] = {"t":0,"w":0,"rr":[]}
             sym_counts[s]["t"] += 1
             if r["status"] in ("TP1","TP2","TP3"): sym_counts[s]["w"] += 1
@@ -888,6 +899,68 @@ def fetch_quote(symbol):
     except Exception:
         return {}
 
+def fetch_yfinance_quotes():
+    """
+    Fetch live quotes for all forex/metals/oil symbols via yfinance.
+    Updates market_data in-place.
+    """
+    yf_tickers = list(FOREX_YF.values())
+    try:
+        data = yf.download(
+            tickers=" ".join(yf_tickers),
+            period="2d", interval="1h",
+            group_by="ticker", auto_adjust=True,
+            progress=False, threads=True,
+        )
+    except Exception:
+        return
+
+    for name, ticker in FOREX_YF.items():
+        try:
+            if len(yf_tickers) == 1:
+                df = data
+            else:
+                df = data[ticker] if ticker in data.columns.get_level_values(0) else None
+            if df is None or df.empty:
+                continue
+            df = df.dropna(subset=["Close"])
+            if df.empty:
+                continue
+            row  = df.iloc[-1]
+            prev = df.iloc[-2]["Close"] if len(df) >= 2 else row["Close"]
+            with lock:
+                md = market_data.get(name)
+                if not md:
+                    market_data[name] = MarketData(name)
+                    md = market_data[name]
+                md.price  = float(row["Close"])
+                md.prev   = float(prev)
+                md.high   = float(row["High"])
+                md.low    = float(row["Low"])
+                md.open_  = float(row["Open"])
+                md.volume = float(row.get("Volume", 0) or 0)
+                md.last_ws = datetime.now().strftime("%H:%M:%S")
+        except Exception:
+            pass
+
+def fetch_yfinance_candles(name: str, ticker: str, period="5d", interval="1h") -> list:
+    """Fetch OHLCV candles for a forex/metal symbol via yfinance."""
+    try:
+        df = yf.download(ticker, period=period, interval=interval,
+                         auto_adjust=True, progress=False)
+        if df is None or df.empty:
+            return []
+        df = df.dropna(subset=["Close"])
+        candles = []
+        for ts, row in df.iterrows():
+            t = int(ts.timestamp()) if hasattr(ts, "timestamp") else int(time.time())
+            candles.append((t, float(row["Open"]), float(row["High"]),
+                            float(row["Low"]),  float(row["Close"]),
+                            float(row.get("Volume", 0) or 0)))
+        return candles
+    except Exception:
+        return []
+
 # ── technical indicators ──────────────────────────────────────────────────────
 def ema(prices, period):
     if len(prices) < period: return []
@@ -1201,7 +1274,7 @@ def score_setup(symbol, candles, price, news_items=None, cot_data=None):
     if rr < 2.5: return None
 
     # ── Entry narrative ───────────────────────────────────────────────────────
-    short_name = symbol.replace("BINANCE:","").replace("OANDA:","").replace("_","/")
+    short_name = symbol.replace("BINANCE:","")
     narrative  = _build_entry_narrative(
         short_name, direction, quality, price, entry_l, entry_h,
         sl, tp1, tp2, tp3, rr, atr_v, rsi_v, mh, struct, sweep,
@@ -1360,7 +1433,17 @@ def background_loader():
     first_run = True
     while True:
         try:
-            # ── equity quotes ──
+            # ── forex + metals + oil via yfinance (quotes) ──
+            fetch_yfinance_quotes()
+
+            # ── forex candles via yfinance ──
+            for name, ticker in FOREX_YF.items():
+                candles = fetch_yfinance_candles(name, ticker, period="5d", interval="1h")
+                if candles:
+                    with lock:
+                        market_data[name].candles = candles
+
+            # ── equity quotes via Finnhub ──
             for sym in EQUITY_SYMBOLS:
                 q = fetch_quote(sym)
                 if q and q.get("c"):
@@ -1369,7 +1452,7 @@ def background_loader():
                         md.price = q["c"]; md.prev = q["pc"]
                         md.high  = q["h"]; md.low  = q["l"]; md.open_ = q["o"]
 
-            # ── candles ──
+            # ── equity + crypto candles via Finnhub ──
             for sym in CANDLE_EQUITY + CANDLE_CRYPTO:
                 candles = fetch_candles(sym, resolution="60", count=CANDLE_HISTORY)
                 if candles:
@@ -1379,17 +1462,13 @@ def background_loader():
                         market_data[sym].candles = candles
                         market_data[sym].price   = candles[-1][4]
 
-            # ── general + category news ──
+            # ── news ──
             all_news = fetch_all_news()
-
-            # ── company news for equities ──
             for sym in EQUITY_SYMBOLS:
-                cn = fetch_company_news(sym)
-                all_news.extend(cn)
+                all_news.extend(fetch_company_news(sym))
 
             with lock:
                 news_cache = all_news[:30]
-                # Categorise per symbol
                 new_cat = {}
                 for sym in list(market_data.keys()):
                     matched = match_news_to_symbol(sym, all_news)
@@ -1400,7 +1479,7 @@ def background_loader():
         except Exception:
             pass
 
-        time.sleep(60 if first_run else 90)
+        time.sleep(30 if first_run else 60)
         first_run = False
 
 # ── analysis engine ───────────────────────────────────────────────────────────
@@ -1551,11 +1630,9 @@ def build_market_table():
 
     groups = [
         ("CRYPTO",        CRYPTO_SYMBOLS),
-        ("FOREX MAJORS",  ["OANDA:EUR_USD","OANDA:GBP_USD","OANDA:USD_JPY","OANDA:USD_CHF",
-                            "OANDA:AUD_USD","OANDA:USD_CAD","OANDA:NZD_USD"]),
-        ("FOREX CROSSES", ["OANDA:EUR_GBP","OANDA:EUR_JPY","OANDA:GBP_JPY",
-                            "OANDA:EUR_CHF","OANDA:AUD_JPY","OANDA:GBP_CHF"]),
-        ("METALS & OIL",  ["OANDA:XAU_USD","OANDA:XAG_USD","OANDA:BCO_USD","OANDA:WTICO_USD"]),
+        ("FOREX MAJORS",  ["EUR/USD","GBP/USD","USD/JPY","USD/CHF","AUD/USD","USD/CAD","NZD/USD"]),
+        ("FOREX CROSSES", ["EUR/GBP","EUR/JPY","GBP/JPY","EUR/CHF","AUD/JPY","GBP/CHF"]),
+        ("METALS & OIL",  ["XAU/USD","XAG/USD","WTI OIL","BRENT"]),
         ("EQUITIES",      EQUITY_SYMBOLS),
     ]
 
@@ -1620,7 +1697,7 @@ def build_setup_table():
         rc    = "bright_green" if rsi_v and rsi_v<40 else "bright_red" if rsi_v and rsi_v>65 else "white"
         t.add_row(
             qcolor(s["quality"]),
-            s["symbol"].replace("BINANCE:","").replace("OANDA:","").replace("_","/"),
+            s["symbol"].replace("BINANCE:",""),
             dcolor(s["direction"]),
             f"[bright_white]{fp(s['price'])}[/bright_white]",
             f"{fp(s['entry'][0])} – {fp(s['entry'][1])}",
@@ -1642,7 +1719,7 @@ def build_detail_panels():
     panels = []
 
     for s in alerts:
-        sym_name = s["symbol"].replace("BINANCE:","").replace("OANDA:","").replace("_","/")
+        sym_name = s["symbol"].replace("BINANCE:","")
 
         # Technical reasons
         tech_text = ""
@@ -1772,7 +1849,7 @@ def build_cot_panel():
         ct    = d.get("contrarian")
         date  = d.get("date","—")
 
-        name  = sym.replace("BINANCE:","").replace("OANDA:","").replace("_","/")
+        name  = sym.replace("BINANCE:","")
         sn_s  = f"[bright_green]{sn:+,}[/bright_green]" if sn>0 else f"[bright_red]{sn:+,}[/bright_red]"
         snc_s = f"[bright_green]{snc:+,}[/bright_green]" if snc>0 else f"[bright_red]{snc:+,}[/bright_red]" if snc<0 else f"[dim]{snc:+,}[/dim]"
         cn_s  = f"[bright_green]{cn:+,}[/bright_green]" if cn>0 else f"[bright_red]{cn:+,}[/bright_red]"
@@ -1861,7 +1938,7 @@ def build_journal_panel():
         t.add_row("—","—","—","—","—","[dim]No trades yet[/dim]","—","—")
     else:
         for r in recent:
-            sym    = r["symbol"].replace("BINANCE:","").replace("OANDA:","").replace("_","/")
+            sym    = r["symbol"].replace("BINANCE:","")
             status = r["status"]
             arr    = r.get("actual_rr")
             arr_s  = (f"[bright_green]1:{arr:.2f}[/bright_green]" if arr and arr>0
