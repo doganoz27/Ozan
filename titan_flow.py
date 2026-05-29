@@ -12,6 +12,8 @@ import time
 import sys
 import math
 import re
+import sqlite3
+import os
 from datetime import datetime, timezone
 from collections import deque
 
@@ -58,9 +60,15 @@ EQUITY_SYMBOLS = ["NVDA","AAPL","SPY","QQQ","MSFT","TSLA","AMD","META"]
 ALL_SUBSCRIBE  = CRYPTO_SYMBOLS + FOREX_SYMBOLS
 CANDLE_EQUITY  = EQUITY_SYMBOLS
 CANDLE_CRYPTO  = ["BINANCE:BTCUSDT","BINANCE:ETHUSDT","BINANCE:SOLUSDT","BINANCE:XRPUSDT"]
-CANDLE_HISTORY = 200
-REFRESH_RATE   = 1.5
+CANDLE_HISTORY    = 200
+REFRESH_RATE      = 1.5
 ANALYSIS_INTERVAL = 30
+DB_PATH           = os.path.join(os.path.dirname(os.path.abspath(__file__)), "titan_journal.db")
+
+# Minimum samples before adaptive weights kick in
+ADAPTIVE_MIN_TRADES = 20
+# Signal dedup window: don't re-log same symbol+direction within N seconds
+SIGNAL_DEDUP_SECS = 7200   # 2 hours
 
 console = Console()
 
@@ -170,14 +178,18 @@ class MarketData:
 
 # Global state
 market_data: dict[str, MarketData] = {}
-# news_cache: list of raw news dicts from Finnhub
 news_cache       = []
-# categorised_news: symbol → list of relevant news items with sentiment
 categorised_news: dict[str, list] = {}
 setup_alerts     = []
 lock             = threading.Lock()
 ws_connected     = False
 last_analysis_time = 0
+
+# Journal / adaptive learning state
+journal_stats    = {}   # computed stats dict (refreshed periodically)
+adaptive_weights = {}   # feature → weight multiplier (1.0 = neutral)
+last_stats_time  = 0
+STATS_INTERVAL   = 300  # recompute stats every 5 min
 
 for sym in ALL_SUBSCRIBE + CANDLE_EQUITY:
     market_data[sym] = MarketData(sym)
@@ -231,6 +243,431 @@ def aggregate_news_sentiment(news_items: list) -> tuple[int, str]:
     if total >= 3:   return total, "BULLISH"
     elif total <= -3: return total, "BEARISH"
     else:             return total, "NEUTRAL"
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# TRADE JOURNAL — SQLite database, signal tracking, stats, adaptive learning
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def db_connect():
+    conn = sqlite3.connect(DB_PATH, check_same_thread=False)
+    conn.row_factory = sqlite3.Row
+    return conn
+
+def db_init():
+    """Create tables if they don't exist."""
+    with db_connect() as conn:
+        conn.executescript("""
+        CREATE TABLE IF NOT EXISTS signals (
+            id              INTEGER PRIMARY KEY AUTOINCREMENT,
+            symbol          TEXT    NOT NULL,
+            quality         TEXT    NOT NULL,
+            direction       TEXT    NOT NULL,
+            entry_price     REAL    NOT NULL,
+            entry_low       REAL    NOT NULL,
+            entry_high      REAL    NOT NULL,
+            sl              REAL    NOT NULL,
+            tp1             REAL    NOT NULL,
+            tp2             REAL    NOT NULL,
+            tp3             REAL    NOT NULL,
+            rr_target       REAL    NOT NULL,
+            score           INTEGER NOT NULL,
+            news_sentiment  TEXT    DEFAULT 'NEUTRAL',
+            cot_bias        TEXT    DEFAULT '',
+            cot_pct_rank    REAL    DEFAULT 50,
+            -- pattern flags (1=present, 0=absent)
+            f_ema_aligned   INTEGER DEFAULT 0,
+            f_rsi_extreme   INTEGER DEFAULT 0,
+            f_macd_cross    INTEGER DEFAULT 0,
+            f_vwap_side     INTEGER DEFAULT 0,
+            f_liq_sweep     INTEGER DEFAULT 0,
+            f_order_block   INTEGER DEFAULT 0,
+            f_fvg           INTEGER DEFAULT 0,
+            f_struct        INTEGER DEFAULT 0,
+            f_vol_spike     INTEGER DEFAULT 0,
+            f_cot_signal    INTEGER DEFAULT 0,
+            f_news_cat      INTEGER DEFAULT 0,
+            -- outcome
+            status          TEXT    DEFAULT 'OPEN',
+            outcome_price   REAL,
+            outcome_at      TEXT,
+            actual_rr       REAL,
+            max_price       REAL,   -- peak favourable excursion
+            created_at      TEXT    NOT NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS score_weights (
+            feature         TEXT    PRIMARY KEY,
+            base_weight     REAL    NOT NULL DEFAULT 1.0,
+            learned_mult    REAL    NOT NULL DEFAULT 1.0,
+            win_rate        REAL,
+            sample_count    INTEGER DEFAULT 0,
+            updated_at      TEXT
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_signals_status  ON signals(status);
+        CREATE INDEX IF NOT EXISTS idx_signals_symbol  ON signals(symbol);
+        CREATE INDEX IF NOT EXISTS idx_signals_created ON signals(created_at);
+        """)
+        # Seed default weights for all features
+        features = [
+            "f_ema_aligned","f_rsi_extreme","f_macd_cross","f_vwap_side",
+            "f_liq_sweep","f_order_block","f_fvg","f_struct",
+            "f_vol_spike","f_cot_signal","f_news_cat",
+        ]
+        for f in features:
+            conn.execute("""
+                INSERT OR IGNORE INTO score_weights(feature, base_weight, learned_mult)
+                VALUES (?, 1.0, 1.0)
+            """, (f,))
+        conn.commit()
+
+db_init()   # run on import
+
+# ── signal logging ────────────────────────────────────────────────────────────
+_last_logged: dict[str, float] = {}   # symbol+dir → timestamp
+
+def extract_flags(tech_reasons: list, cot_snap: dict) -> dict:
+    """Convert reason strings to binary feature flags for the DB."""
+    joined = " ".join(tech_reasons).lower()
+    return {
+        "f_ema_aligned":  1 if "ema" in joined and ("stack" in joined or "aligned" in joined) else 0,
+        "f_rsi_extreme":  1 if "oversold" in joined or "overbought" in joined else 0,
+        "f_macd_cross":   1 if "macd" in joined and ("crossover" in joined or "histogram" in joined) else 0,
+        "f_vwap_side":    1 if "vwap" in joined else 0,
+        "f_liq_sweep":    1 if "sweep" in joined or "stop hunt" in joined else 0,
+        "f_order_block":  1 if "order block" in joined else 0,
+        "f_fvg":          1 if "fvg" in joined or "fair value" in joined else 0,
+        "f_struct":       1 if "higher high" in joined or "lower low" in joined else 0,
+        "f_vol_spike":    1 if "volume spike" in joined else 0,
+        "f_cot_signal":   1 if cot_snap and cot_snap.get("cot_score",0) != 0 else 0,
+        "f_news_cat":     0,  # filled in from news_sentiment
+    }
+
+def log_signal(setup: dict):
+    """Insert a new signal into the journal. Deduplicates by symbol+direction."""
+    key = f"{setup['symbol']}_{setup['direction']}"
+    now = time.time()
+    if now - _last_logged.get(key, 0) < SIGNAL_DEDUP_SECS:
+        return   # too soon — same signal still potentially open
+    _last_logged[key] = now
+
+    cot_snap = setup.get("cot") or {}
+    flags    = extract_flags(setup.get("tech_reasons",[]), cot_snap)
+    flags["f_news_cat"] = 1 if setup.get("news_sentiment") in ("BULLISH","BEARISH") else 0
+
+    el, eh = setup["entry"]
+    with db_connect() as conn:
+        conn.execute("""
+            INSERT INTO signals (
+                symbol, quality, direction,
+                entry_price, entry_low, entry_high,
+                sl, tp1, tp2, tp3, rr_target, score,
+                news_sentiment, cot_bias, cot_pct_rank,
+                f_ema_aligned, f_rsi_extreme, f_macd_cross, f_vwap_side,
+                f_liq_sweep, f_order_block, f_fvg, f_struct,
+                f_vol_spike, f_cot_signal, f_news_cat,
+                status, created_at
+            ) VALUES (
+                ?,?,?,  ?,?,?,  ?,?,?,?,?,?,
+                ?,?,?,
+                ?,?,?,?,  ?,?,?,?,  ?,?,?,
+                'OPEN', ?
+            )
+        """, (
+            setup["symbol"], setup["quality"], setup["direction"],
+            setup["price"], el, eh,
+            setup["sl"], setup["tp1"], setup["tp2"], setup["tp3"],
+            setup["rr"], setup["score"],
+            setup.get("news_sentiment","NEUTRAL"),
+            cot_snap.get("bias",""), cot_snap.get("pct_rank",50),
+            flags["f_ema_aligned"], flags["f_rsi_extreme"], flags["f_macd_cross"], flags["f_vwap_side"],
+            flags["f_liq_sweep"],   flags["f_order_block"], flags["f_fvg"],        flags["f_struct"],
+            flags["f_vol_spike"],   flags["f_cot_signal"],  flags["f_news_cat"],
+            datetime.utcnow().isoformat(timespec="seconds"),
+        ))
+        conn.commit()
+
+# ── signal outcome monitor ────────────────────────────────────────────────────
+def monitor_open_signals():
+    """
+    Background thread: every 60s checks all OPEN signals against live prices.
+    Updates status to TP1/TP2/TP3/SL/EXPIRED and records actual R:R.
+    """
+    while True:
+        try:
+            _check_signals()
+        except Exception:
+            pass
+        time.sleep(60)
+
+def _check_signals():
+    with db_connect() as conn:
+        rows = conn.execute(
+            "SELECT * FROM signals WHERE status='OPEN'"
+        ).fetchall()
+        now_str = datetime.utcnow().isoformat(timespec="seconds")
+
+        for row in rows:
+            sym    = row["symbol"]
+            dirn   = row["direction"]
+            ep     = row["entry_price"]
+            sl     = row["sl"]
+            tp1    = row["tp1"]
+            tp2    = row["tp2"]
+            tp3    = row["tp3"]
+            rr_t   = row["rr_target"]
+            created = row["created_at"]
+
+            # Get current price
+            with lock:
+                md = market_data.get(sym)
+                cur = md.price if md else None
+
+            if cur is None:
+                continue
+
+            risk   = abs(ep - sl)
+            if risk == 0:
+                continue
+
+            # Update max favourable excursion
+            if dirn == "LONG":
+                mfe = cur if (row["max_price"] is None or cur > row["max_price"]) else row["max_price"]
+            else:
+                mfe = cur if (row["max_price"] is None or cur < row["max_price"]) else row["max_price"]
+
+            conn.execute("UPDATE signals SET max_price=? WHERE id=?", (mfe, row["id"]))
+
+            # Check outcome
+            new_status   = None
+            outcome_price = cur
+            actual_rr    = None
+
+            if dirn == "LONG":
+                if cur <= sl:
+                    new_status = "SL"
+                    actual_rr  = round(-1.0, 2)
+                elif cur >= tp3:
+                    new_status = "TP3"
+                    actual_rr  = round(rr_t, 2)
+                elif cur >= tp2:
+                    new_status = "TP2"
+                    actual_rr  = round(rr_t * 0.6, 2)
+                elif cur >= tp1:
+                    new_status = "TP1"
+                    actual_rr  = round(rr_t * 0.3, 2)
+            else:  # SHORT
+                if cur >= sl:
+                    new_status = "SL"
+                    actual_rr  = round(-1.0, 2)
+                elif cur <= tp3:
+                    new_status = "TP3"
+                    actual_rr  = round(rr_t, 2)
+                elif cur <= tp2:
+                    new_status = "TP2"
+                    actual_rr  = round(rr_t * 0.6, 2)
+                elif cur <= tp1:
+                    new_status = "TP1"
+                    actual_rr  = round(rr_t * 0.3, 2)
+
+            # Expire signals older than 7 days
+            try:
+                age_days = (datetime.utcnow() - datetime.fromisoformat(created)).days
+                if age_days >= 7 and new_status is None:
+                    new_status    = "EXPIRED"
+                    outcome_price = cur
+                    actual_rr     = round((cur - ep) / risk, 2) if dirn == "LONG" else round((ep - cur) / risk, 2)
+            except Exception:
+                pass
+
+            if new_status:
+                conn.execute("""
+                    UPDATE signals
+                    SET status=?, outcome_price=?, outcome_at=?, actual_rr=?
+                    WHERE id=?
+                """, (new_status, outcome_price, now_str, actual_rr, row["id"]))
+
+        conn.commit()
+
+# ── statistics engine ─────────────────────────────────────────────────────────
+STAT_FEATURES = [
+    ("f_ema_aligned", "EMA Aligned"),
+    ("f_rsi_extreme", "RSI Extreme"),
+    ("f_macd_cross",  "MACD Cross"),
+    ("f_vwap_side",   "VWAP Side"),
+    ("f_liq_sweep",   "Liq Sweep"),
+    ("f_order_block", "Order Block"),
+    ("f_fvg",         "FVG"),
+    ("f_struct",      "Structure"),
+    ("f_vol_spike",   "Vol Spike"),
+    ("f_cot_signal",  "COT Signal"),
+    ("f_news_cat",    "News Cat"),
+]
+
+def compute_stats() -> dict:
+    """
+    Compute comprehensive journal statistics from closed trades.
+    Returns a stats dict used for display and adaptive learning.
+    """
+    with db_connect() as conn:
+        closed = conn.execute("""
+            SELECT * FROM signals
+            WHERE status IN ('TP1','TP2','TP3','SL','EXPIRED')
+        """).fetchall()
+
+        if not closed:
+            return {"total": 0}
+
+        total    = len(closed)
+        wins     = [r for r in closed if r["status"] in ("TP1","TP2","TP3")]
+        losses   = [r for r in closed if r["status"] == "SL"]
+        expired  = [r for r in closed if r["status"] == "EXPIRED"]
+        tp3_hits = [r for r in closed if r["status"] == "TP3"]
+        tp2_hits = [r for r in closed if r["status"] == "TP2"]
+        tp1_hits = [r for r in closed if r["status"] == "TP1"]
+
+        win_rate = len(wins) / total * 100 if total else 0
+
+        rr_vals  = [r["actual_rr"] for r in closed if r["actual_rr"] is not None]
+        avg_rr   = sum(rr_vals) / len(rr_vals) if rr_vals else 0
+        best_rr  = max(rr_vals) if rr_vals else 0
+        worst_rr = min(rr_vals) if rr_vals else 0
+
+        # Profit factor
+        gross_win  = sum(r for r in rr_vals if r > 0)
+        gross_loss = abs(sum(r for r in rr_vals if r < 0))
+        pf         = round(gross_win / gross_loss, 2) if gross_loss else 999.0
+
+        # By quality
+        by_quality = {}
+        for q in ("A+","A","B+"):
+            qrows = [r for r in closed if r["quality"]==q]
+            qwins = [r for r in qrows if r["status"] in ("TP1","TP2","TP3")]
+            by_quality[q] = {
+                "total": len(qrows),
+                "wins":  len(qwins),
+                "wr":    round(len(qwins)/len(qrows)*100,1) if qrows else 0,
+                "avg_rr": round(sum(r["actual_rr"] for r in qrows if r["actual_rr"])/len(qrows),2) if qrows else 0,
+            }
+
+        # By direction
+        longs  = [r for r in closed if r["direction"]=="LONG"]
+        shorts = [r for r in closed if r["direction"]=="SHORT"]
+        lw     = [r for r in longs  if r["status"] in ("TP1","TP2","TP3")]
+        sw     = [r for r in shorts if r["status"] in ("TP1","TP2","TP3")]
+
+        # By symbol (top 5 by trade count)
+        sym_counts: dict = {}
+        for r in closed:
+            s = r["symbol"].replace("BINANCE:","").replace("OANDA:","").replace("_","/")
+            if s not in sym_counts: sym_counts[s] = {"t":0,"w":0,"rr":[]}
+            sym_counts[s]["t"] += 1
+            if r["status"] in ("TP1","TP2","TP3"): sym_counts[s]["w"] += 1
+            if r["actual_rr"]: sym_counts[s]["rr"].append(r["actual_rr"])
+        top_syms = sorted(sym_counts.items(), key=lambda x: x[1]["t"], reverse=True)[:8]
+
+        # Per-feature win rates
+        feature_stats = {}
+        for col, label in STAT_FEATURES:
+            f_rows = [r for r in closed if r[col]==1]
+            f_wins = [r for r in f_rows if r["status"] in ("TP1","TP2","TP3")]
+            wr     = len(f_wins)/len(f_rows)*100 if f_rows else None
+            feature_stats[col] = {
+                "label":   label,
+                "total":   len(f_rows),
+                "wins":    len(f_wins),
+                "wr":      round(wr,1) if wr is not None else None,
+            }
+
+        # Recent 10 signals
+        recent = conn.execute("""
+            SELECT symbol, quality, direction, status, actual_rr, rr_target,
+                   entry_price, created_at
+            FROM signals ORDER BY id DESC LIMIT 10
+        """).fetchall()
+
+        return {
+            "total":      total,
+            "wins":       len(wins),
+            "losses":     len(losses),
+            "expired":    len(expired),
+            "tp3_hits":   len(tp3_hits),
+            "tp2_hits":   len(tp2_hits),
+            "tp1_hits":   len(tp1_hits),
+            "win_rate":   round(win_rate, 1),
+            "avg_rr":     round(avg_rr, 2),
+            "best_rr":    round(best_rr, 2),
+            "worst_rr":   round(worst_rr, 2),
+            "profit_factor": pf,
+            "by_quality": by_quality,
+            "by_dir": {
+                "LONG":  {"total":len(longs),  "wins":len(lw),  "wr":round(len(lw)/len(longs)*100,1)  if longs  else 0},
+                "SHORT": {"total":len(shorts), "wins":len(sw),  "wr":round(len(sw)/len(shorts)*100,1) if shorts else 0},
+            },
+            "top_symbols":   top_syms,
+            "feature_stats": feature_stats,
+            "recent":        [dict(r) for r in recent],
+        }
+
+# ── adaptive weight engine ────────────────────────────────────────────────────
+def update_adaptive_weights(stats: dict):
+    """
+    Recalculate learned weight multipliers from feature win rates.
+    Features with WR > 60% → multiplier increases (max 1.5x)
+    Features with WR < 40% → multiplier decreases (min 0.5x)
+    """
+    global adaptive_weights
+    if stats.get("total", 0) < ADAPTIVE_MIN_TRADES:
+        return  # not enough data yet
+
+    feature_stats = stats.get("feature_stats", {})
+    new_weights   = {}
+    now_str       = datetime.utcnow().isoformat(timespec="seconds")
+
+    with db_connect() as conn:
+        for col, fdata in feature_stats.items():
+            if fdata["total"] < 10:
+                new_weights[col] = 1.0
+                continue
+            wr = fdata["wr"] or 50.0
+            # Sigmoid-like scaling: WR 70% → ~1.4x, WR 30% → ~0.6x
+            mult = max(0.5, min(1.5, 0.5 + wr / 50.0))
+            new_weights[col] = round(mult, 3)
+            conn.execute("""
+                UPDATE score_weights
+                SET learned_mult=?, win_rate=?, sample_count=?, updated_at=?
+                WHERE feature=?
+            """, (mult, wr, fdata["total"], now_str, col))
+        conn.commit()
+
+    adaptive_weights = new_weights
+
+def get_weight(feature: str) -> float:
+    """Return the current adaptive multiplier for a feature (default 1.0)."""
+    return adaptive_weights.get(feature, 1.0)
+
+def apply_adaptive_weights(score: int, flags: dict) -> float:
+    """Apply learned multipliers to a setup's raw score."""
+    if not adaptive_weights:
+        return float(score)
+    boost = sum(
+        (get_weight(col) - 1.0)   # delta from neutral
+        for col, val in flags.items() if val == 1
+    )
+    return round(score + boost, 2)
+
+# ── stats refresh thread ──────────────────────────────────────────────────────
+def stats_refresh_loop():
+    global journal_stats, last_stats_time
+    while True:
+        try:
+            stats = compute_stats()
+            update_adaptive_weights(stats)
+            with lock:
+                journal_stats = stats
+        except Exception:
+            pass
+        time.sleep(STATS_INTERVAL)
 
 # ── COT engine ───────────────────────────────────────────────────────────────
 def fetch_cot_report(market_name: str, num_weeks: int = 12) -> list[dict]:
@@ -993,6 +1430,11 @@ def run_analysis():
             )
             if result and result["quality"] in ("A+","A","B+"):
                 results.append(result)
+                # Auto-log to journal (dedup inside log_signal)
+                try:
+                    log_signal(result)
+                except Exception:
+                    pass
         except Exception:
             pass
 
@@ -1379,6 +1821,176 @@ def build_news_wall():
     return Panel(t, title="[bold]● LIVE NEWS & SENTIMENT WALL[/bold]",
                  border_style="bright_blue", box=box.ROUNDED)
 
+def outcome_color(status: str) -> str:
+    c = {"TP3":"bold bright_green","TP2":"bright_green","TP1":"green",
+         "SL":"bold bright_red","OPEN":"bright_yellow","EXPIRED":"dim"}
+    s = c.get(status,"white")
+    return f"[{s}]{status}[/{s}]"
+
+def build_journal_panel():
+    """Recent signals table — last 12 entries."""
+    with lock:
+        stats = dict(journal_stats)
+
+    recent = stats.get("recent", [])
+
+    # Also pull fresh OPEN signals count from DB
+    try:
+        with db_connect() as conn:
+            open_count = conn.execute(
+                "SELECT COUNT(*) FROM signals WHERE status='OPEN'"
+            ).fetchone()[0]
+    except Exception:
+        open_count = 0
+
+    t = Table(
+        title=f"[bold bright_cyan]● TRADE JOURNAL  [dim](Open: {open_count})[/dim][/bold bright_cyan]",
+        box=box.SIMPLE_HEAVY, border_style="bright_cyan",
+        header_style="bold bright_cyan", show_lines=True,
+    )
+    t.add_column("TIME",    width=8,  style="dim")
+    t.add_column("SYMBOL",  width=13, style="bold white")
+    t.add_column("GRADE",   width=5,  justify="center")
+    t.add_column("DIR",     width=7,  justify="center")
+    t.add_column("ENTRY",   width=12, justify="right", style="dim")
+    t.add_column("STATUS",  width=8,  justify="center")
+    t.add_column("ACT R:R", width=9,  justify="right")
+    t.add_column("TGT R:R", width=9,  justify="right", style="dim")
+
+    if not recent:
+        t.add_row("—","—","—","—","—","[dim]No trades yet[/dim]","—","—")
+    else:
+        for r in recent:
+            sym    = r["symbol"].replace("BINANCE:","").replace("OANDA:","").replace("_","/")
+            status = r["status"]
+            arr    = r.get("actual_rr")
+            arr_s  = (f"[bright_green]1:{arr:.2f}[/bright_green]" if arr and arr>0
+                      else f"[bright_red]{arr:.2f}[/bright_red]"  if arr and arr<0
+                      else "[dim]—[/dim]")
+            tgt    = r.get("rr_target")
+            tgt_s  = f"1:{tgt:.2f}" if tgt else "—"
+            ts     = r.get("created_at","")[-8:-3] if r.get("created_at") else "—"
+            t.add_row(
+                ts, sym,
+                qcolor(r["quality"]),
+                dcolor(r["direction"]),
+                fp(r.get("entry_price")),
+                outcome_color(status),
+                arr_s, tgt_s,
+            )
+
+    return Panel(t, border_style="bright_cyan", box=box.ROUNDED)
+
+def build_stats_panel():
+    """Performance stats, feature leaderboard, adaptive weights, top symbols."""
+    with lock:
+        stats = dict(journal_stats)
+    total = stats.get("total", 0)
+
+    if total == 0:
+        return Panel(
+            Align.center(
+                "[dim]No closed trades yet.\n"
+                "Stats appear after signals hit TP or SL.\n"
+                f"DB: {DB_PATH}[/dim]"
+            ),
+            title="[bold bright_cyan]● PERFORMANCE STATS & ADAPTIVE LEARNING[/bold bright_cyan]",
+            border_style="bright_cyan", box=box.ROUNDED,
+        )
+
+    wr    = stats.get("win_rate", 0)
+    avg_r = stats.get("avg_rr", 0)
+    pf    = stats.get("profit_factor", 0)
+    bq    = stats.get("by_quality", {})
+    bdir  = stats.get("by_dir", {})
+    fstas = stats.get("feature_stats", {})
+    top_s = stats.get("top_symbols", [])
+    adap  = len(adaptive_weights) > 0 and total >= ADAPTIVE_MIN_TRADES
+
+    wr_c  = "bright_green" if wr>=55 else "bright_red" if wr<45 else "yellow"
+
+    lines = []
+
+    # ── KPIs ──────────────────────────────────────────────────────────────────
+    lines.append(f"[bold]OVERALL[/bold]  [dim]{total} closed[/dim]  "
+                 f"[{wr_c}]{wr:.1f}% WR[/{wr_c}]  "
+                 f"[bold]PF {pf:.2f}[/bold]  "
+                 f"Avg R:R [bold]{avg_r:+.2f}[/bold]  "
+                 f"Best [bright_green]{stats.get('best_rr',0):+.2f}[/bright_green]  "
+                 f"Worst [bright_red]{stats.get('worst_rr',0):+.2f}[/bright_red]")
+    lines.append(
+        f"TP3 [bright_green]{stats.get('tp3_hits',0)}[/bright_green]  "
+        f"TP2 [green]{stats.get('tp2_hits',0)}[/green]  "
+        f"TP1 {stats.get('tp1_hits',0)}  "
+        f"SL [bright_red]{stats.get('losses',0)}[/bright_red]  "
+        f"Expired [dim]{stats.get('expired',0)}[/dim]  "
+        f"[dim]│[/dim]  Adaptive: "
+        + ("[bright_green]ACTIVE[/bright_green]" if adap
+           else f"[dim]pending {max(0,ADAPTIVE_MIN_TRADES-total)} trades[/dim]")
+    )
+
+    # ── Quality + Direction side by side ──────────────────────────────────────
+    lines.append("")
+    row_q = "[bold dim]BY GRADE:[/bold dim]  "
+    for q in ("A+","A","B+"):
+        d = bq.get(q, {"total":0,"wins":0,"wr":0,"avg_rr":0})
+        if d["total"]:
+            wrc = "bright_green" if d["wr"]>=55 else "bright_red" if d["wr"]<45 else "yellow"
+            row_q += f"{qcolor(q)} [{wrc}]{d['wr']:.0f}%[/{wrc}] {d['wins']}/{d['total']} (R:{d['avg_rr']:+.2f})   "
+    lines.append(row_q)
+
+    row_d = "[bold dim]BY DIR  :[/bold dim]  "
+    for dirn in ("LONG","SHORT"):
+        d = bdir.get(dirn, {"total":0,"wins":0,"wr":0})
+        if d["total"]:
+            wrc = "bright_green" if d["wr"]>=55 else "bright_red" if d["wr"]<45 else "yellow"
+            row_d += f"{dcolor(dirn)} [{wrc}]{d['wr']:.0f}%[/{wrc}] {d['wins']}/{d['total']}   "
+    lines.append(row_d)
+
+    # ── Feature leaderboard ────────────────────────────────────────────────────
+    lines.append("")
+    lines.append("[bold dim]FEATURE LEADERBOARD  (win rate → adaptive weight multiplier)[/bold dim]")
+    sorted_feats = sorted(
+        fstas.items(),
+        key=lambda x: (x[1]["wr"] or 0) if x[1]["total"] >= 3 else -1,
+        reverse=True,
+    )
+    feat_row = ""
+    for i, (col, fd) in enumerate(sorted_feats):
+        n   = fd["total"]
+        wr_ = fd["wr"]
+        wt  = adaptive_weights.get(col, 1.0)
+        if n < 3:
+            bar = "[dim]—[/dim]"
+            wrc = "dim"
+        else:
+            wrc = "bright_green" if (wr_ or 0)>=60 else "bright_red" if (wr_ or 0)<40 else "yellow"
+            bar = f"[{wrc}]{wr_:.0f}%[/{wrc}]"
+        wt_s = (f"[bright_green]↑×{wt:.2f}[/bright_green]" if wt > 1.05
+                else f"[bright_red]↓×{wt:.2f}[/bright_red]" if wt < 0.95
+                else f"[dim]×{wt:.2f}[/dim]")
+        lines.append(f"  [dim]{fd['label']:<14}[/dim] {bar} [dim]({fd['wins']}/{n})[/dim]  {wt_s}")
+
+    # ── Top symbols ────────────────────────────────────────────────────────────
+    if top_s:
+        lines.append("")
+        lines.append("[bold dim]TOP SYMBOLS[/bold dim]")
+        sym_row = ""
+        for sym, d in top_s[:6]:
+            wr_s = d["w"]/d["t"]*100 if d["t"] else 0
+            wrc  = "bright_green" if wr_s>=55 else "bright_red" if wr_s<45 else "yellow"
+            avg_ = round(sum(d["rr"])/len(d["rr"]),2) if d["rr"] else 0
+            sym_row += (f"[white]{sym}[/white] [{wrc}]{wr_s:.0f}%[/{wrc}] "
+                        f"[dim]{d['w']}/{d['t']} avg{avg_:+.2f}[/dim]   ")
+        lines.append("  " + sym_row)
+
+    return Panel(
+        "\n".join(lines),
+        title="[bold bright_cyan]● PERFORMANCE STATS & ADAPTIVE LEARNING[/bold bright_cyan]",
+        border_style="bright_cyan", box=box.ROUNDED,
+        subtitle=f"[dim]{DB_PATH}[/dim]",
+    )
+
 def build_risk_panel():
     with lock:
         n_sym    = sum(1 for md in market_data.values() if md.price)
@@ -1409,8 +2021,10 @@ def render():
         Layout(name="markets",  size=20),
         Layout(name="setups",   size=17),
         Layout(name="details",  size=30),
-        Layout(name="cot",      size=16),
-        Layout(name="bottom",   size=16),
+        Layout(name="cot_row",  size=16),
+        Layout(name="journal",  size=15),
+        Layout(name="stats",    size=18),
+        Layout(name="bottom",   size=14),
     )
 
     layout["header"].update(build_header())
@@ -1432,7 +2046,9 @@ def render():
     else:
         layout["details"].update(detail_panels[0])
 
-    layout["cot"].update(build_cot_panel())
+    layout["cot_row"].update(build_cot_panel())
+    layout["journal"].update(build_journal_panel())
+    layout["stats"].update(build_stats_panel())
 
     layout["bottom"].split_row(
         Layout(build_news_wall(), ratio=3),
@@ -1447,9 +2063,11 @@ def main():
         "[dim]WebSocket · REST candles · News sentiment engine · ICT/SMC detector[/dim]",
         border_style="bright_yellow"
     ))
-    threading.Thread(target=start_websocket,  daemon=True).start()
-    threading.Thread(target=background_loader, daemon=True).start()
-    threading.Thread(target=cot_loader,        daemon=True).start()
+    threading.Thread(target=start_websocket,    daemon=True).start()
+    threading.Thread(target=background_loader,  daemon=True).start()
+    threading.Thread(target=cot_loader,         daemon=True).start()
+    threading.Thread(target=monitor_open_signals, daemon=True).start()
+    threading.Thread(target=stats_refresh_loop,   daemon=True).start()
     time.sleep(4)
     try:
         with Live(render(), refresh_per_second=1/REFRESH_RATE,
