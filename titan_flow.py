@@ -1160,29 +1160,53 @@ def panel_risk():
         border_style="bright_red",box=box.ROUNDED,title="[bold bright_red]RİSK[/bold bright_red]")
 
 # ═══════════════════════════════════════════════════════════════
-# RENDER
+# PAGE SYSTEM
 # ═══════════════════════════════════════════════════════════════
+current_page = 1
+PAGE_NAMES = {1:"PİYASA",2:"SETUPLAR",3:"DETAY",4:"COT",5:"JOURNAL",6:"HABERLER"}
+
+def nav_bar():
+    parts=[]
+    for k,v in PAGE_NAMES.items():
+        if k==current_page:
+            parts.append(f"[bold bright_yellow on grey23] {k}:{v} [/bold bright_yellow on grey23]")
+        else:
+            parts.append(f"[dim] {k}:{v} [/dim]")
+    return "  ".join(parts)+"   [dim]( tuş 1-6 ile geç · Ctrl+C çıkış )[/dim]"
+
+def key_listener():
+    global current_page
+    try:
+        import msvcrt
+        while True:
+            if msvcrt.kbhit():
+                ch=msvcrt.getch()
+                if ch in (b'1',b'2',b'3',b'4',b'5',b'6'):
+                    current_page=int(ch.decode())
+            time.sleep(0.05)
+    except: pass
+
 def render():
     run_analysis()
-    lo=Layout()
-    lo.split_column(
-        Layout(name="h",  size=3),
-        Layout(name="m",  size=22),
-        Layout(name="s",  size=17),
-        Layout(name="d",  size=28),
-        Layout(name="cot",size=15),
-        Layout(name="j",  size=16),
-        Layout(name="st", size=18),
-        Layout(name="bot",size=14),
-    )
-    lo["h"].update(panel_header())
-    lo["m"].update(panel_market())
-    lo["s"].update(panel_setups())
-    lo["d"].update(panel_details())
-    lo["cot"].update(panel_cot())
-    lo["j"].update(panel_journal())
-    lo["st"].update(panel_stats())
-    lo["bot"].split_row(Layout(panel_news(),ratio=3),Layout(panel_risk(),ratio=1))
+    nav=Panel(nav_bar(),box=box.SIMPLE,border_style="dim",height=3)
+    hdr=panel_header()
+
+    if current_page==1:
+        lo=Layout(); lo.split_column(Layout(hdr,size=3),Layout(nav,size=3),Layout(panel_market()))
+    elif current_page==2:
+        lo=Layout(); lo.split_column(Layout(hdr,size=3),Layout(nav,size=3),Layout(panel_setups()))
+    elif current_page==3:
+        lo=Layout(); lo.split_column(Layout(hdr,size=3),Layout(nav,size=3),Layout(panel_details()))
+    elif current_page==4:
+        lo=Layout(); lo.split_column(Layout(hdr,size=3),Layout(nav,size=3),Layout(panel_cot()))
+    elif current_page==5:
+        lo=Layout()
+        body=Layout(); body.split_row(Layout(panel_journal()),Layout(panel_stats()))
+        lo.split_column(Layout(hdr,size=3),Layout(nav,size=3),body)
+    else:
+        lo=Layout()
+        body=Layout(); body.split_row(Layout(panel_news(),ratio=3),Layout(panel_risk(),ratio=1))
+        lo.split_column(Layout(hdr,size=3),Layout(nav,size=3),body)
     return lo
 
 # ═══════════════════════════════════════════════════════════════
@@ -1193,11 +1217,12 @@ def main():
         "[bold bright_yellow]TITAN FLOW[/bold bright_yellow] — Başlatılıyor...\n"
         "[dim]WebSocket (crypto) · yfinance (forex/metals/oil) · Finnhub (hisseler) · COT · Haberler · Journal[/dim]",
         border_style="bright_yellow"))
-    threading.Thread(target=ws_loop,       daemon=True).start()
-    threading.Thread(target=background_loop,daemon=True).start()
-    threading.Thread(target=cot_loop,       daemon=True).start()
-    threading.Thread(target=monitor_loop,   daemon=True).start()
-    threading.Thread(target=stats_loop,     daemon=True).start()
+    threading.Thread(target=ws_loop,        daemon=True).start()
+    threading.Thread(target=background_loop, daemon=True).start()
+    threading.Thread(target=cot_loop,        daemon=True).start()
+    threading.Thread(target=monitor_loop,    daemon=True).start()
+    threading.Thread(target=stats_loop,      daemon=True).start()
+    threading.Thread(target=key_listener,    daemon=True).start()
     time.sleep(5)
     try:
         with Live(render(),refresh_per_second=1/REFRESH_SEC,screen=True,console=console) as live:
