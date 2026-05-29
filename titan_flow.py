@@ -46,13 +46,30 @@ API_KEY  = "d8ce4jpr01qidic7ibt0d8ce4jpr01qidic7ibtg"
 BASE_URL = "https://finnhub.io/api/v1"
 WS_URL   = f"wss://ws.finnhub.io?token={API_KEY}"
 
-CRYPTO_SYMBOLS  = ["BINANCE:BTCUSDT", "BINANCE:ETHUSDT", "BINANCE:SOLUSDT", "BINANCE:BNBUSDT"]
-FOREX_SYMBOLS   = ["OANDA:EUR_USD", "OANDA:GBP_USD", "OANDA:USD_JPY", "OANDA:XAU_USD"]
-EQUITY_SYMBOLS  = ["NVDA", "AAPL", "SPY", "QQQ"]
+CRYPTO_SYMBOLS  = [
+    "BINANCE:BTCUSDT", "BINANCE:ETHUSDT", "BINANCE:SOLUSDT",
+    "BINANCE:BNBUSDT", "BINANCE:XRPUSDT", "BINANCE:ADAUSDT",
+]
+
+FOREX_SYMBOLS   = [
+    # Majors
+    "OANDA:EUR_USD", "OANDA:GBP_USD", "OANDA:USD_JPY", "OANDA:USD_CHF",
+    "OANDA:AUD_USD", "OANDA:USD_CAD", "OANDA:NZD_USD",
+    # Crosses
+    "OANDA:EUR_GBP", "OANDA:EUR_JPY", "OANDA:GBP_JPY",
+    "OANDA:EUR_CHF", "OANDA:AUD_JPY", "OANDA:GBP_CHF",
+    # Metals / Commodities (via OANDA)
+    "OANDA:XAU_USD",   # Gold
+    "OANDA:XAG_USD",   # Silver
+    "OANDA:BCO_USD",   # Brent Crude Oil
+    "OANDA:WTICO_USD", # WTI Crude Oil
+]
+
+EQUITY_SYMBOLS  = ["NVDA", "AAPL", "SPY", "QQQ", "MSFT", "TSLA", "AMD", "META"]
 
 ALL_SUBSCRIBE   = CRYPTO_SYMBOLS + FOREX_SYMBOLS
 CANDLE_EQUITY   = EQUITY_SYMBOLS
-CANDLE_CRYPTO   = ["BINANCE:BTCUSDT", "BINANCE:ETHUSDT"]
+CANDLE_CRYPTO   = ["BINANCE:BTCUSDT", "BINANCE:ETHUSDT", "BINANCE:SOLUSDT", "BINANCE:XRPUSDT"]
 
 CANDLE_HISTORY  = 200   # bars for indicator calculation
 SHORT_HISTORY   = 50    # bars for short-term signals
@@ -729,7 +746,18 @@ def build_market_table():
 
     groups = [
         ("── CRYPTO ──", CRYPTO_SYMBOLS),
-        ("── FOREX / METALS ──", FOREX_SYMBOLS),
+        ("── FOREX MAJORS ──", [
+            "OANDA:EUR_USD","OANDA:GBP_USD","OANDA:USD_JPY","OANDA:USD_CHF",
+            "OANDA:AUD_USD","OANDA:USD_CAD","OANDA:NZD_USD",
+        ]),
+        ("── FOREX CROSSES ──", [
+            "OANDA:EUR_GBP","OANDA:EUR_JPY","OANDA:GBP_JPY",
+            "OANDA:EUR_CHF","OANDA:AUD_JPY","OANDA:GBP_CHF",
+        ]),
+        ("── METALS & OIL ──", [
+            "OANDA:XAU_USD","OANDA:XAG_USD",
+            "OANDA:BCO_USD","OANDA:WTICO_USD",
+        ]),
         ("── EQUITIES ──", EQUITY_SYMBOLS),
     ]
     with lock:
