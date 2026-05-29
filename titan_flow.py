@@ -64,6 +64,31 @@ ANALYSIS_INTERVAL = 30
 
 console = Console()
 
+# ── COT (Commitment of Traders) config ───────────────────────────────────────
+# CFTC Socrata public API — no key required
+CFTC_API = "https://publicreporting.cftc.gov/resource/jun7-fc8e.json"
+
+# Maps our symbols to CFTC market/contract names (legacy COT report)
+COT_MARKET_MAP = {
+    "BINANCE:BTCUSDT":  "BITCOIN - CHICAGO MERCANTILE EXCHANGE",
+    "OANDA:EUR_USD":    "EURO FX - CHICAGO MERCANTILE EXCHANGE",
+    "OANDA:GBP_USD":    "BRITISH POUND - CHICAGO MERCANTILE EXCHANGE",
+    "OANDA:USD_JPY":    "JAPANESE YEN - CHICAGO MERCANTILE EXCHANGE",
+    "OANDA:USD_CHF":    "SWISS FRANC - CHICAGO MERCANTILE EXCHANGE",
+    "OANDA:AUD_USD":    "AUSTRALIAN DOLLAR - CHICAGO MERCANTILE EXCHANGE",
+    "OANDA:USD_CAD":    "CANADIAN DOLLAR - CHICAGO MERCANTILE EXCHANGE",
+    "OANDA:NZD_USD":    "NEW ZEALAND DOLLAR - CHICAGO MERCANTILE EXCHANGE",
+    "OANDA:XAU_USD":    "GOLD - COMMODITY EXCHANGE INC.",
+    "OANDA:XAG_USD":    "SILVER - COMMODITY EXCHANGE INC.",
+    "OANDA:WTICO_USD":  "CRUDE OIL, LIGHT SWEET - NEW YORK MERCANTILE EXCHANGE",
+    "OANDA:BCO_USD":    "BRENT LAST DAY FINANCIAL - ICE FUTURES EUROPE",
+    "SPY":              "S&P 500 STOCK INDEX - CHICAGO MERCANTILE EXCHANGE",
+    "QQQ":              "NASDAQ-100 STOCK INDEX (MINI) - CHICAGO MERCANTILE EXCHANGE",
+}
+
+# Global COT cache: symbol → latest COT snapshot dict
+cot_cache: dict[str, dict] = {}
+
 # ── news sentiment keywords ───────────────────────────────────────────────────
 BULLISH_WORDS = [
     "surge","rally","soar","gain","jump","rise","breakout","bullish","upside",
@@ -206,6 +231,154 @@ def aggregate_news_sentiment(news_items: list) -> tuple[int, str]:
     if total >= 3:   return total, "BULLISH"
     elif total <= -3: return total, "BEARISH"
     else:             return total, "NEUTRAL"
+
+# ── COT engine ───────────────────────────────────────────────────────────────
+def fetch_cot_report(market_name: str, num_weeks: int = 12) -> list[dict]:
+    """
+    Fetch COT legacy report rows for a given CFTC market name.
+    Returns list of weekly rows (newest first), each with positioning data.
+    """
+    try:
+        params = {
+            "$where": f"upper(market_and_exchange_names) like upper('%{market_name.split(' - ')[0][:30]}%')",
+            "$order": "report_date_as_yyyy_mm_dd DESC",
+            "$limit": str(num_weeks),
+        }
+        r = requests.get(CFTC_API, params=params, timeout=10)
+        data = r.json()
+        if not isinstance(data, list) or not data:
+            return []
+        rows = []
+        for d in data:
+            try:
+                rows.append({
+                    "date":          d.get("report_date_as_yyyy_mm_dd","")[:10],
+                    "market":        d.get("market_and_exchange_names",""),
+                    # Large Speculators (Non-Commercial)
+                    "spec_long":     int(d.get("noncomm_positions_long_all", 0)),
+                    "spec_short":    int(d.get("noncomm_positions_short_all", 0)),
+                    # Commercial Hedgers
+                    "comm_long":     int(d.get("comm_positions_long_all", 0)),
+                    "comm_short":    int(d.get("comm_positions_short_all", 0)),
+                    # Small Speculators (Non-Reportable)
+                    "small_long":    int(d.get("nonrept_positions_long_all", 0)),
+                    "small_short":   int(d.get("nonrept_positions_short_all", 0)),
+                    # Open Interest
+                    "open_interest": int(d.get("open_interest_all", 0)),
+                    # Week-over-week changes
+                    "spec_long_chg":  int(d.get("change_in_noncomm_long_all", 0)),
+                    "spec_short_chg": int(d.get("change_in_noncomm_short_all", 0)),
+                    "comm_long_chg":  int(d.get("change_in_comm_long_all", 0)),
+                    "comm_short_chg": int(d.get("change_in_comm_short_all", 0)),
+                    "oi_chg":         int(d.get("change_in_open_interest_all", 0)),
+                })
+            except (ValueError, TypeError):
+                continue
+        return rows
+    except Exception:
+        return []
+
+def analyse_cot(rows: list[dict]) -> dict:
+    """
+    Derive institutional signals from COT rows.
+    Returns a dict with positioning stats and a bias signal.
+    """
+    if not rows:
+        return {}
+
+    latest = rows[0]
+    spec_net   = latest["spec_long"]  - latest["spec_short"]
+    comm_net   = latest["comm_long"]  - latest["comm_short"]
+    small_net  = latest["small_long"] - latest["small_short"]
+
+    # Net positioning change this week
+    spec_net_chg = latest["spec_long_chg"] - latest["spec_short_chg"]
+    comm_net_chg = latest["comm_long_chg"] - latest["comm_short_chg"]
+
+    # Historical net range for extreme detection (last 12 weeks)
+    spec_nets = [r["spec_long"]-r["spec_short"] for r in rows]
+    mn, mx = min(spec_nets), max(spec_nets)
+    rng = mx - mn if mx != mn else 1
+    pct_rank = round((spec_net - mn) / rng * 100, 1)  # 0=most bearish, 100=most bullish
+
+    # Bias
+    if pct_rank >= 75:   bias = "EXTREME LONG"
+    elif pct_rank >= 55: bias = "BULLISH"
+    elif pct_rank <= 25: bias = "EXTREME SHORT"
+    elif pct_rank <= 45: bias = "BEARISH"
+    else:                bias = "NEUTRAL"
+
+    # Contrarian signal for extreme readings
+    contrarian = None
+    if pct_rank >= 85:
+        contrarian = ("SHORT", "Specs at EXTREME LONG — contrarian SHORT signal")
+    elif pct_rank <= 15:
+        contrarian = ("LONG",  "Specs at EXTREME SHORT — contrarian LONG signal")
+
+    # Commercial vs Spec divergence (smart money vs dumb money)
+    comm_divergence = None
+    if comm_net > 0 and spec_net < 0:
+        comm_divergence = "BULLISH — Commercials net LONG while specs net SHORT (contrarian long setup)"
+    elif comm_net < 0 and spec_net > 0:
+        comm_divergence = "BEARISH — Commercials net SHORT while specs net LONG (contrarian short setup)"
+
+    # COT score contribution to setup scoring (+2/-2)
+    cot_score = 0
+    cot_reasons = []
+    if pct_rank <= 25:
+        cot_score = 2
+        cot_reasons.append(f"COT: Spec net positioning at {pct_rank:.0f}th percentile — historically bullish territory")
+    elif pct_rank >= 75:
+        cot_score = -2
+        cot_reasons.append(f"COT: Spec net positioning at {pct_rank:.0f}th percentile — historically bearish territory")
+    if spec_net_chg > 0:
+        cot_score += 1
+        cot_reasons.append(f"COT: Specs added {spec_net_chg:+,} net longs this week — momentum buying")
+    elif spec_net_chg < 0:
+        cot_score -= 1
+        cot_reasons.append(f"COT: Specs cut {spec_net_chg:+,} net longs this week — distribution signal")
+    if comm_divergence:
+        if "BULLISH" in comm_divergence: cot_score += 1
+        else: cot_score -= 1
+        cot_reasons.append(f"COT: {comm_divergence}")
+
+    return {
+        "date":           latest["date"],
+        "spec_long":      latest["spec_long"],
+        "spec_short":     latest["spec_short"],
+        "spec_net":       spec_net,
+        "spec_net_chg":   spec_net_chg,
+        "comm_long":      latest["comm_long"],
+        "comm_short":     latest["comm_short"],
+        "comm_net":       comm_net,
+        "comm_net_chg":   comm_net_chg,
+        "small_net":      small_net,
+        "open_interest":  latest["open_interest"],
+        "oi_chg":         latest["oi_chg"],
+        "pct_rank":       pct_rank,
+        "bias":           bias,
+        "contrarian":     contrarian,
+        "comm_divergence":comm_divergence,
+        "cot_score":      cot_score,
+        "cot_reasons":    cot_reasons,
+        "weeks_tracked":  len(rows),
+    }
+
+def fetch_cot_all():
+    """Fetch & analyse COT for all mapped symbols. Updates cot_cache."""
+    global cot_cache
+    new_cache = {}
+    for sym, market_name in COT_MARKET_MAP.items():
+        try:
+            rows    = fetch_cot_report(market_name, num_weeks=12)
+            analysis = analyse_cot(rows)
+            if analysis:
+                new_cache[sym] = analysis
+        except Exception:
+            pass
+        time.sleep(0.3)  # polite rate limiting
+    with lock:
+        cot_cache = new_cache
 
 def fetch_all_news():
     """Fetch general + crypto + forex news from Finnhub."""
@@ -371,7 +544,7 @@ def pivot_structure(highs, lows, n=10):
     return "RANGING"
 
 # ── setup scoring engine ──────────────────────────────────────────────────────
-def score_setup(symbol, candles, price, news_items=None):
+def score_setup(symbol, candles, price, news_items=None, cot_data=None):
     """
     Returns dict with quality, direction, entry, sl, tp1-3, rr,
     technical_reasons, news_reasons, entry_narrative.
@@ -525,17 +698,41 @@ def score_setup(symbol, candles, price, news_items=None):
         elif net_sentiment <= -2:
             rl_pts += min(abs(net_sentiment), 3)
 
+    # ── COT positioning score ─────────────────────────────────────────────────
+    cot_reasons_long  = []
+    cot_reasons_short = []
+    cot_snap          = cot_data or cot_cache.get(symbol, {})
+    if cot_snap:
+        cs = cot_snap.get("cot_score", 0)
+        if cs > 0:
+            sl_pts += cs
+            cot_reasons_long.extend(cot_snap.get("cot_reasons", []))
+        elif cs < 0:
+            rl_pts += abs(cs)
+            cot_reasons_short.extend(cot_snap.get("cot_reasons", []))
+        # Contrarian override signal
+        ct = cot_snap.get("contrarian")
+        if ct:
+            if ct[0] == "LONG":
+                sl_pts += 2
+                cot_reasons_long.append(f"COT CONTRARIAN: {ct[1]}")
+            elif ct[0] == "SHORT":
+                rl_pts += 2
+                cot_reasons_short.append(f"COT CONTRARIAN: {ct[1]}")
+
     # ── Direction decision ────────────────────────────────────────────────────
     if sl_pts >= rl_pts:
         direction  = "LONG"
         score      = sl_pts
         tech_rsns  = tech_long
         news_rsns  = news_reasons_long
+        cot_rsns   = cot_reasons_long
     else:
         direction  = "SHORT"
         score      = rl_pts
         tech_rsns  = tech_short
         news_rsns  = news_reasons_short
+        cot_rsns   = cot_reasons_short
 
     if score >= 10:   quality = "A+"
     elif score >= 8:  quality = "A"
@@ -571,7 +768,8 @@ def score_setup(symbol, candles, price, news_items=None):
     narrative  = _build_entry_narrative(
         short_name, direction, quality, price, entry_l, entry_h,
         sl, tp1, tp2, tp3, rr, atr_v, rsi_v, mh, struct, sweep,
-        bull_ob, bear_ob, fvg_b, fvg_br, tech_rsns, news_rsns, news_score_total
+        bull_ob, bear_ob, fvg_b, fvg_br, tech_rsns, news_rsns, news_score_total,
+        cot_rsns, cot_snap
     )
 
     return {
@@ -588,6 +786,8 @@ def score_setup(symbol, candles, price, news_items=None):
         "score":       score,
         "tech_reasons":tech_rsns,
         "news_reasons":news_rsns,
+        "cot_reasons": cot_rsns,
+        "cot":         cot_snap,
         "narrative":   narrative,
         "time":        datetime.now().strftime("%H:%M:%S"),
         "rsi":         rsi_v,
@@ -600,7 +800,8 @@ def score_setup(symbol, candles, price, news_items=None):
 def _build_entry_narrative(name, direction, quality, price, el, eh,
                            sl, tp1, tp2, tp3, rr, atr_v, rsi_v, macd_h,
                            struct, sweep, bull_ob, bear_ob, fvg_b, fvg_br,
-                           tech_rsns, news_rsns, news_score):
+                           tech_rsns, news_rsns, news_score,
+                           cot_rsns=None, cot_snap=None):
     """Build a human-readable institutional entry narrative."""
     lines = []
     dir_word = "LONG" if direction=="LONG" else "SHORT"
@@ -665,6 +866,35 @@ def _build_entry_narrative(name, direction, quality, price, el, eh,
         lines.append("")
         lines.append("NEWS: No strong directional catalyst — pure technical / liquidity setup.")
 
+    # COT Positioning
+    if cot_snap:
+        lines.append("")
+        lines.append("COMMITMENT OF TRADERS (CFTC — Weekly):")
+        pr   = cot_snap.get("pct_rank", 50)
+        bias = cot_snap.get("bias","—")
+        sn   = cot_snap.get("spec_net", 0)
+        snc  = cot_snap.get("spec_net_chg", 0)
+        cn   = cot_snap.get("comm_net", 0)
+        oi   = cot_snap.get("open_interest", 0)
+        date = cot_snap.get("date","—")
+        lines.append(f"  Report date       : {date}")
+        lines.append(f"  Spec net position : {sn:+,}  (WoW: {snc:+,})")
+        lines.append(f"  Commercial net    : {cn:+,}")
+        lines.append(f"  Open interest     : {oi:,}")
+        lines.append(f"  12-week rank      : {pr:.0f}th percentile  →  {bias}")
+        cd = cot_snap.get("comm_divergence")
+        if cd:
+            lines.append(f"  Comm vs Spec      : {cd}")
+        ct = cot_snap.get("contrarian")
+        if ct:
+            lines.append(f"  ⚠ CONTRARIAN SIGNAL: {ct[1]}")
+        if cot_rsns:
+            for cr in cot_rsns:
+                lines.append(f"  ► {cr}")
+    else:
+        lines.append("")
+        lines.append("COT: No CFTC positioning data available for this instrument.")
+
     # Risk
     lines.append("")
     lines.append(f"RISK MANAGEMENT:")
@@ -676,6 +906,16 @@ def _build_entry_narrative(name, direction, quality, price, el, eh,
     lines.append(f"  R:R        : 1:{rr}  |  Max risk: 1-2% of capital on this trade")
 
     return "\n".join(lines)
+
+# ── COT background loader ─────────────────────────────────────────────────────
+def cot_loader():
+    """Fetch COT data on startup and every 12 hours (published weekly by CFTC)."""
+    while True:
+        try:
+            fetch_cot_all()
+        except Exception:
+            pass
+        time.sleep(12 * 3600)
 
 # ── background data & news loader ─────────────────────────────────────────────
 def background_loader():
@@ -737,6 +977,7 @@ def run_analysis():
     with lock:
         snap_md   = {k: v for k,v in market_data.items()}
         snap_news = dict(categorised_news)
+        snap_cot  = dict(cot_cache)
 
     for sym, md in snap_md.items():
         if not md.price: continue
@@ -747,7 +988,8 @@ def run_analysis():
         try:
             result = score_setup(
                 sym, candles, md.price,
-                news_items=snap_news.get(sym, [])
+                news_items=snap_news.get(sym, []),
+                cot_data=snap_cot.get(sym),
             )
             if result and result["quality"] in ("A+","A","B+"):
                 results.append(result)
@@ -969,12 +1211,34 @@ def build_detail_panels():
         news_text = ""
         if s["news_reasons"]:
             for r in s["news_reasons"]:
-                label_color = "bright_green" if "BULLISH" in r else "bright_red"
-                news_text += f"  [{label_color}]▸[/{label_color}] {r}\n"
+                lc = "bright_green" if "BULLISH" in r else "bright_red"
+                news_text += f"  [{lc}]▸[/{lc}] {r}\n"
         else:
             news_text = "  [dim]No relevant news catalyst — pure technical setup[/dim]\n"
 
-        # Narrative (entry reasons)
+        # COT reasons
+        cot_text = ""
+        cot_snap = s.get("cot", {})
+        if cot_snap:
+            pr   = cot_snap.get("pct_rank",50)
+            bias = cot_snap.get("bias","—")
+            sn   = cot_snap.get("spec_net",0)
+            snc  = cot_snap.get("spec_net_chg",0)
+            cot_text += f"  [bright_magenta]●[/bright_magenta] Report: {cot_snap.get('date','—')}  |  Bias: {bias_color(bias)}  |  Rank: {pr:.0f}th pct\n"
+            cot_text += f"  [bright_magenta]●[/bright_magenta] Spec net: {sn:+,}  (WoW: {snc:+,})  |  Commercial net: {cot_snap.get('comm_net',0):+,}\n"
+            ct = cot_snap.get("contrarian")
+            if ct:
+                cot_text += f"  [bold bright_yellow]⚠ CONTRARIAN SIGNAL: {ct[1]}[/bold bright_yellow]\n"
+            cd = cot_snap.get("comm_divergence")
+            if cd:
+                lc = "bright_green" if "BULLISH" in cd else "bright_red"
+                cot_text += f"  [{lc}]▸[/{lc}] {cd}\n"
+            for cr in s.get("cot_reasons",[]):
+                cot_text += f"  [bright_magenta]►[/bright_magenta] {cr}\n"
+        else:
+            cot_text = "  [dim]No CFTC COT data for this instrument[/dim]\n"
+
+        # Narrative
         narrative_lines = s["narrative"].split("\n")
         narrative_text  = "\n".join(f"  {l}" for l in narrative_lines)
 
@@ -987,6 +1251,8 @@ def build_detail_panels():
             f"{tech_text}"
             f"\n[bold dim]━━ NEWS & MACRO CATALYST ━━[/bold dim]\n"
             f"{news_text}"
+            f"\n[bold dim]━━ COT POSITIONING (CFTC) ━━[/bold dim]\n"
+            f"{cot_text}"
             f"\n[bold dim]━━ ENTRY REASONING ━━[/bold dim]\n"
             f"{narrative_text}"
         )
@@ -1003,6 +1269,83 @@ def build_detail_panels():
             title="[dim]SETUP DETAIL[/dim]"
         ))
     return panels
+
+def bias_color(bias: str) -> str:
+    mapping = {
+        "EXTREME LONG":  "[bold bright_green]EXT LONG[/bold bright_green]",
+        "BULLISH":       "[bright_green]BULLISH[/bright_green]",
+        "NEUTRAL":       "[dim]NEUTRAL[/dim]",
+        "BEARISH":       "[bright_red]BEARISH[/bright_red]",
+        "EXTREME SHORT": "[bold bright_red]EXT SHORT[/bold bright_red]",
+    }
+    return mapping.get(bias, f"[dim]{bias}[/dim]")
+
+def pct_bar(pct: float, width: int = 12) -> str:
+    """Render a mini progress bar for the 0-100 percentile rank."""
+    filled = int(pct / 100 * width)
+    bar    = "█" * filled + "░" * (width - filled)
+    if pct >= 75:   color = "bright_green"
+    elif pct <= 25: color = "bright_red"
+    else:           color = "dim"
+    return f"[{color}]{bar}[/{color}]"
+
+def build_cot_panel():
+    with lock:
+        snap = dict(cot_cache)
+
+    if not snap:
+        return Panel(
+            Align.center(
+                "[dim]Fetching COT data from CFTC...\n"
+                "Published weekly (Fridays). First load may take ~30s.[/dim]"
+            ),
+            title="[bold bright_magenta]● COMMITMENT OF TRADERS — CFTC[/bold bright_magenta]",
+            border_style="bright_magenta", box=box.ROUNDED,
+        )
+
+    t = Table(box=box.SIMPLE_HEAVY, border_style="bright_magenta",
+              header_style="bold bright_magenta", show_lines=True,
+              title="[bold bright_magenta]● COMMITMENT OF TRADERS — CFTC Weekly[/bold bright_magenta]")
+    t.add_column("SYMBOL",       width=13, style="bold white")
+    t.add_column("DATE",         width=11, style="dim")
+    t.add_column("SPEC NET",     width=12, justify="right")
+    t.add_column("WoW ΔSpec",    width=11, justify="right")
+    t.add_column("COMM NET",     width=12, justify="right")
+    t.add_column("OPEN INT",     width=11, justify="right", style="dim")
+    t.add_column("12W RANK",     width=14, justify="center")
+    t.add_column("BIAS",         width=12, justify="center")
+    t.add_column("CONTRARIAN",   width=10, justify="center")
+
+    # Sort: extreme readings first
+    items = sorted(snap.items(),
+                   key=lambda x: abs(x[1].get("pct_rank",50)-50), reverse=True)
+
+    for sym, d in items:
+        sn    = d.get("spec_net", 0)
+        snc   = d.get("spec_net_chg", 0)
+        cn    = d.get("comm_net", 0)
+        oi    = d.get("open_interest", 0)
+        pr    = d.get("pct_rank", 50)
+        bias  = d.get("bias","—")
+        ct    = d.get("contrarian")
+        date  = d.get("date","—")
+
+        name  = sym.replace("BINANCE:","").replace("OANDA:","").replace("_","/")
+        sn_s  = f"[bright_green]{sn:+,}[/bright_green]" if sn>0 else f"[bright_red]{sn:+,}[/bright_red]"
+        snc_s = f"[bright_green]{snc:+,}[/bright_green]" if snc>0 else f"[bright_red]{snc:+,}[/bright_red]" if snc<0 else f"[dim]{snc:+,}[/dim]"
+        cn_s  = f"[bright_green]{cn:+,}[/bright_green]" if cn>0 else f"[bright_red]{cn:+,}[/bright_red]"
+        ct_s  = f"[bold bright_yellow]⚠ {ct[0]}[/bold bright_yellow]" if ct else "[dim]—[/dim]"
+
+        t.add_row(
+            name, date,
+            sn_s, snc_s, cn_s,
+            f"{oi:,}",
+            f"{pct_bar(pr)} {pr:.0f}%",
+            bias_color(bias),
+            ct_s,
+        )
+
+    return Panel(t, border_style="bright_magenta", box=box.ROUNDED)
 
 def build_news_wall():
     """Full news wall with sentiment labels."""
@@ -1059,14 +1402,14 @@ def build_risk_panel():
 # ── render ─────────────────────────────────────────────────────────────────────
 def render():
     run_analysis()
-    alerts = list(setup_alerts)
 
     layout = Layout()
     layout.split_column(
         Layout(name="header",   size=3),
         Layout(name="markets",  size=20),
         Layout(name="setups",   size=17),
-        Layout(name="details",  size=28),
+        Layout(name="details",  size=30),
+        Layout(name="cot",      size=16),
         Layout(name="bottom",   size=16),
     )
 
@@ -1089,6 +1432,8 @@ def render():
     else:
         layout["details"].update(detail_panels[0])
 
+    layout["cot"].update(build_cot_panel())
+
     layout["bottom"].split_row(
         Layout(build_news_wall(), ratio=3),
         Layout(build_risk_panel(), ratio=1),
@@ -1104,6 +1449,7 @@ def main():
     ))
     threading.Thread(target=start_websocket,  daemon=True).start()
     threading.Thread(target=background_loader, daemon=True).start()
+    threading.Thread(target=cot_loader,        daemon=True).start()
     time.sleep(4)
     try:
         with Live(render(), refresh_per_second=1/REFRESH_RATE,
