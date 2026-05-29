@@ -554,34 +554,38 @@ def fetch_cot_all():
 # ═══════════════════════════════════════════════════════════════
 # DATA LOADERS
 # ═══════════════════════════════════════════════════════════════
-def load_yfinance():
-    """Fetch quotes + candles for all YF symbols."""
-    tickers=list(YF_SYMBOLS.values())
+def _fetch_one_yf(name, ticker):
     try:
-        # quotes (latest 2 days hourly)
-        raw=yf.download(" ".join(tickers),period="5d",interval="1h",
-                        group_by="ticker",auto_adjust=True,progress=False,threads=True)
-    except: return
-    for name,ticker in YF_SYMBOLS.items():
-        try:
-            df=(raw[ticker] if len(tickers)>1 and ticker in raw.columns.get_level_values(0)
-                else raw if len(tickers)==1 else None)
-            if df is None or df.empty: continue
-            df=df.dropna(subset=["Close"])
-            if df.empty: continue
-            row=df.iloc[-1]; prev=df.iloc[-2]["Close"] if len(df)>1 else row["Close"]
-            candles=[]
-            for ts,r in df.iterrows():
-                t=int(ts.timestamp()) if hasattr(ts,"timestamp") else 0
-                candles.append((t,float(r["Open"]),float(r["High"]),
-                                float(r["Low"]),float(r["Close"]),float(r.get("Volume",0) or 0)))
-            with lock:
-                md=market[name]
-                md.price=float(row["Close"]); md.prev=float(prev)
-                md.high=float(row["High"]);   md.low=float(row["Low"])
-                md.volume=float(row.get("Volume",0) or 0)
-                md.candles=candles; md.updated=datetime.now().strftime("%H:%M:%S")
-        except: pass
+        tk = yf.Ticker(ticker)
+        df = tk.history(period="5d", interval="1h", auto_adjust=True)
+        if df is None or df.empty: return
+        df = df.dropna(subset=["Close"])
+        if df.empty: return
+        row = df.iloc[-1]
+        prev = float(df.iloc[-2]["Close"]) if len(df) > 1 else float(row["Close"])
+        candles = []
+        for ts, r in df.iterrows():
+            t = int(ts.timestamp()) if hasattr(ts, "timestamp") else 0
+            candles.append((t, float(r["Open"]), float(r["High"]),
+                            float(r["Low"]), float(r["Close"]), float(r.get("Volume", 0) or 0)))
+        with lock:
+            md = market[name]
+            md.price   = float(row["Close"])
+            md.prev    = prev
+            md.high    = float(row["High"])
+            md.low     = float(row["Low"])
+            md.volume  = float(row.get("Volume", 0) or 0)
+            md.candles = candles
+            md.updated = datetime.now().strftime("%H:%M:%S")
+    except: pass
+
+def load_yfinance():
+    """Fetch quotes + candles for all YF symbols, one ticker per thread."""
+    threads = []
+    for name, ticker in YF_SYMBOLS.items():
+        th = threading.Thread(target=_fetch_one_yf, args=(name, ticker), daemon=True)
+        th.start(); threads.append(th)
+    for th in threads: th.join(timeout=30)
 
 def load_finnhub_equity():
     """Fetch equity quotes from Finnhub REST."""
