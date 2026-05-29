@@ -35,7 +35,7 @@ from rich         import box
 API_KEY  = "d8ce4jpr01qidic7ibt0d8ce4jpr01qidic7ibtg"
 BASE_URL = "https://finnhub.io/api/v1"
 WS_URL   = f"wss://ws.finnhub.io?token={API_KEY}"
-DB_PATH  = os.path.join(os.path.dirname(os.path.abspath(__file__)), "titan_journal.db")
+DB_PATH  = os.path.join(os.path.expanduser("~"), "titan_journal.db")
 
 REFRESH_SEC       = 2
 ANALYSIS_SEC      = 30
@@ -1120,25 +1120,54 @@ def panel_stats():
                  border_style="bright_cyan",box=box.ROUNDED,
                  subtitle=f"[dim]{DB_PATH}[/dim]")
 
+def _news_sentiment(x):
+    txt=(x.get("headline","")+x.get("summary","")).lower()
+    b=sum(1 for w in BULL_W if w in txt)
+    be=sum(1 for w in BEAR_W if w in txt)
+    return b-be
+
+def _news_related(x):
+    txt=(x.get("headline","")+x.get("summary","")).lower()
+    hits=[]
+    for sym,kws in NEWS_KW.items():
+        if any(k in txt for k in kws): hits.append(sym)
+    return hits[:3]
+
 def panel_news():
     with lock: items=list(news_cache)
-    t=Table(box=box.SIMPLE,show_header=True,header_style="bold bright_blue",padding=(0,1))
-    t.add_column("DUYGU",   width=7,  justify="center")
-    t.add_column("YAŞ",     width=5,  justify="right",style="dim")
-    t.add_column("KAYNAK",  width=12, style="dim")
-    t.add_column("BAŞLIK",  style="white")
-    for x in items[:10]:
-        txt=(x.get("headline","")+x.get("summary","")).lower()
-        b=sum(1 for w in BULL_W if w in txt)
-        be=sum(1 for w in BEAR_W if w in txt)
-        net=b-be
-        lbl="BULL" if net>=2 else "BEAR" if net<=-2 else "NÖTR"
-        lc="bright_green" if lbl=="BULL" else "bright_red" if lbl=="BEAR" else "dim"
+    lines=[]
+    if not items:
+        return Panel(Align.center("[dim]Haberler yükleniyor...[/dim]"),
+                     title="[bold bright_blue]● CANLI HABER & DUYGU ANALİZİ[/bold bright_blue]",
+                     border_style="bright_blue",box=box.ROUNDED)
+    for x in items[:12]:
+        net=_news_sentiment(x)
+        lbl="● BULL" if net>=2 else "● BEAR" if net<=-2 else "● NÖTR"
+        lc="bright_green" if net>=2 else "bright_red" if net<=-2 else "dim"
         ts=x.get("datetime",0); age=(time.time()-ts)/3600 if ts else 0
-        age_s=f"{age:.0f}s" if age<24 else f"{age/24:.0f}g"
-        t.add_row(f"[{lc}]{lbl}[/{lc}]",age_s,x.get("source","")[:12],x.get("headline","")[:95])
-    if not items: t.add_row("[dim]—[/dim]","—","—","[dim]Haberler yükleniyor...[/dim]")
-    return Panel(t,title="[bold]● CANLI HABER & DUYGU[/bold]",border_style="bright_blue",box=box.ROUNDED)
+        age_s=f"{age:.0f}sa" if age<24 else f"{age/24:.0f}g"
+        src=x.get("source","")[:14]
+        headline=x.get("headline","")[:100]
+        summary=x.get("summary","")
+        # Özet — ilk 120 karakter
+        summ=""
+        if summary and len(summary)>10:
+            clean=summary.replace("\n"," ").strip()
+            summ=f"[dim]   {clean[:120]}{'...' if len(clean)>120 else ''}[/dim]"
+        related=_news_related(x)
+        rel_s=("  [dim]↳ "+", ".join(related)+"[/dim]") if related else ""
+        score_s=(f"[{lc}]+{net}[/{lc}]" if net>0
+                 else f"[{lc}]{net}[/{lc}]" if net<0
+                 else f"[dim]{net}[/dim]")
+        lines.append(
+            f"[{lc}]{lbl}[/{lc}] [{lc}]({score_s})[/{lc}]  "
+            f"[bold white]{headline}[/bold white]  "
+            f"[dim]{src} · {age_s}[/dim]{rel_s}")
+        if summ: lines.append(summ)
+        lines.append("")
+    return Panel("\n".join(lines).rstrip(),
+                 title="[bold bright_blue]● CANLI HABER & DUYGU ANALİZİ[/bold bright_blue]",
+                 border_style="bright_blue",box=box.ROUNDED)
 
 def panel_risk():
     with lock:
@@ -1223,6 +1252,11 @@ def main():
     threading.Thread(target=monitor_loop,    daemon=True).start()
     threading.Thread(target=stats_loop,      daemon=True).start()
     threading.Thread(target=key_listener,    daemon=True).start()
+    # Açılışta mevcut sinyalleri hemen kontrol et
+    try: _check_open()
+    except: pass
+    try: compute_stats()
+    except: pass
     time.sleep(5)
     try:
         with Live(render(),refresh_per_second=1/REFRESH_SEC,screen=True,console=console) as live:
