@@ -130,12 +130,219 @@ BEAR_W = ["drop","fall","crash","plunge","decline","selloff","bearish","miss",
           "downgrade","sell","outflow","ban","hack","lawsuit","fine","hawkish",
           "inflation","recession","default","war","tariff","loss","rate hike","risk-off"]
 
+# ── Telegram (optional — set your credentials to enable alerts) ──────────────
+TELEGRAM_TOKEN   = ""   # e.g. "123456:ABCDef..."
+TELEGRAM_CHAT_ID = ""   # e.g. "-1001234567890"
+
+# ── High-impact keyword → base importance score ───────────────────────────────
+HIGH_IMP_KW = {
+    "fomc":95,"federal reserve":90,"rate decision":90,"rate hike":88,"rate cut":88,
+    "emergency meeting":95,"quantitative tightening":80,"quantitative easing":82,
+    "powell":72,"lagarde":72,"ueda":72,"bailey":72,"jordan":70,
+    "ecb decision":90,"boe decision":90,"boj decision":90,"snb decision":85,
+    "rba decision":82,"boc decision":82,"rbnz decision":80,
+    "cpi":85,"inflation":72,"core inflation":85,"pce":83,"deflation":80,
+    "non-farm payroll":90,"nfp":90,"unemployment rate":82,"jobless claims":68,
+    "gdp":80,"recession":85,"stagflation":88,
+    "retail sales":65,"pmi":60,"ism":62,"trade balance":58,
+    "producer price":65,"ppi":65,"consumer confidence":55,
+    "war":88,"military":75,"sanctions":82,"nuclear":95,"attack":80,"invasion":90,
+    "conflict":72,"ceasefire":70,"tariff":75,"trade war":82,
+    "default":90,"bankruptcy":85,"collapse":88,"crisis":85,"contagion":88,
+    "bank run":92,"bailout":85,"systemic":88,"flash crash":90,"margin call":80,
+    "earnings miss":65,"earnings beat":62,"guidance cut":68,"guidance raise":60,
+    "sec investigation":75,"fraud":80,"circuit breaker":88,
+}
+MED_IMP_KW = {
+    "interest rate":55,"monetary policy":58,"fiscal":52,"stimulus":60,
+    "upgrade":42,"downgrade":45,"buy rating":38,"sell rating":40,
+    "geopolitical":55,"election":58,"debt ceiling":65,"budget":50,
+    "opec":62,"production cut":60,"merger":48,"acquisition":50,
+    "regulatory":52,"antitrust":55,"lawsuit":48,
+}
+
+# ── Per-asset directional keyword banks ──────────────────────────────────────
+ASSET_BULL = {
+    "USD": ["dollar surge","fed hawkish","rate hike","strong jobs","dollar strength","dxy up","dollar rally"],
+    "EUR": ["ecb hawkish","euro rally","eurozone growth","ecb rate hike","euro strength"],
+    "GBP": ["boe hawkish","pound rally","uk growth","boe rate hike","sterling"],
+    "JPY": ["boj hawkish","yen strength","yen rally","boj tightening","safe haven"],
+    "CHF": ["snb hawkish","franc strength","safe haven","swiss franc"],
+    "CAD": ["oil rally","canada jobs","boc hawkish","loonie strength","cad bid"],
+    "AUD": ["rba hawkish","aussie rally","iron ore","china growth","commodity rally"],
+    "NZD": ["rbnz hawkish","kiwi rally","nzd bid","nz growth"],
+    "GOLD":  ["safe haven","gold rally","inflation surge","geopolitical risk","bullion rally"],
+    "SILVER":["silver rally","industrial demand","precious metals"],
+    "OIL":   ["opec cut","supply shortage","oil rally","crude surge","demand growth"],
+    "BTC":   ["bitcoin rally","crypto surge","institutional buying","etf approval","adoption"],
+    "ETH":   ["ethereum rally","eth bid","defi growth","staking"],
+    "SPY":   ["fed pivot","risk on","strong earnings","gdp beat","soft landing","bull market"],
+    "NVDA":  ["ai demand","chip demand","data center","nvidia beat","gpu"],
+    "AAPL":  ["iphone demand","apple beat","services growth","buyback"],
+}
+ASSET_BEAR = {
+    "USD": ["dollar fall","fed dovish","rate cut","dollar weakness","dxy down","dollar dump"],
+    "EUR": ["ecb dovish","euro fall","eurozone recession","ecb rate cut","euro weakness"],
+    "GBP": ["boe dovish","pound fall","uk recession","sterling weakness"],
+    "JPY": ["boj dovish","yen weakness","boj easing","carry trade"],
+    "CHF": ["snb dovish","franc weakness"],
+    "CAD": ["oil decline","canada recession","boc dovish","loonie weakness"],
+    "AUD": ["rba dovish","aussie fall","china slowdown","commodity selloff"],
+    "NZD": ["rbnz dovish","kiwi fall","nz recession"],
+    "GOLD":  ["risk on","gold selloff","real yields rise","gold drop"],
+    "SILVER":["silver selloff","industrial slowdown"],
+    "OIL":   ["opec increase","demand drop","oil fall","crude selloff","recession"],
+    "BTC":   ["bitcoin crash","crypto selloff","regulatory ban","hack","exchange collapse"],
+    "ETH":   ["ethereum crash","eth sold","security issue"],
+    "SPY":   ["recession","fed hawkish","rate hike","earnings miss","risk off","bear market"],
+    "NVDA":  ["chip ban","export restriction","nvda miss","tariff"],
+    "AAPL":  ["iphone miss","china ban","revenue miss"],
+}
+
+# ── Market regime keyword banks ───────────────────────────────────────────────
+REGIME_KW = {
+    "RISK ON":       ["rate cut","fed pivot","dovish","stimulus","qe","bailout","earnings beat","soft landing","risk on"],
+    "RISK OFF":      ["rate hike","hawkish","tightening","recession","default","crisis","collapse","war","risk off","geopolitical","panic"],
+    "INFLATIONARY":  ["cpi beat","inflation surge","hot inflation","price surge","stagflation","pce beat","wage growth","energy prices"],
+    "DEFLATIONARY":  ["deflation","cpi miss","below target","price decline","disinflation","demand drop"],
+    "GROWTH POSITIVE":["gdp beat","jobs beat","nfp beat","retail beat","pmi expansion","consumer confidence","growth acceleration"],
+    "GROWTH NEGATIVE":["gdp miss","jobs miss","recession","contraction","pmi below 50","consumer confidence fall","layoffs","job cuts"],
+}
+
+# ── Correlation matrix ────────────────────────────────────────────────────────
+CORR_MAP = {
+    "USD_BULL":  {"DXY":"↑","EUR/USD":"↓","GBP/USD":"↓","USD/JPY":"↑","USD/CHF":"↑","AUD/USD":"↓","USD/CAD":"↑","XAU/USD":"↓","WTI":"↓","BTCUSDT":"↓","SPY":"↓"},
+    "USD_BEAR":  {"DXY":"↓","EUR/USD":"↑","GBP/USD":"↑","USD/JPY":"↓","USD/CHF":"↓","AUD/USD":"↑","USD/CAD":"↓","XAU/USD":"↑","WTI":"↑","BTCUSDT":"↑","SPY":"↑"},
+    "RISK ON":   {"SPY":"↑","QQQ":"↑","BTCUSDT":"↑","XAU/USD":"↓","AUD/USD":"↑","WTI":"↑"},
+    "RISK OFF":  {"SPY":"↓","QQQ":"↓","BTCUSDT":"↓","XAU/USD":"↑","USD/JPY":"↓","AUD/USD":"↓","WTI":"↓"},
+    "INFLATIONARY":{"XAU/USD":"↑","WTI":"↑","USD/JPY":"↑","SPY":"↓","BTCUSDT":"↑"},
+}
+
+# ── Symbol map for impact analysis ───────────────────────────────────────────
+ASSET_SYM_MAP = {
+    "USD": ["EUR/USD","GBP/USD","USD/JPY","USD/CHF","AUD/USD","USD/CAD","NZD/USD"],
+    "EUR": ["EUR/USD","EUR/GBP","EUR/JPY","EUR/CHF"],
+    "GBP": ["GBP/USD","GBP/JPY","GBP/CHF"],
+    "JPY": ["USD/JPY","EUR/JPY","GBP/JPY","AUD/JPY"],
+    "CAD": ["USD/CAD"],
+    "AUD": ["AUD/USD","AUD/JPY"],
+    "NZD": ["NZD/USD"],
+    "GOLD":["XAU/USD"], "SILVER":["XAG/USD"],
+    "OIL": ["WTI","BRENT"],
+    "BTC": ["BTCUSDT"], "ETH":["ETHUSDT"],
+    "SPY": ["SPY","QQQ"], "NVDA":["NVDA"], "AAPL":["AAPL"],
+}
+
 console = Console()
 lock    = threading.Lock()
 
-# ═══════════════════════════════════════════════════════════════
-# DATA STORE
-# ═══════════════════════════════════════════════════════════════
+# ─────────────────────────────────────────────────────────────────────────────
+# NEWS ANALYSIS ENGINE
+# ─────────────────────────────────────────────────────────────────────────────
+analyzed_news: list = []
+_tg_sent: set      = set()
+
+def _importance(text):
+    score = 0
+    for kw,pts in HIGH_IMP_KW.items():
+        if kw in text: score = max(score, pts)
+    for kw,pts in MED_IMP_KW.items():
+        if kw in text: score = max(score, pts)
+    hits = sum(1 for kw in HIGH_IMP_KW if kw in text)
+    return min(score + hits*2, 100)
+
+def _asset_sentiment(text):
+    result = {}
+    for asset in ASSET_BULL:
+        b = sum(1 for kw in ASSET_BULL[asset]         if kw in text)
+        e = sum(1 for kw in ASSET_BEAR.get(asset,[])  if kw in text)
+        if b > e:   result[asset] = ("BULLISH", min(b*20+40, 100))
+        elif e > b: result[asset] = ("BEARISH", min(e*20+40, 100))
+    return result
+
+def _market_regimes(text):
+    r = [name for name,kws in REGIME_KW.items() if any(k in text for k in kws)]
+    return r[:3] if r else ["NEUTRAL"]
+
+def _vol_forecast(importance):
+    if importance>=85: return ("EXTREME","1h–4h")
+    if importance>=65: return ("HIGH","30m–2h")
+    if importance>=40: return ("NORMAL","15m–1h")
+    return ("LOW","<15m")
+
+def _sym_impacts(asset_sent):
+    impacts = {}
+    for asset,(sent,strength) in asset_sent.items():
+        for sym in ASSET_SYM_MAP.get(asset,[]):
+            if asset=="USD":
+                dir_="↑" if (sent=="BULLISH" and sym.startswith("USD/")) or \
+                             (sent=="BEARISH" and not sym.startswith("USD/")) else "↓"
+            else:
+                dir_="↑" if sent=="BULLISH" else "↓"
+            if sym not in impacts or impacts[sym][1] < strength:
+                impacts[sym] = (dir_, strength, sent)
+    return impacts
+
+def _corr_impact(asset_sent, regimes):
+    corr={}
+    if "USD" in asset_sent:
+        key="USD_BULL" if asset_sent["USD"][0]=="BULLISH" else "USD_BEAR"
+        corr.update(CORR_MAP.get(key,{}))
+    for r in regimes:
+        for k,v in CORR_MAP.get(r,{}).items(): corr.setdefault(k,v)
+    return corr
+
+def analyze_article(article):
+    text=(article.get("headline","")+article.get("summary","")).lower()
+    imp   =_importance(text)
+    asent =_asset_sentiment(text)
+    regs  =_market_regimes(text)
+    vol,vd=_vol_forecast(imp)
+    simp  =_sym_impacts(asent)
+    corr  =_corr_impact(asent,regs)
+    rl    =("CRITICAL" if imp>=80 else "HIGH" if imp>=60
+            else "MEDIUM" if imp>=40 else "LOW" if imp>=20 else "NOISE")
+    return {**article,"importance":imp,"risk_level":rl,
+            "asset_sent":asent,"regimes":regs,
+            "vol":vol,"vol_dur":vd,"sym_impacts":simp,"correlations":corr}
+
+def send_telegram(article):
+    if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID: return
+    h=article.get("headline","")
+    if h in _tg_sent: return
+    _tg_sent.add(h)
+    imp=article["importance"]
+    impacts_txt="\n".join(f"  {sym} {d}" for sym,(d,_,s) in list(article.get("sym_impacts",{}).items())[:6])
+    block_min=60 if imp>=80 else 30
+    msg=(f"🚨 <b>HIGH IMPACT NEWS</b>\n\n"
+         f"<b>Headline:</b>\n{h}\n\n"
+         f"<b>Impact Score:</b> {imp}/100\n"
+         f"<b>Risk Level:</b> {article['risk_level']}\n"
+         f"<b>Volatility:</b> {article['vol']} ({article['vol_dur']})\n"
+         f"<b>Regime:</b> {', '.join(article['regimes'])}\n\n"
+         f"<b>Affected Symbols:</b>\n{impacts_txt}\n\n"
+         f"⛔ <b>Trading Restriction:</b> New positions blocked for {block_min} minutes.")
+    try:
+        requests.post(f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage",
+                      json={"chat_id":TELEGRAM_CHAT_ID,"text":msg,"parse_mode":"HTML"},timeout=5)
+    except: pass
+
+def news_risk_for_sym(sym, max_age_min=90):
+    """Returns (importance, risk_level, block_trade) for a symbol from recent news."""
+    now=time.time()
+    with lock: arts=list(analyzed_news)
+    best=(0,"NOISE",False)
+    for a in arts:
+        ts=a.get("datetime",0)
+        age_min=(now-ts)/60 if ts else 999
+        if age_min>max_age_min: continue
+        imp=a.get("importance",0)
+        if sym not in a.get("sym_impacts",{}): continue
+        block=(imp>=80 and age_min<=60) or (imp>=60 and age_min<=30)
+        if imp>best[0]: best=(imp,a.get("risk_level","NOISE"),block)
+    return best
+
+
 class MD:
     def __init__(self, sym):
         self.sym     = sym
@@ -534,8 +741,23 @@ def score_setup(sym, candles, price, news_items=None):
         neg_l.append("COT data unavailable — no open-interest confirmation")
         neg_s.append("COT data unavailable — no open-interest confirmation")
 
+    # ── News Risk Check (auto-reject on high-impact fresh news) ──
+    n_imp, n_rl, n_block = news_risk_for_sym(sym)
+    if n_block:
+        return None   # HARD REJECT — critical/high news active
+
     # ── News Sentiment (0-10) ────────────────────────────────────
     news_score=0; news_rl=[]; news_rs=[]
+    news_penalty=0
+    if n_imp>=60:
+        news_penalty=8   # medium news → -8 pts confidence
+        neg_l.append(f"MEDIUM NEWS RISK (impact {n_imp}/100) — confidence reduced")
+        neg_s.append(f"MEDIUM NEWS RISK (impact {n_imp}/100) — confidence reduced")
+    elif n_imp>=40:
+        news_penalty=4
+        neg_l.append(f"Low-medium news risk (impact {n_imp}/100)")
+        neg_s.append(f"Low-medium news risk (impact {n_imp}/100)")
+
     if news_items:
         for n in news_items:
             t=(n.get("headline","")+n.get("summary","")).lower()
@@ -591,7 +813,7 @@ def score_setup(sym, candles, price, news_items=None):
     if rr<2.5: neg_factors.append(f"RR {rr} below preferred 1:2.5 threshold")
 
     # ── Normalise to 100 then blend RR bonus ─────────────────────
-    score_100=round(min(raw/MAX_RAW*85+rr_bonus,100),1)
+    score_100=round(min(max(raw/MAX_RAW*85+rr_bonus-news_penalty,0),100),1)
 
     # ── Expected hold time (TP2 distance ÷ ATR = hours) ──────────
     hold_h=round(abs(tp2-price)/av,1) if av else 8.0
@@ -625,6 +847,8 @@ def score_setup(sym, candles, price, news_items=None):
 
     confidence=score_100
 
+    news_risk_label=("NO RISK" if n_imp<20 else "LOW" if n_imp<40
+                     else "MEDIUM" if n_imp<60 else "HIGH" if n_imp<80 else "CRITICAL")
     return {
         "sym":sym,"quality":quality,"direction":direction,"status":status,
         "price":price,"el":el,"eh":eh,"sl":sl,
@@ -632,7 +856,7 @@ def score_setup(sym, candles, price, news_items=None):
         "score":score_100,"confidence":confidence,"hold_h":hold_h,
         "reasons":reasons,"neg_factors":neg_factors,
         "flags":fl,"rsi":rv,"atr":av,"cot":cot,
-        "news_score":news_score,
+        "news_score":news_score,"news_imp":n_imp,"news_risk":news_risk_label,
         "time":datetime.now().strftime("%H:%M:%S"),
         "narrative": _narrative(sym,direction,price,el,eh,sl,tp1,tp2,tp3,rr,av,rv,mh,st,sw,bOB,beOB,bFVG,beFVG,cot,news_rl+news_rs,news_score),
     }
@@ -792,7 +1016,7 @@ def load_equity_candles():
         except: pass
 
 def load_news():
-    global news_cache, cat_news
+    global news_cache, cat_news, analyzed_news
     items=[]
     for cat in ["general","crypto","forex","merger"]:
         try:
@@ -800,7 +1024,6 @@ def load_news():
             d=r.json()
             if isinstance(d,list): items.extend(d[:10])
         except: pass
-    # company news
     for sym in ["NVDA","AAPL","MSFT","TSLA"]:
         try:
             today=datetime.utcnow().strftime("%Y-%m-%d")
@@ -814,21 +1037,34 @@ def load_news():
     for x in items:
         h=x.get("headline","")
         if h and h not in seen: seen.add(h); unique.append(x)
+    # ── Institutional analysis ──
+    enriched=[]
+    for x in unique:
+        try:
+            a=analyze_article(x); enriched.append(a)
+            # Telegram alert for high-impact fresh news
+            ts=a.get("datetime",0)
+            age_min=(time.time()-ts)/60 if ts else 999
+            if a["importance"]>=80 and age_min<=60:
+                threading.Thread(target=send_telegram,args=(a,),daemon=True).start()
+        except: enriched.append(x)
+    enriched.sort(key=lambda x:-x.get("importance",0))
+    # per-symbol categorisation
     new_cat={}
     for sym in list(market.keys()):
         kws=NEWS_KW.get(sym,[])
         if not kws: continue
         matched=[]
-        for x in unique:
+        for x in enriched:
             txt=(x.get("headline","")+x.get("summary","")).lower()
-            if any(k in txt for k in kws):
+            if any(k in txt for k in kws) or sym in x.get("sym_impacts",{}):
                 ts=x.get("datetime",0)
                 age=(time.time()-ts)/3600 if ts else 99
                 matched.append({**x,"age_h":round(age,1)})
-        matched.sort(key=lambda x:x["age_h"])
+        matched.sort(key=lambda x:(-x.get("importance",0),x["age_h"]))
         if matched: new_cat[sym]=matched[:4]
     with lock:
-        news_cache=unique[:25]; cat_news=new_cat
+        news_cache=unique[:30]; cat_news=new_cat; analyzed_news=enriched[:30]
 
 def background_loop():
     first=True
@@ -1221,6 +1457,8 @@ def panel_details():
         dec_c="bright_green" if dec=="Execute" else "yellow" if dec=="Watchlist" else "bright_red"
 
         # Header block — matches requested output format
+        nr=s.get("news_risk","NO RISK"); ni=s.get("news_imp",0)
+        nr_c={"CRITICAL":"bold bright_red","HIGH":"bright_red","MEDIUM":"yellow","LOW":"dim","NO RISK":"bright_green"}.get(nr,"dim")
         header=(
             f"{qc(s['quality'])}  {dc(s['direction'])}  [bold white]{s['sym']}[/bold white]\n\n"
             f"  [bold]TRADE SCORE   :[/bold] [bold bright_yellow]{sc:.0f}/100[/bold bright_yellow]\n"
@@ -1228,7 +1466,8 @@ def panel_details():
             f"  [bold]CONFIDENCE    :[/bold] {conf:.0f}/100\n"
             f"  [bold]HOLD TIME     :[/bold] ~{hold:.1f} saat\n"
             f"  [bold]RISK REWARD   :[/bold] 1:{rr}\n"
-            f"  [bold]RSI / ATR     :[/bold] {s.get('rsi','—')} / {fp(s.get('atr'))}\n")
+            f"  [bold]RSI / ATR     :[/bold] {s.get('rsi','—')} / {fp(s.get('atr'))}\n"
+            f"  [bold]NEWS RISK     :[/bold] [{nr_c}]{nr}[/{nr_c}]  [dim](impact {ni}/100)[/dim]\n")
 
         # Positive factors
         pos="\n".join(f"  [bright_green]✓[/bright_green] {r}" for r in s["reasons"]) or "  [dim]—[/dim]"
@@ -1417,54 +1656,73 @@ def panel_stats():
                  border_style="bright_cyan",box=box.ROUNDED,
                  subtitle=f"[dim]{DB_PATH}[/dim]")
 
-def _news_sentiment(x):
-    txt=(x.get("headline","")+x.get("summary","")).lower()
-    b=sum(1 for w in BULL_W if w in txt)
-    be=sum(1 for w in BEAR_W if w in txt)
-    return b-be
-
-def _news_related(x):
-    txt=(x.get("headline","")+x.get("summary","")).lower()
-    hits=[]
-    for sym,kws in NEWS_KW.items():
-        if any(k in txt for k in kws): hits.append(sym)
-    return hits[:3]
-
 def panel_news():
-    with lock: items=list(news_cache)
-    lines=[]
-    if not items:
+    with lock: arts=list(analyzed_news) or list(news_cache)
+    if not arts:
         return Panel(Align.center("[dim]Haberler yükleniyor...[/dim]"),
-                     title="[bold bright_blue]● CANLI HABER & DUYGU ANALİZİ[/bold bright_blue]",
+                     title="[bold bright_blue]● KURUMSAL MAKRO İSTİHBARAT[/bold bright_blue]",
                      border_style="bright_blue",box=box.ROUNDED)
-    for x in items[:12]:
-        net=_news_sentiment(x)
-        lbl="● BULL" if net>=2 else "● BEAR" if net<=-2 else "● NÖTR"
-        lc="bright_green" if net>=2 else "bright_red" if net<=-2 else "dim"
-        ts=x.get("datetime",0); age=(time.time()-ts)/3600 if ts else 0
-        age_s=f"{age:.0f}sa" if age<24 else f"{age/24:.0f}g"
-        src=x.get("source","")[:14]
-        headline=x.get("headline","")[:100]
-        summary=x.get("summary","")
-        # Özet — ilk 120 karakter
-        summ=""
-        if summary and len(summary)>10:
-            clean=summary.replace("\n"," ").strip()
-            summ=f"[dim]   {clean[:120]}{'...' if len(clean)>120 else ''}[/dim]"
-        related=_news_related(x)
-        rel_s=("  [dim]↳ "+", ".join(related)+"[/dim]") if related else ""
-        score_s=(f"[{lc}]+{net}[/{lc}]" if net>0
-                 else f"[{lc}]{net}[/{lc}]" if net<0
-                 else f"[dim]{net}[/dim]")
+    lines=[]
+    for x in arts[:10]:
+        imp   =x.get("importance",0)
+        rl    =x.get("risk_level","NOISE")
+        regs  =x.get("regimes",["NEUTRAL"])
+        vol   =x.get("vol","—")
+        vol_d =x.get("vol_dur","")
+        simp  =x.get("sym_impacts",{})
+        asent =x.get("asset_sent",{})
+        ts    =x.get("datetime",0)
+        age_m =(time.time()-ts)/60 if ts else 0
+        age_s =f"{age_m:.0f}dk" if age_m<60 else f"{age_m/60:.1f}sa"
+
+        # Colour by risk level
+        rc={"CRITICAL":"bold bright_red","HIGH":"bright_red",
+            "MEDIUM":"yellow","LOW":"dim green","NOISE":"dim"}.get(rl,"dim")
+        vc={"EXTREME":"bold bright_red","HIGH":"bright_red","NORMAL":"yellow","LOW":"dim"}.get(vol,"dim")
+
+        # Score bar
+        bar_w=12; filled=int(imp/100*bar_w)
+        bar="█"*filled+"░"*(bar_w-filled)
+        bc="bright_red" if imp>=80 else "yellow" if imp>=60 else "green" if imp>=40 else "dim"
+
+        lines.append(f"[{rc}]{'━'*96}[/{rc}]")
         lines.append(
-            f"[{lc}]{lbl}[/{lc}] [{lc}]({score_s})[/{lc}]  "
-            f"[bold white]{headline}[/bold white]  "
-            f"[dim]{src} · {age_s}[/dim]{rel_s}")
-        if summ: lines.append(summ)
+            f"  [{bc}]{bar}[/{bc}] [bold {rc}]{imp:>3}/100[/bold {rc}]  "
+            f"[bold white]{x.get('headline','')[:80]}[/bold white]")
+        lines.append(
+            f"  [dim]{x.get('source','')[:14]}  ·  {age_s}[/dim]  "
+            f"[{rc}]{rl}[/{rc}]  "
+            f"[{vc}]VOL: {vol}[/{vc}]  [dim]{vol_d}[/dim]  "
+            f"[dim]Regime: {', '.join(regs[:2])}[/dim]")
+
+        # Summary snippet
+        summ=x.get("summary","").replace("\n"," ").strip()
+        if summ:
+            lines.append(f"  [dim]{summ[:130]}{'...' if len(summ)>130 else ''}[/dim]")
+
+        # Asset sentiment row
+        if asent:
+            sent_parts=[]
+            for asset,(s,strength) in list(asent.items())[:6]:
+                ac="bright_green" if s=="BULLISH" else "bright_red"
+                arr="↑" if s=="BULLISH" else "↓"
+                sent_parts.append(f"[{ac}]{asset} {arr}{strength:.0f}[/{ac}]")
+            lines.append("  " + "  ".join(sent_parts))
+
+        # Symbol impact row
+        if simp:
+            imp_parts=[]
+            for sym,(d,strength,s) in list(simp.items())[:8]:
+                ic="bright_green" if d=="↑" else "bright_red"
+                imp_parts.append(f"[{ic}]{sym}{d}[/{ic}]")
+            lines.append("  " + "  ".join(imp_parts))
+
         lines.append("")
+
     return Panel("\n".join(lines).rstrip(),
-                 title="[bold bright_blue]● CANLI HABER & DUYGU ANALİZİ[/bold bright_blue]",
-                 border_style="bright_blue",box=box.ROUNDED)
+                 title="[bold bright_blue]● KURUMSAL MAKRO İSTİHBARAT — Haber Etki Analizi[/bold bright_blue]",
+                 border_style="bright_blue",box=box.ROUNDED,
+                 subtitle="[dim]Impact 80+ → Telegram · Impact 60+/30dk → TRADE BLOCK · Impact 80+/60dk → TRADE BLOCK[/dim]")
 
 def panel_quant():
     with lock: st=dict(stats_cache)
