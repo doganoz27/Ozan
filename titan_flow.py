@@ -1115,6 +1115,47 @@ def panel_stats():
              else f"[bright_red]↓×{wt:.2f}[/bright_red]" if wt<0.95
              else f"[dim]×{wt:.2f}[/dim]")
         lines.append(f"  [dim]{feat_names.get(col,col):<14}[/dim] {bar}  {wts}")
+
+    # ── Kapanmış pozisyonlar tablosu ──
+    lines.append("")
+    lines.append("[bold dim]━━━  KAPANMIŞ POZİSYONLAR  ━━━[/bold dim]")
+    try:
+        with db() as c:
+            rows=c.execute("""SELECT sym,quality,direction,entry,sl,tp1,tp3,
+                               out_price,act_rr,rr_t,status,created
+                               FROM signals WHERE status!='OPEN'
+                               ORDER BY id DESC LIMIT 30""").fetchall()
+    except: rows=[]
+
+    if not rows:
+        lines.append("  [dim]Henüz kapanmış pozisyon yok.[/dim]")
+    else:
+        # Başlık satırı
+        lines.append(
+            f"  [bold dim]{'SAAT':<7} {'SEMBOL':<10} {'GR':<4} {'YÖN':<6} "
+            f"{'GİRİŞ':>10} {'STOP':>10} {'TP3':>10} "
+            f"{'ÇIKIŞ':>10} {'DURUM':<7} {'GERÇEK R:R':>10} {'HEDEF R:R':>9}[/bold dim]")
+        lines.append("  [dim]" + "─"*105 + "[/dim]")
+        for r in rows:
+            ts=str(r["created"])[-8:-3] if r["created"] else "—"
+            st2=r["status"]
+            sc={"TP3":"bold bright_green","TP2":"bright_green","TP1":"green",
+                "SL":"bold bright_red","EXPIRED":"dim"}.get(st2,"white")
+            arr=r["act_rr"]
+            arr_s=(f"[bright_green]+{arr:.2f}R[/bright_green]" if arr and arr>0
+                   else f"[bright_red]{arr:.2f}R[/bright_red]" if arr and arr<0 else "[dim]—[/dim]")
+            dir_s="[bright_green]▲ LONG[/bright_green]" if r["direction"]=="LONG" else "[bright_red]▼ SHORT[/bright_red]"
+            lines.append(
+                f"  [dim]{ts:<7}[/dim] [bold white]{r['sym']:<10}[/bold white] {qc(r['quality']):<4} "
+                f"{dir_s:<6} "
+                f"[dim]{fp(r['entry']):>10}[/dim] "
+                f"[red]{fp(r['sl']):>10}[/red] "
+                f"[green]{fp(r['tp3']):>10}[/green] "
+                f"[dim]{fp(r['out_price']):>10}[/dim] "
+                f"[{sc}]{st2:<7}[/{sc}] "
+                f"{arr_s:>10}  "
+                f"[dim]1:{r['rr_t']:.2f}[/dim]")
+
     return Panel("\n".join(lines),
                  title="[bold bright_cyan]● PERFORMANS & ADAPTİF ÖĞRENME[/bold bright_cyan]",
                  border_style="bright_cyan",box=box.ROUNDED,
