@@ -212,6 +212,61 @@ def db_init():
 db_init()
 
 # ═══════════════════════════════════════════════════════════════
+# QUANT ANALYTICS
+# ═══════════════════════════════════════════════════════════════
+def rolling_vol(prices, n=20):
+    if len(prices) < n+1: return None
+    from statistics import stdev
+    rets=[(prices[i]/prices[i-1]-1) for i in range(len(prices)-n,len(prices))]
+    try: return round(stdev(rets)*math.sqrt(252)*100,2)
+    except: return None
+
+def vol_regime(prices):
+    v=rolling_vol(prices)
+    if v is None: return "?"
+    if v<10: return "DÜŞÜK"
+    if v<25: return "ORTA"
+    return "YÜKSEK"
+
+def historical_var(returns, conf=0.95):
+    if len(returns)<10: return None
+    return round(sorted(returns)[int((1-conf)*len(returns))],4)
+
+def kelly_pct(wr, avg_win, avg_loss):
+    if avg_loss==0: return 0
+    b=abs(avg_win/avg_loss); p=wr/100; q=1-p
+    k=(b*p-q)/b
+    return round(max(0,min(k*100,25)),1)
+
+def sharpe_ratio(returns):
+    if len(returns)<3: return None
+    from statistics import stdev
+    try:
+        m=sum(returns)/len(returns); s=stdev(returns)
+        return round(m/s*math.sqrt(252),2) if s else None
+    except: return None
+
+def sortino_ratio(returns):
+    if len(returns)<3: return None
+    from statistics import stdev
+    try:
+        m=sum(returns)/len(returns)
+        neg=[r for r in returns if r<0]
+        if not neg: return 99.0
+        ds=stdev(neg)
+        return round(m/ds*math.sqrt(252),2) if ds else None
+    except: return None
+
+def max_drawdown_pct(equity):
+    if len(equity)<2: return 0
+    peak=equity[0]; mdd=0
+    for v in equity:
+        if v>peak: peak=v
+        dd=(peak-v)/peak*100 if peak else 0
+        if dd>mdd: mdd=dd
+    return round(mdd,2)
+
+# ═══════════════════════════════════════════════════════════════
 # INDICATORS
 # ═══════════════════════════════════════════════════════════════
 def ema(p, n):
@@ -816,6 +871,45 @@ def compute_stats():
             else: new_w[f]=1.0
         c.commit()
         recent=c.execute("SELECT sym,quality,direction,status,act_rr,rr_t,entry,created FROM signals ORDER BY id DESC LIMIT 12").fetchall()
+
+        # ── Quant metrics ──
+        trade_rets=[r["act_rr"]*0.01 for r in closed if r["act_rr"] is not None]
+        equity=[1.0]
+        for r in trade_rets: equity.append(equity[-1]*(1+r))
+        wins_rr=[r["act_rr"] for r in wins if r["act_rr"]]
+        loss_rr=[abs(r["act_rr"]) for r in closed if r["status"]=="SL" and r["act_rr"]]
+        avg_win=sum(wins_rr)/len(wins_rr) if wins_rr else 0
+        avg_loss=sum(loss_rr)/len(loss_rr) if loss_rr else 1
+        sharpe=sharpe_ratio(trade_rets)
+        sortino=sortino_ratio(trade_rets)
+        mdd=max_drawdown_pct(equity)
+        var95=historical_var(trade_rets)
+        kelly=kelly_pct(wr,avg_win,avg_loss)
+        calmar=round(avg_rr/mdd,2) if mdd>0 else None
+
+        # Seans analizi
+        sess_stats={}
+        for r in closed:
+            try: hr=int(str(r["created"])[11:13])
+            except: hr=12
+            if hr<8: sess="ASYA"
+            elif hr<13: sess="LONDRA"
+            elif hr<21: sess="NEW YORK"
+            else: sess="ASYA"
+            sess_stats.setdefault(sess,{"t":0,"w":0})
+            sess_stats[sess]["t"]+=1
+            if r["status"] in ("TP1","TP2","TP3"): sess_stats[sess]["w"]+=1
+
+        # Sembol bazlı performans
+        sym_perf={}
+        for r in closed:
+            s=r["sym"]
+            sym_perf.setdefault(s,{"t":0,"w":0,"rr":[]})
+            sym_perf[s]["t"]+=1
+            if r["status"] in ("TP1","TP2","TP3"):
+                sym_perf[s]["w"]+=1
+            if r["act_rr"]: sym_perf[s]["rr"].append(r["act_rr"])
+
         with lock:
             stats_cache={"total":total,"wins":len(wins),"wr":wr,"avg_rr":avg_rr,"pf":pf,
                          "tp3":sum(1 for r in closed if r["status"]=="TP3"),
@@ -823,7 +917,11 @@ def compute_stats():
                          "tp1":sum(1 for r in closed if r["status"]=="TP1"),
                          "sl":sum(1 for r in closed if r["status"]=="SL"),
                          "by_q":bq,"fstats":fstats,
-                         "recent":[dict(r) for r in recent]}
+                         "recent":[dict(r) for r in recent],
+                         "sharpe":sharpe,"sortino":sortino,"calmar":calmar,
+                         "mdd":mdd,"var95":var95,"kelly":kelly,
+                         "avg_win":avg_win,"avg_loss":avg_loss,
+                         "sess_stats":sess_stats,"sym_perf":sym_perf}
         if total>=MIN_TRADES_ADAPT:
             adap_weights.update(new_w)
 
@@ -1210,6 +1308,92 @@ def panel_news():
                  title="[bold bright_blue]● CANLI HABER & DUYGU ANALİZİ[/bold bright_blue]",
                  border_style="bright_blue",box=box.ROUNDED)
 
+def panel_quant():
+    with lock: st=dict(stats_cache)
+    if not st:
+        return Panel(Align.center("[dim]Quant analiz için en az 5 kapanmış sinyal gerekiyor.[/dim]"),
+                     title="[bold bright_magenta]● QUANT ANALİTİK — RİSK METRİKLERİ[/bold bright_magenta]",
+                     border_style="bright_magenta",box=box.ROUNDED)
+
+    sharpe=st.get("sharpe"); sortino=st.get("sortino"); calmar=st.get("calmar")
+    mdd=st.get("mdd",0); var95=st.get("var95"); kelly=st.get("kelly",0)
+    avg_win=st.get("avg_win",0); avg_loss=st.get("avg_loss",0)
+    total=st.get("total",0); wr=st.get("wr",0)
+
+    def fc(v,good,bad):
+        if v is None: return "[dim]—[/dim]"
+        c="bright_green" if v>=good else "bright_red" if v<=bad else "yellow"
+        return f"[{c}]{v}[/{c}]"
+
+    lines=["[bold]━━━  TEMEL ORANLAR  ━━━[/bold]",""]
+    lines.append(f"  Sharpe Oranı    : {fc(sharpe,1.5,0.5)}  [dim](>1.5 mükemmel · >1.0 iyi)[/dim]")
+    lines.append(f"  Sortino Oranı   : {fc(sortino,2.0,0.8)}  [dim](aşağı risk odaklı Sharpe)[/dim]")
+    lines.append(f"  Calmar Oranı    : {fc(calmar,1.0,0.3)}  [dim](return/max drawdown)[/dim]")
+    lines.append(f"  Max Drawdown    : [{'bright_red' if mdd>20 else 'yellow' if mdd>10 else 'bright_green'}]{mdd:.1f}%[/{'bright_red' if mdd>20 else 'yellow' if mdd>10 else 'bright_green'}]  [dim](öz sermaye düşüşü)[/dim]")
+    if var95 is not None:
+        var_pct=abs(var95)*100
+        vc="bright_red" if var_pct>3 else "yellow" if var_pct>1.5 else "bright_green"
+        lines.append(f"  VaR %95 (1 trade): [{vc}]%{var_pct:.2f}[/{vc}]  [dim](sermayenin %1 risk ile)[/dim]")
+    lines.append("")
+    lines.append("[bold]━━━  KELLY CRITERION  ━━━[/bold]")
+    lines.append("")
+    kc="bright_green" if 5<=kelly<=15 else "yellow" if kelly<=25 else "bright_red"
+    lines.append(f"  Önerilen pozisyon boyutu : [{kc}]%{kelly:.1f}[/{kc}]  [dim](1/2 Kelly = %{kelly/2:.1f} tavsiye edilir)[/dim]")
+    lines.append(f"  Ort kazanç R:R  : [bright_green]+{avg_win:.2f}R[/bright_green]")
+    lines.append(f"  Ort kayıp R:R   : [bright_red]-{avg_loss:.2f}R[/bright_red]")
+    lines.append(f"  Win Rate        : {wr:.1f}%  |  {total} trade")
+    lines.append("")
+
+    # Seans analizi
+    sess=st.get("sess_stats",{})
+    if sess:
+        lines.append("[bold]━━━  SEANS PERFORMANSI  ━━━[/bold]")
+        lines.append("")
+        for s,d in sorted(sess.items(),key=lambda x:-(x[1]["w"]/x[1]["t"] if x[1]["t"] else 0)):
+            t=d["t"]; w=d["w"]
+            swr=round(w/t*100,0) if t else 0
+            sc="bright_green" if swr>=60 else "bright_red" if swr<40 else "yellow"
+            bar="█"*int(swr/10)+"░"*(10-int(swr/10))
+            lines.append(f"  [bold]{s:<10}[/bold]  [{sc}]{bar}[/{sc}] [{sc}]{swr:.0f}%[/{sc}]  [dim]{w}/{t} trade[/dim]")
+        lines.append("")
+
+    # Volatilite rejimleri
+    lines.append("[bold]━━━  VOLATİLİTE REJİMLERİ  ━━━[/bold]")
+    lines.append("")
+    with lock: snap=dict(market)
+    vols=[]
+    for name,md in snap.items():
+        if md.candles and len(md.candles)>=25:
+            cl=[c[4] for c in md.candles[-25:]]
+            v=rolling_vol(cl,20)
+            if v: vols.append((name,v,vol_regime(cl)))
+    vols.sort(key=lambda x:-x[1])
+    for name,v,regime in vols[:12]:
+        rc={"YÜKSEK":"bright_red","ORTA":"yellow","DÜŞÜK":"bright_green"}.get(regime,"dim")
+        lines.append(f"  [dim]{name:<10}[/dim]  [{rc}]{regime:<7}[/{rc}]  [dim]Ann.vol %{v:.1f}[/dim]")
+    lines.append("")
+
+    # Sembol win rate tablosu
+    sym_perf=st.get("sym_perf",{})
+    if sym_perf:
+        lines.append("[bold]━━━  SEMBOL BAZLI PERFORMANS  ━━━[/bold]")
+        lines.append("")
+        lines.append(f"  [bold dim]{'SEMBOL':<12} {'W/T':>6} {'WIN%':>6} {'AVG R:R':>8}[/bold dim]")
+        lines.append("  " + "─"*36)
+        for sym,d in sorted(sym_perf.items(),key=lambda x:-(x[1]["w"]/x[1]["t"] if x[1]["t"] else 0)):
+            t=d["t"]; w=d["w"]
+            if t<2: continue
+            swr=round(w/t*100,1)
+            avg_r=round(sum(d["rr"])/len(d["rr"]),2) if d["rr"] else 0
+            sc="bright_green" if swr>=60 else "bright_red" if swr<40 else "yellow"
+            rc="bright_green" if avg_r>0 else "bright_red"
+            lines.append(f"  [bold white]{sym:<12}[/bold white] [{sc}]{w}/{t}[/{sc}] [{sc}]{swr:>5.1f}%[/{sc}] [{rc}]{avg_r:>+7.2f}R[/{rc}]")
+
+    return Panel("\n".join(lines),
+                 title="[bold bright_magenta]● QUANT ANALİTİK — RİSK METRİKLERİ[/bold bright_magenta]",
+                 border_style="bright_magenta",box=box.ROUNDED,
+                 subtitle="[dim]Sharpe · Sortino · Calmar · VaR · Kelly · Seans · Sembol[/dim]")
+
 def panel_risk():
     with lock:
         n_live=sum(1 for md in market.values() if md.price)
@@ -1233,7 +1417,7 @@ def panel_risk():
 # PAGE SYSTEM
 # ═══════════════════════════════════════════════════════════════
 current_page = 1
-PAGE_NAMES = {1:"PİYASA",2:"SETUPLAR",3:"DETAY",4:"COT",5:"JOURNAL",6:"HABERLER"}
+PAGE_NAMES = {1:"PİYASA",2:"SETUPLAR",3:"DETAY",4:"COT",5:"JOURNAL",6:"HABERLER",7:"QUANT"}
 
 def nav_bar():
     parts=[]
@@ -1251,7 +1435,7 @@ def key_listener():
         while True:
             if msvcrt.kbhit():
                 ch=msvcrt.getch()
-                if ch in (b'1',b'2',b'3',b'4',b'5',b'6'):
+                if ch in (b'1',b'2',b'3',b'4',b'5',b'6',b'7'):
                     current_page=int(ch.decode())
             time.sleep(0.05)
     except: pass
@@ -1273,10 +1457,12 @@ def render():
         lo=Layout()
         body=Layout(); body.split_row(Layout(panel_journal()),Layout(panel_stats()))
         lo.split_column(Layout(hdr,size=3),Layout(nav,size=3),body)
-    else:
+    elif current_page==6:
         lo=Layout()
         body=Layout(); body.split_row(Layout(panel_news(),ratio=3),Layout(panel_risk(),ratio=1))
         lo.split_column(Layout(hdr,size=3),Layout(nav,size=3),body)
+    else:
+        lo=Layout(); lo.split_column(Layout(hdr,size=3),Layout(nav,size=3),Layout(panel_quant()))
     return lo
 
 # ═══════════════════════════════════════════════════════════════
