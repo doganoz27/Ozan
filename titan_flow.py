@@ -381,8 +381,26 @@ def structure(highs,lows,n=8):
     return "RANGE"
 
 # ═══════════════════════════════════════════════════════════════
-# SCORING ENGINE
+# SCORING ENGINE  (100-point institutional rejection filter)
 # ═══════════════════════════════════════════════════════════════
+# Point budget:
+#   EMA stack      0-11   (8 stack + 3 EMA200)
+#   RSI            0-10
+#   MACD           0-8
+#   VWAP           0-4
+#   Bollinger      0-5
+#   Liq Sweep      0-12   (required for A+)
+#   Order Block    0-8
+#   FVG            0-6
+#   Structure      0-8
+#   Volume         0-4
+#   COT            0-10
+#   News           0-10
+#   RR bonus       10-15  (applied after normalisation)
+#   Time bonus     -3..+2
+#   Max raw ≈ 96
+MAX_RAW = 96
+
 def score_setup(sym, candles, price, news_items=None):
     if len(candles) < 40: return None
     cl=[c[4] for c in candles]
@@ -404,129 +422,154 @@ def score_setup(sym, candles, price, news_items=None):
     avg_v=sum(vo[-20:])/20 if vo else 1
     vol_sp=vo[-1]>avg_v*1.5 if vo else False
 
+    if not av or av==0: return None
+
     sl_=sr_=0
-    rl=[]  # long reasons
-    rs=[]  # short reasons
+    rl=[]; rs=[]
+    neg_l=[]; neg_s=[]
     fl={"f_ema":0,"f_rsi":0,"f_macd":0,"f_sweep":0,
         "f_ob":0,"f_fvg":0,"f_struct":0,"f_cot":0,"f_news":0}
+    sweep_confirmed=False
 
-    # EMA stack
+    # ── EMA Stack (0-11) ─────────────────────────────────────────
     if e9 and e20 and e50:
         if e9[-1]>e20[-1]>e50[-1]:
-            sl_+=2; fl["f_ema"]=1
-            rl.append(f"EMA 9>20>50 bullish stack ({e9[-1]:.5f})")
+            sl_+=8; fl["f_ema"]=1; rl.append("EMA 9>20>50 bullish stack")
         elif e9[-1]<e20[-1]<e50[-1]:
-            sr_+=2; fl["f_ema"]=1
-            rs.append(f"EMA 9<20<50 bearish stack")
+            sr_+=8; fl["f_ema"]=1; rs.append("EMA 9<20<50 bearish stack")
+        else:
+            neg_l.append("EMA stack misaligned — no trend conviction")
+            neg_s.append("EMA stack misaligned — no trend conviction")
     if e200:
-        if price>e200[-1]: sl_+=1; rl.append(f"Above EMA200 — macro bullish")
-        else:              sr_+=1; rs.append(f"Below EMA200 — macro bearish")
+        if price>e200[-1]: sl_+=3; rl.append("Above EMA200 — macro bullish")
+        else:              sr_+=3; rs.append("Below EMA200 — macro bearish")
 
-    # RSI
+    # ── RSI (0-10) ───────────────────────────────────────────────
     if rv is not None:
         fl["f_rsi"]=1 if rv<35 or rv>65 else 0
-        if rv<30:   sl_+=3; rl.append(f"RSI extreme oversold ({rv})")
-        elif rv<40: sl_+=2; rl.append(f"RSI oversold ({rv})")
-        elif rv>70: sr_+=3; rs.append(f"RSI extreme overbought ({rv})")
-        elif rv>60: sr_+=2; rs.append(f"RSI overbought ({rv})")
+        if rv<30:   sl_+=10; rl.append(f"RSI extreme oversold ({rv})")
+        elif rv<40: sl_+=7;  rl.append(f"RSI oversold ({rv})")
+        elif rv>70: sr_+=10; rs.append(f"RSI extreme overbought ({rv})")
+        elif rv>60: sr_+=7;  rs.append(f"RSI overbought ({rv})")
         else:
-            sl_+=1; sr_+=1
-            rl.append(f"RSI neutral ({rv}) — room to run")
-            rs.append(f"RSI neutral ({rv}) — room to run")
+            sl_+=3; sr_+=3
+            neg_l.append(f"RSI neutral ({rv}) — weak directional signal")
+            neg_s.append(f"RSI neutral ({rv}) — weak directional signal")
 
-    # MACD
+    # ── MACD (0-8) ───────────────────────────────────────────────
     if mh is not None:
         fl["f_macd"]=1 if abs(mh)>0 else 0
-        if mh>0 and ml>ms: sl_+=2; rl.append(f"MACD bullish crossover (hist {mh:+.5f})")
-        elif mh<0 and ml<ms: sr_+=2; rs.append(f"MACD bearish crossover (hist {mh:+.5f})")
-        elif mh>0: sl_+=1; rl.append(f"MACD histogram positive ({mh:+.5f})")
-        elif mh<0: sr_+=1; rs.append(f"MACD histogram negative ({mh:+.5f})")
+        if mh>0 and ml>ms:   sl_+=8; rl.append(f"MACD bullish crossover (hist {mh:+.5f})")
+        elif mh<0 and ml<ms: sr_+=8; rs.append(f"MACD bearish crossover (hist {mh:+.5f})")
+        elif mh>0:            sl_+=4; rl.append(f"MACD histogram positive ({mh:+.5f})")
+        elif mh<0:            sr_+=4; rs.append(f"MACD histogram negative ({mh:+.5f})")
 
-    # VWAP
+    # ── VWAP (0-4) ───────────────────────────────────────────────
     if vw:
         dev=(price-vw)/vw*100
-        if price>vw*1.001: sl_+=1; rl.append(f"Above VWAP {dev:+.2f}% — institutional bid")
-        elif price<vw*0.999: sr_+=1; rs.append(f"Below VWAP {dev:+.2f}% — sell pressure")
+        if price>vw*1.001:   sl_+=4; rl.append(f"Above VWAP {dev:+.2f}% — institutional bid")
+        elif price<vw*0.999: sr_+=4; rs.append(f"Below VWAP {dev:+.2f}% — sell pressure")
 
-    # Bollinger
+    # ── Bollinger (0-5) ──────────────────────────────────────────
     if bbl and bbh:
-        if price<=bbl*1.001: sl_+=2; rl.append(f"At lower Bollinger ({bbl:.5f}) — mean reversion")
-        elif price>=bbh*0.999: sr_+=2; rs.append(f"At upper Bollinger ({bbh:.5f}) — mean reversion")
+        if price<=bbl*1.001:   sl_+=5; rl.append(f"At lower Bollinger ({bbl:.5f}) — mean reversion")
+        elif price>=bbh*0.999: sr_+=5; rs.append(f"At upper Bollinger ({bbh:.5f}) — mean reversion")
 
-    # Liquidity sweep
+    # ── Liquidity Sweep (0-12) — required for A+ ─────────────────
     if sw:
-        fl["f_sweep"]=1
-        if sw[0]=="BULL": sl_+=3; rl.append(f"BULLISH LIQUIDITY SWEEP below {sw[1]:.5f} — stops taken")
-        else:             sr_+=3; rs.append(f"BEARISH LIQUIDITY SWEEP above {sw[1]:.5f} — stops taken")
+        fl["f_sweep"]=1; sweep_confirmed=True
+        if sw[0]=="BULL": sl_+=12; rl.append(f"BULLISH LIQUIDITY SWEEP below {sw[1]:.5f} — stops taken")
+        else:             sr_+=12; rs.append(f"BEARISH LIQUIDITY SWEEP above {sw[1]:.5f} — stops taken")
+    else:
+        neg_l.append("No liquidity sweep confirmed")
+        neg_s.append("No liquidity sweep confirmed")
 
-    # Order block
-    if bOB and abs(price-(bOB[0]+bOB[1])/2)/(bOB[0]+bOB[1])*2<0.015:
-        fl["f_ob"]=1; sl_+=2; rl.append(f"At BULLISH ORDER BLOCK {bOB[0]:.5f}–{bOB[1]:.5f}")
-    if beOB and abs(price-(beOB[0]+beOB[1])/2)/(beOB[0]+beOB[1])*2<0.015:
-        fl["f_ob"]=1; sr_+=2; rs.append(f"At BEARISH ORDER BLOCK {beOB[0]:.5f}–{beOB[1]:.5f}")
+    # ── Order Block (0-8) ────────────────────────────────────────
+    if bOB and abs(price-(bOB[0]+bOB[1])/2)/((bOB[0]+bOB[1])/2)<0.015:
+        fl["f_ob"]=1; sl_+=8; rl.append(f"At BULLISH ORDER BLOCK {bOB[0]:.5f}–{bOB[1]:.5f}")
+    if beOB and abs(price-(beOB[0]+beOB[1])/2)/((beOB[0]+beOB[1])/2)<0.015:
+        fl["f_ob"]=1; sr_+=8; rs.append(f"At BEARISH ORDER BLOCK {beOB[0]:.5f}–{beOB[1]:.5f}")
 
-    # FVG
+    # ── FVG (0-6) ────────────────────────────────────────────────
     if bFVG and bFVG[0]<=price<=bFVG[1]:
-        fl["f_fvg"]=1; sl_+=2; rl.append(f"Inside BULLISH FVG {bFVG[0]:.5f}–{bFVG[1]:.5f}")
+        fl["f_fvg"]=1; sl_+=6; rl.append(f"Inside BULLISH FVG {bFVG[0]:.5f}–{bFVG[1]:.5f}")
     if beFVG and beFVG[1]<=price<=beFVG[0]:
-        fl["f_fvg"]=1; sr_+=2; rs.append(f"Inside BEARISH FVG {beFVG[1]:.5f}–{beFVG[0]:.5f}")
+        fl["f_fvg"]=1; sr_+=6; rs.append(f"Inside BEARISH FVG {beFVG[1]:.5f}–{beFVG[0]:.5f}")
 
-    # Market structure
-    if st=="BULL": fl["f_struct"]=1; sl_+=2; rl.append("HH+HL bullish structure — trend continuation")
-    elif st=="BEAR": fl["f_struct"]=1; sr_+=2; rs.append("LH+LL bearish structure — trend continuation")
+    # ── Market Structure (0-8) ───────────────────────────────────
+    if st=="BULL":
+        fl["f_struct"]=1; sl_+=8; rl.append("HH+HL bullish structure — trend continuation")
+        neg_s.append("HTF structure is BULLISH — counter-trend short risk")
+    elif st=="BEAR":
+        fl["f_struct"]=1; sr_+=8; rs.append("LH+LL bearish structure — trend continuation")
+        neg_l.append("HTF structure is BEARISH — counter-trend long risk")
+    else:
+        neg_l.append("Market structure unclear (RANGE) — no institutional bias")
+        neg_s.append("Market structure unclear (RANGE) — no institutional bias")
 
-    # Volume spike
+    # ── Volume (0-4) ─────────────────────────────────────────────
     if vol_sp:
-        sl_+=1; sr_+=1
+        sl_+=4; sr_+=4
         rl.append(f"Volume spike {vo[-1]/avg_v:.1f}x avg — institutional activity")
         rs.append(f"Volume spike {vo[-1]/avg_v:.1f}x avg — institutional activity")
+    else:
+        neg_l.append("No volume spike — weak institutional participation")
+        neg_s.append("No volume spike — weak institutional participation")
 
-    # COT
+    # ── COT (0-10) ───────────────────────────────────────────────
     cot=cot_cache.get(sym,{})
     if cot:
         cs=cot.get("cot_score",0)
-        if cs>0:  fl["f_cot"]=1; sl_+=cs; rl.append(f"COT bullish ({cot.get('bias','')}, {cot.get('pct_rank',50):.0f}th pct)")
-        elif cs<0: fl["f_cot"]=1; sr_+=abs(cs); rs.append(f"COT bearish ({cot.get('bias','')}, {cot.get('pct_rank',50):.0f}th pct)")
+        cot_pts=min(abs(cs)*3,10)
+        if cs>0:
+            fl["f_cot"]=1; sl_+=cot_pts
+            rl.append(f"COT bullish ({cot.get('bias','')}, {cot.get('pct_rank',50):.0f}th pct)")
+        elif cs<0:
+            fl["f_cot"]=1; sr_+=cot_pts
+            rs.append(f"COT bearish ({cot.get('bias','')}, {cot.get('pct_rank',50):.0f}th pct)")
         ct=cot.get("contrarian")
-        if ct:
-            if ct=="LONG":  fl["f_cot"]=1; sl_+=2; rl.append(f"COT CONTRARIAN LONG — specs at extreme short")
-            elif ct=="SHORT": fl["f_cot"]=1; sr_+=2; rs.append(f"COT CONTRARIAN SHORT — specs at extreme long")
+        if ct=="LONG":  fl["f_cot"]=1; sl_+=2; rl.append("COT CONTRARIAN LONG — specs at extreme short")
+        elif ct=="SHORT": fl["f_cot"]=1; sr_+=2; rs.append("COT CONTRARIAN SHORT — specs at extreme long")
+    else:
+        neg_l.append("COT data unavailable — no open-interest confirmation")
+        neg_s.append("COT data unavailable — no open-interest confirmation")
 
-    # News sentiment
-    news_score=0
-    news_rl=[]; news_rs=[]
+    # ── News Sentiment (0-10) ────────────────────────────────────
+    news_score=0; news_rl=[]; news_rs=[]
     if news_items:
         for n in news_items:
             t=(n.get("headline","")+n.get("summary","")).lower()
             b=sum(1 for w in BULL_W if w in t)
             be=sum(1 for w in BEAR_W if w in t)
             news_score+=(b-be)
+        news_pts=min(abs(news_score)*2,10)
         if news_score>=2:
-            fl["f_news"]=1; sl_+=min(news_score,3)
+            fl["f_news"]=1; sl_+=news_pts
             news_rl=[f"NEWS BULLISH (score +{news_score}): {news_items[0].get('headline','')[:70]}"]
         elif news_score<=-2:
-            fl["f_news"]=1; sr_+=min(abs(news_score),3)
+            fl["f_news"]=1; sr_+=news_pts
             news_rs=[f"NEWS BEARISH (score {news_score}): {news_items[0].get('headline','')[:70]}"]
+        else:
+            neg_l.append("No strong news catalyst")
+            neg_s.append("No strong news catalyst")
+    else:
+        neg_l.append("No news data available")
+        neg_s.append("No news data available")
 
-    # Apply adaptive weights
+    # ── Adaptive weight bonus (max ±5) ───────────────────────────
     for feat,val in fl.items():
         if val:
             w=adap_weights.get(feat,1.0)
-            if sl_>=sr_: sl_+=(w-1.0)
-            else:        sr_+=(w-1.0)
+            sl_=sl_+(w-1.0)*2 if sl_>=sr_ else sl_
+            sr_=sr_+(w-1.0)*2 if sr_>sl_ else sr_
 
+    # ── Pick direction ───────────────────────────────────────────
     if sl_>=sr_:
-        direction="LONG"; score=sl_; reasons=rl+news_rl
+        direction="LONG"; raw=sl_; reasons=rl+news_rl; neg_factors=neg_l
     else:
-        direction="SHORT"; score=sr_; reasons=rs+news_rs
+        direction="SHORT"; raw=sr_; reasons=rs+news_rs; neg_factors=neg_s
 
-    if   score>=10: quality="A+"
-    elif score>=8:  quality="A"
-    elif score>=6:  quality="B+"
-    else: return None
-
-    if not av or av==0: return None
-
+    # ── Compute entry/SL/TP ──────────────────────────────────────
     if direction=="LONG":
         el=price-av*0.3; eh=price+av*0.15
         sl=price-av*1.8; tp1=price+av*1.5
@@ -538,13 +581,56 @@ def score_setup(sym, candles, price, news_items=None):
 
     risk=abs(price-sl); reward=abs(tp3-price)
     rr=round(reward/risk,2) if risk>0 else 0
-    if rr<2.5: return None
+
+    # ── HARD REJECT: RR < 2.0 ───────────────────────────────────
+    if rr<2.0:
+        return None
+
+    # ── RR bonus (10-15 pts) ─────────────────────────────────────
+    rr_bonus = 15 if rr>=3.0 else 12 if rr>=2.5 else 10
+    if rr<2.5: neg_factors.append(f"RR {rr} below preferred 1:2.5 threshold")
+
+    # ── Normalise to 100 then blend RR bonus ─────────────────────
+    score_100=round(min(raw/MAX_RAW*85+rr_bonus,100),1)
+
+    # ── Expected hold time (TP2 distance ÷ ATR = hours) ──────────
+    hold_h=round(abs(tp2-price)/av,1) if av else 8.0
+    time_bonus=(2 if hold_h<=4 else 1 if hold_h<=8 else 0 if hold_h<=24 else -3)
+    score_100=round(min(max(score_100+time_bonus,0),100),1)
+
+    if hold_h>24: neg_factors.append(f"Hold time ~{hold_h:.0f}h — capital locked overnight+")
+    elif hold_h>8: neg_factors.append(f"Hold time ~{hold_h:.0f}h — crosses session boundary")
+
+    # ── HARD REJECT: confidence < 55 ─────────────────────────────
+    if score_100<55: return None
+
+    # ── Quality thresholds ───────────────────────────────────────
+    if   score_100>=85: quality="A+"
+    elif score_100>=75: quality="A"
+    elif score_100>=65: quality="B+"
+    elif score_100>=55: quality="WATCH"
+    else: return None
+
+    # A+ requires liquidity sweep
+    if quality=="A+" and not sweep_confirmed:
+        quality="A"
+
+    # Status string
+    if score_100>=75:
+        status="APPROVED"
+    elif score_100>=55:
+        status="WATCHLIST"
+    else:
+        status="REJECTED"
+
+    confidence=score_100
 
     return {
-        "sym":sym,"quality":quality,"direction":direction,
+        "sym":sym,"quality":quality,"direction":direction,"status":status,
         "price":price,"el":el,"eh":eh,"sl":sl,
         "tp1":tp1,"tp2":tp2,"tp3":tp3,"rr":rr,
-        "score":round(score,1),"reasons":reasons,
+        "score":score_100,"confidence":confidence,"hold_h":hold_h,
+        "reasons":reasons,"neg_factors":neg_factors,
         "flags":fl,"rsi":rv,"atr":av,"cot":cot,
         "news_score":news_score,
         "time":datetime.now().strftime("%H:%M:%S"),
@@ -1013,7 +1099,7 @@ def cpct(v):
     return "[dim]0.00%[/dim]"
 
 def qc(q):
-    c={"A+":"bold bright_yellow","A":"bold green","B+":"bold cyan"}.get(q,"white")
+    c={"A+":"bold bright_yellow","A":"bold green","B+":"bold cyan","WATCH":"bold dim yellow"}.get(q,"white")
     return f"[{c}]{q}[/{c}]"
 
 def dc(d):
@@ -1078,36 +1164,46 @@ def panel_setups():
     ss=list(setups)
     if not ss:
         return Panel(Align.center(
-            "[bold bright_yellow]TARAMA DEVAM EDİYOR...[/bold bright_yellow]\n"
-            "[dim]A+ / A / B+  ·  Min R:R 1:2.5  ·  Her 30 saniyede güncellenir[/dim]"),
+            "[bold bright_yellow]KURUMSAL SETUP TARANIYOR...[/bold bright_yellow]\n"
+            "[dim]Min R:R 1:2.0  ·  Skor ≥55/100  ·  Her 30 saniyede güncellenir[/dim]"),
             title="[bold bright_yellow]● AKTİF SETUPLАР[/bold bright_yellow]",
             border_style="bright_yellow",box=box.HEAVY)
-    t=Table(title="[bold bright_yellow]● AKTİF SETUPLАР — A+ / A / B+[/bold bright_yellow]",
+    t=Table(title="[bold bright_yellow]● AKTİF SETUPLАР — KURUMSAL KALİTE FİLTRESİ[/bold bright_yellow]",
             box=box.SIMPLE_HEAVY,border_style="bright_yellow",
             header_style="bold bright_yellow",show_lines=True)
-    t.add_column("GRADE", width=6, justify="center")
-    t.add_column("SYMBOL",width=12,style="bold white")
-    t.add_column("DIR",   width=9, justify="center")
-    t.add_column("FİYAT", width=13,justify="right")
-    t.add_column("GİRİŞ ZONU", width=24,justify="right")
-    t.add_column("STOP", width=13,justify="right",style="bright_red")
-    t.add_column("TP1",  width=13,justify="right",style="green")
-    t.add_column("TP2",  width=13,justify="right",style="bright_green")
-    t.add_column("TP3",  width=13,justify="right",style="bright_yellow")
-    t.add_column("R:R",  width=7, justify="center")
-    t.add_column("RSI",  width=6, justify="center")
-    t.add_column("SKOR", width=6, justify="center",style="dim")
-    t.add_column("SAAT", width=7)
+    t.add_column("GRADE",  width=6,  justify="center")
+    t.add_column("STATUS", width=10, justify="center")
+    t.add_column("SYMBOL", width=10, style="bold white")
+    t.add_column("DIR",    width=8,  justify="center")
+    t.add_column("SKOR",   width=8,  justify="center")
+    t.add_column("GÜVEN",  width=7,  justify="center")
+    t.add_column("FİYAT",  width=12, justify="right")
+    t.add_column("GİRİŞ ZONU",width=22,justify="right")
+    t.add_column("STOP",   width=12, justify="right",style="bright_red")
+    t.add_column("TP1",    width=12, justify="right",style="green")
+    t.add_column("TP2",    width=12, justify="right",style="bright_green")
+    t.add_column("TP3",    width=12, justify="right",style="bright_yellow")
+    t.add_column("R:R",    width=7,  justify="center")
+    t.add_column("HOLD",   width=7,  justify="center",style="dim")
+    t.add_column("SAAT",   width=7)
     for s in ss:
         rv=s.get("rsi"); rc="bright_green" if rv and rv<40 else "bright_red" if rv and rv>65 else "white"
+        sc=s["score"]; sk_c="bold bright_yellow" if sc>=85 else "bold green" if sc>=75 else "cyan" if sc>=65 else "dim"
+        st2=s.get("status","?")
+        st_c="bold bright_green" if st2=="APPROVED" else "yellow" if st2=="WATCHLIST" else "bright_red"
+        hold=s.get("hold_h",0)
+        hold_s=f"{hold:.0f}h" if hold else "—"
         t.add_row(
-            qc(s["quality"]), s["sym"], dc(s["direction"]),
+            qc(s["quality"]),
+            f"[{st_c}]{st2}[/{st_c}]",
+            s["sym"], dc(s["direction"]),
+            f"[{sk_c}]{sc:.0f}/100[/{sk_c}]",
+            f"{s.get('confidence',sc):.0f}%",
             f"[bright_white]{fp(s['price'])}[/bright_white]",
             f"{fp(s['el'])} – {fp(s['eh'])}",
             fp(s["sl"]),fp(s["tp1"]),fp(s["tp2"]),fp(s["tp3"]),
             f"[bold]1:{s['rr']}[/bold]",
-            f"[{rc}]{rv:.0f}[/{rc}]" if rv else "—",
-            str(s["score"]), s["time"])
+            hold_s, s["time"])
     return Panel(t,border_style="bright_yellow",box=box.HEAVY)
 
 def panel_details():
@@ -1118,24 +1214,48 @@ def panel_details():
                      border_style="bright_yellow",box=box.ROUNDED)
     panels=[]
     for s in ss:
-        tech="\n".join(f"  [bright_green]{i+1:02d}.[/bright_green] {r}" for i,r in enumerate(s["reasons"]))
-        cot=s.get("cot",{})
-        cot_txt=""
+        sc=s["score"]; conf=s.get("confidence",sc); hold=s.get("hold_h",0)
+        st2=s.get("status","?"); rr=s["rr"]
+        st_c="bold bright_green" if st2=="APPROVED" else "yellow" if st2=="WATCHLIST" else "bold bright_red"
+        dec=("Execute" if st2=="APPROVED" else "Watchlist" if st2=="WATCHLIST" else "Reject")
+        dec_c="bright_green" if dec=="Execute" else "yellow" if dec=="Watchlist" else "bright_red"
+
+        # Header block — matches requested output format
+        header=(
+            f"{qc(s['quality'])}  {dc(s['direction'])}  [bold white]{s['sym']}[/bold white]\n\n"
+            f"  [bold]TRADE SCORE   :[/bold] [bold bright_yellow]{sc:.0f}/100[/bold bright_yellow]\n"
+            f"  [bold]STATUS        :[/bold] [{st_c}]{st2}[/{st_c}]\n"
+            f"  [bold]CONFIDENCE    :[/bold] {conf:.0f}/100\n"
+            f"  [bold]HOLD TIME     :[/bold] ~{hold:.1f} saat\n"
+            f"  [bold]RISK REWARD   :[/bold] 1:{rr}\n"
+            f"  [bold]RSI / ATR     :[/bold] {s.get('rsi','—')} / {fp(s.get('atr'))}\n")
+
+        # Positive factors
+        pos="\n".join(f"  [bright_green]✓[/bright_green] {r}" for r in s["reasons"]) or "  [dim]—[/dim]"
+
+        # Negative factors
+        neg_list=s.get("neg_factors",[])
+        neg="\n".join(f"  [bright_red]✗[/bright_red] {r}" for r in neg_list) or "  [dim]Yok[/dim]"
+
+        # COT block
+        cot=s.get("cot",{}); cot_txt=""
         if cot:
             pr=cot.get("pct_rank",50)
             cot_txt=(f"\n[bold dim]── COT (CFTC) ──[/bold dim]\n"
-                     f"  Tarih: {cot.get('date','—')}  |  {bias_c(cot.get('bias',''))}  |  {pbar(pr)} {pr:.0f}%\n"
-                     f"  Spec net: {cot.get('spec_net',0):+,}  (WoW: {cot.get('spec_chg',0):+,})\n"
-                     f"  Comm net: {cot.get('comm_net',0):+,}  |  OI: {cot.get('oi',0):,}\n")
+                     f"  {cot.get('date','—')}  |  {bias_c(cot.get('bias',''))}  |  {pbar(pr)} {pr:.0f}%\n"
+                     f"  Spec net: {cot.get('spec_net',0):+,}  Δ {cot.get('spec_chg',0):+,}  "
+                     f"Comm net: {cot.get('comm_net',0):+,}\n")
             if cot.get("contrarian"):
-                cot_txt+=f"  [bold bright_yellow]⚠ CONTRARIAN {cot['contrarian']} — specs aşırı pozisyonda[/bold bright_yellow]\n"
-        narr="\n".join(f"  {l}" for l in s["narrative"].split("\n"))
+                cot_txt+=f"  [bold bright_yellow]⚠ CONTRARIAN {cot['contrarian']}[/bold bright_yellow]\n"
+
         content=(
-            f"{qc(s['quality'])}  {dc(s['direction'])}  [bold white]{s['sym']}[/bold white]  "
-            f"[dim]Skor:{s['score']} RSI:{s.get('rsi','—')} ATR:{fp(s.get('atr'))}[/dim]\n\n"
-            f"[bold dim]── TEKNİK CONFLUENCE ──[/bold dim]\n{tech}"
-            f"{cot_txt}"
-            f"\n[bold dim]── GİRİŞ GEREKÇESİ ──[/bold dim]\n{narr}")
+            f"{header}\n"
+            f"[bold dim]── POZİTİF FAKTÖRLER ──[/bold dim]\n{pos}\n\n"
+            f"[bold dim]── NEGATİF FAKTÖRLER ──[/bold dim]\n{neg}"
+            f"{cot_txt}\n"
+            f"[bold dim]── GİRİŞ GEREKÇESİ ──[/bold dim]\n"
+            +"\n".join(f"  {l}" for l in s["narrative"].split("\n"))+"\n\n"
+            f"  [bold]KARAR:[/bold] [{dec_c}]{dec.upper()}[/{dec_c}]")
         panels.append(Panel(content,
             title=f"[bold bright_yellow]{s['sym']} — {s['time']}[/bold bright_yellow]",
             border_style="bright_yellow",box=box.ROUNDED))
