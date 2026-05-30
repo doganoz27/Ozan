@@ -214,6 +214,38 @@ db_init()
 # ═══════════════════════════════════════════════════════════════
 # QUANT ANALYTICS
 # ═══════════════════════════════════════════════════════════════
+def monte_carlo(wr_pct, avg_win_r, avg_loss_r, n_trades=163, n_sims=1000, risk_pct=0.01, ruin_threshold=0.5):
+    """
+    Monte Carlo simulation of equity curve.
+    Returns dict with median/best/worst final balance and P(ruin).
+    """
+    import random
+    wr = wr_pct / 100.0
+    finals = []
+    ruin_count = 0
+    for _ in range(n_sims):
+        equity = 1.0
+        ruined = False
+        for _ in range(n_trades):
+            if equity <= ruin_threshold:
+                ruined = True; break
+            if random.random() < wr:
+                equity *= (1 + avg_win_r * risk_pct)
+            else:
+                equity *= (1 - avg_loss_r * risk_pct)
+        if ruined or equity <= ruin_threshold:
+            ruin_count += 1
+        finals.append(equity)
+    finals.sort()
+    return {
+        "median":   round(finals[n_sims // 2], 4),
+        "best":     round(finals[int(n_sims * 0.95)], 4),
+        "worst":    round(finals[int(n_sims * 0.05)], 4),
+        "p_ruin":   round(ruin_count / n_sims * 100, 1),
+        "n_sims":   n_sims,
+        "n_trades": n_trades,
+    }
+
 def rolling_vol(prices, n=20):
     if len(prices) < n+1: return None
     from statistics import stdev
@@ -887,6 +919,12 @@ def compute_stats():
         kelly=kelly_pct(wr,avg_win,avg_loss)
         calmar=round(avg_rr/mdd,2) if mdd>0 else None
 
+        # Monte Carlo
+        mc=None
+        if total>=5:
+            try: mc=monte_carlo(wr, avg_win, avg_loss, n_trades=max(total,163))
+            except: pass
+
         # Seans analizi
         sess_stats={}
         for r in closed:
@@ -921,7 +959,7 @@ def compute_stats():
                          "sharpe":sharpe,"sortino":sortino,"calmar":calmar,
                          "mdd":mdd,"var95":var95,"kelly":kelly,
                          "avg_win":avg_win,"avg_loss":avg_loss,
-                         "sess_stats":sess_stats,"sym_perf":sym_perf}
+                         "sess_stats":sess_stats,"sym_perf":sym_perf,"mc":mc}
         if total>=MIN_TRADES_ADAPT:
             adap_weights.update(new_w)
 
@@ -1342,6 +1380,42 @@ def panel_quant():
     lines.append(f"  Ort kazanç R:R  : [bright_green]+{avg_win:.2f}R[/bright_green]")
     lines.append(f"  Ort kayıp R:R   : [bright_red]-{avg_loss:.2f}R[/bright_red]")
     lines.append(f"  Win Rate        : {wr:.1f}%  |  {total} trade")
+    lines.append("")
+
+    # Monte Carlo
+    mc=st.get("mc")
+    lines.append("[bold]━━━  MONTE CARLO SİMÜLASYONU  ━━━[/bold]")
+    lines.append("")
+    if not mc:
+        lines.append("  [dim]Simülasyon için en az 5 kapanmış trade gerekiyor.[/dim]")
+    else:
+        ns=mc["n_sims"]; nt=mc["n_trades"]
+        med=mc["median"]; best=mc["best"]; worst=mc["worst"]; pr=mc["p_ruin"]
+        lines.append(f"  [dim]{ns:,} simülasyon · {nt} trade · %1 risk/trade[/dim]")
+        lines.append("")
+
+        def eq_bar(v, width=20):
+            pct=min(max((v-0.5)/1.5,0),1)
+            filled=int(pct*width)
+            c="bright_green" if v>=1.1 else "bright_red" if v<1.0 else "yellow"
+            bar="█"*filled+"░"*(width-filled)
+            return f"[{c}]{bar}[/{c}]"
+
+        med_pct=(med-1)*100; best_pct=(best-1)*100; worst_pct=(worst-1)*100
+        mc_="bright_green" if med>=1.0 else "bright_red"
+        bc_="bright_green" if best>=1.0 else "yellow"
+        wc_="bright_red" if worst<1.0 else "yellow"
+
+        lines.append(f"  Medyan sonuç   : {eq_bar(med)}  [{mc_}]{med:.4f}x[/{mc_}]  [{mc_}]{med_pct:+.1f}%[/{mc_}]")
+        lines.append(f"  En iyi durum   : {eq_bar(best)}  [{bc_}]{best:.4f}x[/{bc_}]  [{bc_}]{best_pct:+.1f}%[/{bc_}]  [dim](üst %5)[/dim]")
+        lines.append(f"  En kötü durum  : {eq_bar(worst)}  [{wc_}]{worst:.4f}x[/{wc_}]  [{wc_}]{worst_pct:+.1f}%[/{wc_}]  [dim](alt %5)[/dim]")
+        lines.append("")
+        pc_="bold bright_red" if pr>=20 else "bright_red" if pr>=10 else "yellow" if pr>=5 else "bright_green"
+        lines.append(f"  Çöküş ihtimali : [{pc_}]%{pr:.1f}[/{pc_}]  [dim](öz sermaye %50 altına düşme)[/dim]")
+        if pr>=20:
+            lines.append("  [bold bright_red]⚠  YÜKSEKRİSK — pozisyon boyutunu küçült![/bold bright_red]")
+        elif pr<=5:
+            lines.append("  [bright_green]✓  Çöküş riski düşük — strateji tutarlı.[/bright_green]")
     lines.append("")
 
     # Seans analizi
