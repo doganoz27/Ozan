@@ -42,6 +42,65 @@ ANALYSIS_SEC      = 30
 DEDUP_SEC         = 7200
 MIN_TRADES_ADAPT  = 20
 
+# ── Trade212 CFD Account Settings ────────────────────────────────────────────
+ACCOUNT = {
+    "balance":        50.0,    # Starting balance £
+    "risk_pct":       0.01,    # 1% default risk per trade
+    "max_risk_pct":   0.02,    # 2% max risk per trade
+    "max_daily_dd":   0.03,    # 3% max daily drawdown
+    "max_weekly_dd":  0.05,    # 5% max weekly drawdown
+    "compounding":    True,
+}
+
+# Trade212 CFD leverage by asset class
+LEVERAGE = {
+    "forex":   30,
+    "gold":    20,
+    "silver":  20,
+    "indices": 20,
+    "oil":     10,
+    "stocks":   5,
+    "crypto":   2,
+}
+
+def get_leverage(sym):
+    if sym in ["XAU/USD"]:                           return LEVERAGE["gold"]
+    if sym in ["XAG/USD"]:                           return LEVERAGE["silver"]
+    if sym in ["WTI","BRENT"]:                       return LEVERAGE["oil"]
+    if sym in ["SPY","QQQ","NVDA","AAPL","MSFT","TSLA"]: return LEVERAGE["stocks"]
+    if sym.endswith("USDT"):                         return LEVERAGE["crypto"]
+    return LEVERAGE["forex"]
+
+def get_asset_class(sym):
+    if sym in ["XAU/USD"]:                           return "GOLD"
+    if sym in ["XAG/USD"]:                           return "SILVER"
+    if sym in ["WTI","BRENT"]:                       return "OIL"
+    if sym in ["SPY","QQQ","NVDA","AAPL","MSFT","TSLA"]: return "STOCKS"
+    if sym.endswith("USDT"):                         return "CRYPTO"
+    return "FOREX"
+
+# Currency exposure map: sym -> {currency: +1 long / -1 short for LONG direction}
+CURR_EXP_MAP = {
+    "EUR/USD":{"EUR":+1,"USD":-1}, "GBP/USD":{"GBP":+1,"USD":-1},
+    "USD/JPY":{"USD":+1,"JPY":-1}, "USD/CHF":{"USD":+1,"CHF":-1},
+    "AUD/USD":{"AUD":+1,"USD":-1}, "USD/CAD":{"USD":+1,"CAD":-1},
+    "NZD/USD":{"NZD":+1,"USD":-1}, "EUR/GBP":{"EUR":+1,"GBP":-1},
+    "EUR/JPY":{"EUR":+1,"JPY":-1}, "GBP/JPY":{"GBP":+1,"JPY":-1},
+    "EUR/CHF":{"EUR":+1,"CHF":-1}, "AUD/JPY":{"AUD":+1,"JPY":-1},
+    "GBP/CHF":{"GBP":+1,"CHF":-1}, "XAU/USD":{"GOLD":+1,"USD":-1},
+    "XAG/USD":{"SILVER":+1,"USD":-1}, "WTI":{"OIL":+1,"USD":-1},
+    "BRENT":{"OIL":+1,"USD":-1},
+}
+
+# Correlation clusters (pairs that move together, treat as 1 risk unit)
+CORR_CLUSTERS = [
+    {"label":"USD Strength",  "syms":["EUR/USD","GBP/USD","AUD/USD","NZD/USD","XAU/USD"]},
+    {"label":"Risk-On",       "syms":["BTCUSDT","ETHUSDT","SPY","QQQ","AUD/USD"]},
+    {"label":"Oil-CAD",       "syms":["WTI","BRENT","USD/CAD"]},
+    {"label":"Safe Haven",    "syms":["XAU/USD","USD/CHF","USD/JPY"]},
+    {"label":"EUR Complex",   "syms":["EUR/USD","EUR/GBP","EUR/JPY","EUR/CHF"]},
+]
+
 # Yahoo Finance tickers
 YF_SYMBOLS = {
     # Forex Majors
@@ -371,6 +430,18 @@ cot_cache    = {}
 setups       = []
 stats_cache  = {}
 adap_weights = {}
+portfolio_state = {
+    "heat": 0.0, "open_positions": {},
+    "daily_pnl": 0.0, "weekly_pnl": 0.0,
+    "daily_risk_used": 0.0, "weekly_risk_used": 0.0,
+    "currency_exp": {}, "macro_exp": {},
+    "shadow_balance": ACCOUNT["balance"],
+    "shadow_peak": ACCOUNT["balance"],
+    "shadow_equity": [ACCOUNT["balance"]],
+    "shadow_wins": 0, "shadow_losses": 0,
+    "shadow_daily_start": ACCOUNT["balance"],
+    "inst_risk_score": 100,
+}
 
 ws_ok        = False
 last_analysis= 0
@@ -409,14 +480,170 @@ def db_init():
             n INTEGER DEFAULT 0,
             updated TEXT
         );
+        CREATE TABLE IF NOT EXISTS shadow_trades(
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            signal_id INTEGER,
+            sym TEXT, direction TEXT,
+            entry REAL, sl REAL, tp3 REAL, rr REAL,
+            capital REAL, risk_amount REAL,
+            status TEXT DEFAULT 'OPEN',
+            pnl REAL, pnl_pct REAL,
+            out_price REAL, out_at TEXT,
+            created TEXT
+        );
+        CREATE TABLE IF NOT EXISTS account_state(
+            key TEXT PRIMARY KEY, value REAL, updated TEXT
+        );
         CREATE INDEX IF NOT EXISTS i1 ON signals(status);
         CREATE INDEX IF NOT EXISTS i2 ON signals(sym);
+        CREATE INDEX IF NOT EXISTS i3 ON shadow_trades(status);
         """)
         for f in ["f_ema","f_rsi","f_macd","f_sweep","f_ob","f_fvg","f_struct","f_cot","f_news"]:
             c.execute("INSERT OR IGNORE INTO weights(feature,mult) VALUES(?,1.0)",(f,))
         c.commit()
 
 db_init()
+
+# ═══════════════════════════════════════════════════════════════
+# PORTFOLIO ENGINE
+# ═══════════════════════════════════════════════════════════════
+def calc_sizing(setup):
+    """
+    Calculate position sizing for a setup using Trade212 CFD rules.
+    Returns dict with capital, risk_amount, expected_loss/profit, margin.
+    """
+    sym=setup["sym"]; entry=setup["price"]; sl=setup["sl"]
+    tp2=setup["tp2"]; tp3=setup["tp3"]; rr=setup["rr"]
+    lev=get_leverage(sym)
+    with lock:
+        bal=portfolio_state["shadow_balance"]
+        heat=portfolio_state["heat"]
+    # Reduce risk if heat is elevated
+    risk_pct=ACCOUNT["risk_pct"]
+    if heat>10: risk_pct=risk_pct*0.5
+    risk_pct=min(risk_pct,ACCOUNT["max_risk_pct"])
+    risk_amt=round(bal*risk_pct,2)
+    sl_dist_pct=abs(entry-sl)/entry if entry else 0.01
+    if sl_dist_pct==0: return None
+    # Notional size required to risk exactly risk_amt at SL
+    notional=risk_amt/sl_dist_pct
+    margin=round(notional/lev,2)
+    # Cap margin at 40% of balance
+    margin=min(margin,round(bal*0.4,2))
+    # Recalculate actual risk at capped margin
+    actual_notional=margin*lev
+    actual_risk=round(actual_notional*sl_dist_pct,2)
+    exp_profit_tp2=round(actual_risk*rr*0.6,2)
+    exp_profit_tp3=round(actual_risk*rr,2)
+    return {
+        "margin":margin,"notional":round(actual_notional,2),
+        "risk_amt":actual_risk,"leverage":lev,
+        "exp_loss":actual_risk,
+        "exp_profit_tp2":exp_profit_tp2,"exp_profit_tp3":exp_profit_tp3,
+        "risk_pct":round(actual_risk/bal*100,2),
+        "asset_class":get_asset_class(sym),
+    }
+
+def calc_portfolio_heat():
+    """Sum risk% of all open positions from shadow_trades."""
+    try:
+        with db() as c:
+            rows=c.execute("SELECT risk_amount FROM shadow_trades WHERE status='OPEN'").fetchall()
+        bal=portfolio_state["shadow_balance"]
+        total_risk=sum(r["risk_amount"] for r in rows)
+        return round(total_risk/bal*100,1) if bal else 0
+    except: return 0
+
+def calc_currency_exposure():
+    """Net currency exposure across open positions."""
+    exp={}
+    try:
+        with db() as c:
+            rows=c.execute("SELECT sym,direction,capital FROM shadow_trades WHERE status='OPEN'").fetchall()
+        for r in rows:
+            sym=r["sym"]; cap=r["capital"] or 1
+            mult=1 if r["direction"]=="LONG" else -1
+            for curr,sign in CURR_EXP_MAP.get(sym,{}).items():
+                exp[curr]=exp.get(curr,0)+sign*mult*cap
+    except: pass
+    return {k:round(v,2) for k,v in exp.items()}
+
+def calc_correlation_clusters():
+    """Find active correlated clusters among open positions."""
+    try:
+        with db() as c:
+            open_syms={r["sym"] for r in c.execute("SELECT DISTINCT sym FROM shadow_trades WHERE status='OPEN'").fetchall()}
+    except: return []
+    active=[]
+    for cl in CORR_CLUSTERS:
+        hits=[s for s in cl["syms"] if s in open_syms]
+        if len(hits)>=2: active.append({"label":cl["label"],"syms":hits})
+    return active
+
+def calc_macro_exposure():
+    """Classify open positions into macro baskets."""
+    baskets={"USD Strength":[],"Risk-On":[],"Risk-Off":[],"Inflation":[],"Safe Haven":[]}
+    try:
+        with db() as c:
+            rows=c.execute("SELECT sym,direction FROM shadow_trades WHERE status='OPEN'").fetchall()
+        for r in rows:
+            s=r["sym"]; d=r["direction"]
+            if s in ["EUR/USD","GBP/USD","AUD/USD","NZD/USD"]:
+                if d=="SHORT": baskets["USD Strength"].append(s)
+            if s in ["BTCUSDT","ETHUSDT","SPY","QQQ","AUD/USD"]:
+                if d=="LONG":  baskets["Risk-On"].append(s)
+            if s in ["XAU/USD","USD/CHF"]:
+                if d=="LONG":  baskets["Safe Haven"].append(s)
+                if d=="LONG" and s=="XAU/USD": baskets["Inflation"].append(s)
+            if s in ["WTI","BRENT","XAG/USD"]:
+                if d=="LONG":  baskets["Inflation"].append(s)
+    except: pass
+    return {k:v for k,v in baskets.items() if v}
+
+def calc_inst_risk_score():
+    """0-100: institutional risk score (higher = safer)."""
+    score=100
+    heat=portfolio_state.get("heat",0)
+    score-=min(heat*2,30)
+    cur_exp=portfolio_state.get("currency_exp",{})
+    max_exp=max((abs(v) for v in cur_exp.values()),default=0)
+    if max_exp>20: score-=15
+    elif max_exp>10: score-=8
+    clusters=portfolio_state.get("corr_clusters",[])
+    score-=len(clusters)*5
+    daily_dd=portfolio_state.get("daily_pnl",0)
+    if daily_dd<-ACCOUNT["balance"]*ACCOUNT["max_daily_dd"]*0.8: score-=20
+    return max(0,round(score,0))
+
+def update_portfolio_state():
+    global portfolio_state
+    heat=calc_portfolio_heat()
+    curr=calc_currency_exposure()
+    macro=calc_macro_exposure()
+    clusters=calc_correlation_clusters()
+    # shadow balance from DB
+    try:
+        with db() as c:
+            bal_row=c.execute("SELECT value FROM account_state WHERE key='shadow_balance'").fetchone()
+            if bal_row: sb=bal_row["value"]
+            else: sb=ACCOUNT["balance"]
+            day_row=c.execute("SELECT value FROM account_state WHERE key='daily_start'").fetchone()
+            daily_start=day_row["value"] if day_row else ACCOUNT["balance"]
+    except: sb=portfolio_state["shadow_balance"]; daily_start=sb
+    with lock:
+        portfolio_state["heat"]=heat
+        portfolio_state["currency_exp"]=curr
+        portfolio_state["macro_exp"]=macro
+        portfolio_state["corr_clusters"]=clusters
+        portfolio_state["shadow_balance"]=sb
+        portfolio_state["daily_pnl"]=round(sb-daily_start,2)
+        portfolio_state["inst_risk_score"]=calc_inst_risk_score()
+
+def portfolio_loop():
+    while True:
+        try: update_portfolio_state()
+        except: pass
+        time.sleep(30)
 
 # ═══════════════════════════════════════════════════════════════
 # QUANT ANALYTICS
@@ -741,6 +968,11 @@ def score_setup(sym, candles, price, news_items=None):
         neg_l.append("COT data unavailable — no open-interest confirmation")
         neg_s.append("COT data unavailable — no open-interest confirmation")
 
+    # ── Portfolio heat check ─────────────────────────────────────
+    heat=portfolio_state.get("heat",0)
+    if heat>=15:
+        return None   # HARD REJECT — portfolio heat too high
+
     # ── News Risk Check (auto-reject on high-impact fresh news) ──
     n_imp, n_rl, n_block = news_risk_for_sym(sym)
     if n_block:
@@ -849,6 +1081,14 @@ def score_setup(sym, candles, price, news_items=None):
 
     news_risk_label=("NO RISK" if n_imp<20 else "LOW" if n_imp<40
                      else "MEDIUM" if n_imp<60 else "HIGH" if n_imp<80 else "CRITICAL")
+
+    # Build placeholder setup for sizing (fill in entry/sl/tp before calling)
+    _tmp={"sym":sym,"price":price,"sl":sl,"tp2":tp2,"tp3":tp3,"rr":rr}
+    sizing=calc_sizing(_tmp) or {}
+
+    # Institutional risk score
+    inst_rs=portfolio_state.get("inst_risk_score",100)
+
     return {
         "sym":sym,"quality":quality,"direction":direction,"status":status,
         "price":price,"el":el,"eh":eh,"sl":sl,
@@ -857,6 +1097,7 @@ def score_setup(sym, candles, price, news_items=None):
         "reasons":reasons,"neg_factors":neg_factors,
         "flags":fl,"rsi":rv,"atr":av,"cot":cot,
         "news_score":news_score,"news_imp":n_imp,"news_risk":news_risk_label,
+        "sizing":sizing,"inst_risk_score":inst_rs,"portfolio_heat":heat,
         "time":datetime.now().strftime("%H:%M:%S"),
         "narrative": _narrative(sym,direction,price,el,eh,sl,tp1,tp2,tp3,rr,av,rv,mh,st,sw,bOB,beOB,bFVG,beFVG,cot,news_rl+news_rs,news_score),
     }
@@ -1144,8 +1385,10 @@ def log_signal(s):
     if now-_last_logged.get(key,0)<DEDUP_SEC: return
     _last_logged[key]=now
     fl=s["flags"]
+    sz=s.get("sizing",{})
+    created=datetime.utcnow().isoformat(timespec="seconds")
     with db() as c:
-        c.execute("""INSERT INTO signals(sym,quality,direction,entry,sl,tp1,tp2,tp3,
+        cur=c.execute("""INSERT INTO signals(sym,quality,direction,entry,sl,tp1,tp2,tp3,
             rr_t,score,f_ema,f_rsi,f_macd,f_sweep,f_ob,f_fvg,f_struct,f_cot,f_news,
             status,created)
             VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,'OPEN',?)""",
@@ -1153,7 +1396,20 @@ def log_signal(s):
              s["tp1"],s["tp2"],s["tp3"],s["rr"],s["score"],
              fl["f_ema"],fl["f_rsi"],fl["f_macd"],fl["f_sweep"],
              fl["f_ob"],fl["f_fvg"],fl["f_struct"],fl["f_cot"],fl["f_news"],
-             datetime.utcnow().isoformat(timespec="seconds")))
+             created))
+        sig_id=cur.lastrowid
+        # Shadow trade
+        if sz:
+            c.execute("""INSERT INTO shadow_trades(signal_id,sym,direction,
+                entry,sl,tp3,rr,capital,risk_amount,status,created)
+                VALUES(?,?,?,?,?,?,?,?,?,'OPEN',?)""",
+                (sig_id,s["sym"],s["direction"],s["price"],s["sl"],
+                 s["tp3"],s["rr"],sz.get("margin",0),sz.get("risk_amt",0),created))
+            # Update shadow balance state
+            c.execute("INSERT OR REPLACE INTO account_state(key,value,updated) VALUES('shadow_balance',?,?)",
+                      (portfolio_state["shadow_balance"],created))
+            c.execute("INSERT OR IGNORE INTO account_state(key,value,updated) VALUES('daily_start',?,?)",
+                      (portfolio_state["shadow_balance"],created))
         c.commit()
 
 def monitor_loop():
@@ -1192,6 +1448,24 @@ def _check_open():
             if ns:
                 c.execute("UPDATE signals SET status=?,out_price=?,out_at=?,act_rr=? WHERE id=?",
                           (ns,cur,now,arr,r["id"]))
+                # Update shadow trade
+                st_row=c.execute("SELECT * FROM shadow_trades WHERE signal_id=? AND status='OPEN'",
+                                 (r["id"],)).fetchone()
+                if st_row:
+                    cap=st_row["capital"] or 0
+                    risk=st_row["risk_amount"] or 0
+                    pnl=round(arr*risk,2) if arr is not None else 0
+                    bal_row=c.execute("SELECT value FROM account_state WHERE key='shadow_balance'").fetchone()
+                    new_bal=round((bal_row["value"] if bal_row else ACCOUNT["balance"])+pnl,2)
+                    c.execute("UPDATE shadow_trades SET status=?,out_price=?,out_at=?,pnl=?,pnl_pct=? WHERE id=?",
+                              (ns,cur,now,pnl,round(pnl/cap*100,1) if cap else 0,st_row["id"]))
+                    c.execute("INSERT OR REPLACE INTO account_state(key,value,updated) VALUES('shadow_balance',?,?)",
+                              (new_bal,now))
+                    with lock:
+                        portfolio_state["shadow_balance"]=new_bal
+                        portfolio_state["shadow_equity"].append(new_bal)
+                        if ns in ("TP1","TP2","TP3"): portfolio_state["shadow_wins"]+=1
+                        elif ns=="SL": portfolio_state["shadow_losses"]+=1
         c.commit()
 
 def compute_stats():
@@ -1373,6 +1647,118 @@ def panel_header():
         f"{ws_s}  [dim]│[/dim]  {badge}  [dim]│[/dim]  [dim]{now}[/dim]"),
         box=box.HEAVY,border_style="bright_yellow")
 
+def panel_portfolio():
+    with lock: ps=dict(portfolio_state)
+    bal   =ps.get("shadow_balance",ACCOUNT["balance"])
+    start =ACCOUNT["balance"]
+    heat  =ps.get("heat",0)
+    irs   =ps.get("inst_risk_score",100)
+    eq    =ps.get("shadow_equity",[start])
+    wins  =ps.get("shadow_wins",0)
+    losses=ps.get("shadow_losses",0)
+    total =wins+losses
+    wr    =round(wins/total*100,1) if total else 0
+    pnl   =round(bal-start,2); pnl_pct=round(pnl/start*100,1)
+    mdd   =max_drawdown_pct(eq) if len(eq)>1 else 0
+    daily =ps.get("daily_pnl",0)
+    curr  =ps.get("currency_exp",{})
+    macro =ps.get("macro_exp",{})
+    clusters=ps.get("corr_clusters",[])
+
+    # Heat colour
+    hc=("bright_green" if heat<5 else "yellow" if heat<10
+        else "bright_yellow" if heat<15 else "bright_red")
+    heat_bar="█"*int(heat/2)+"░"*(50-int(heat/2)); heat_bar=heat_bar[:20]
+    heat_label="GREEN" if heat<5 else "YELLOW" if heat<10 else "ORANGE" if heat<15 else "RED ⛔"
+
+    # IRS colour
+    ic="bright_green" if irs>=80 else "yellow" if irs>=60 else "bright_red"
+
+    # Balance & P&L
+    bc="bright_green" if pnl>=0 else "bright_red"
+    dc="bright_green" if daily>=0 else "bright_red"
+
+    lines=["[bold]━━━  HESAP DURUMU  ━━━[/bold]",""]
+    lines.append(f"  Başlangıç           : [dim]£{start:.2f}[/dim]")
+    lines.append(f"  Shadow Bakiye       : [bold bright_white]£{bal:.2f}[/bold bright_white]  [{bc}]{pnl:+.2f} ({pnl_pct:+.1f}%)[/{bc}]")
+    lines.append(f"  Günlük P&L          : [{dc}]£{daily:+.2f}[/{dc}]")
+    lines.append(f"  Max Drawdown        : [bright_red]{mdd:.1f}%[/bright_red]  [dim](daily limit {ACCOUNT['max_daily_dd']*100:.0f}% · weekly {ACCOUNT['max_weekly_dd']*100:.0f}%)[/dim]")
+    lines.append(f"  Shadow Win Rate     : [{('bright_green' if wr>=55 else 'bright_red')}]{wr:.1f}%[/] [dim]({wins}W / {losses}L / {total} toplam)[/dim]")
+    lines.append("")
+
+    lines.append("[bold]━━━  PORTFÖy ISISI (HEAT)  ━━━[/bold]")
+    lines.append("")
+    lines.append(f"  [{hc}]{heat_bar}[/{hc}]  [{hc}]{heat:.1f}%  {heat_label}[/{hc}]")
+    lines.append(f"  [dim]5%=Yeşil · 10%=Sarı · 15%=Turuncu · 15%+=KIRMIZI (engel)[/dim]")
+    if heat>10: lines.append("  [bold yellow]⚠ Pozisyon boyutu %50 azaltıldı (heat >10%)[/bold yellow]")
+    if heat>15: lines.append("  [bold bright_red]⛔ YENİ POZİSYON ENGELLENDİ (heat >15%)[/bold bright_red]")
+    lines.append("")
+
+    # Institutional Risk Score
+    lines.append(f"[bold]━━━  KURUMSAL RİSK SKORU  ━━━[/bold]")
+    lines.append("")
+    irs_bar="█"*int(irs/5)+"░"*(20-int(irs/5))
+    lines.append(f"  [{ic}]{irs_bar}[/{ic}]  [{ic}]{irs:.0f}/100[/{ic}]")
+    lines.append(f"  [dim]Risk bütçesi : £{round(bal*ACCOUNT['max_risk_pct'],2):.2f} maks  |  Default 1%=£{round(bal*ACCOUNT['risk_pct'],2):.2f}[/dim]")
+    lines.append("")
+
+    # Currency exposure
+    if curr:
+        lines.append("[bold]━━━  PARA BİRİMİ MARUZIYETI  ━━━[/bold]")
+        lines.append("")
+        for ccy,exp in sorted(curr.items(),key=lambda x:-abs(x[1])):
+            cc="bright_green" if exp>0 else "bright_red"
+            bar_v=min(abs(exp)/max(abs(v) for v in curr.values()),1.0) if curr else 0
+            bar="█"*int(bar_v*12)+"░"*(12-int(bar_v*12))
+            lines.append(f"  [bold white]{ccy:<8}[/bold white] [{cc}]{bar}[/{cc}]  [{cc}]{exp:+.0f}[/{cc}]")
+            if abs(exp)>15: lines.append(f"  [yellow]  ⚠ {ccy} maruziyeti yüksek[/yellow]")
+        lines.append("")
+
+    # Correlation clusters
+    if clusters:
+        lines.append("[bold]━━━  KORRElASYON KÜMELERİ  ━━━[/bold]")
+        lines.append("")
+        for cl in clusters:
+            lines.append(f"  [bright_yellow]⚠ {cl['label']}:[/bright_yellow] {', '.join(cl['syms'])}")
+            lines.append("  [dim]  → Tek risk birimi olarak hesapla, boyutu küçült[/dim]")
+        lines.append("")
+
+    # Macro exposure
+    if macro:
+        lines.append("[bold]━━━  MAKRO MARUZIYET  ━━━[/bold]")
+        lines.append("")
+        for basket,syms in macro.items():
+            lines.append(f"  [bright_cyan]{basket:<18}[/bright_cyan] {', '.join(syms)}")
+        lines.append("")
+
+    # Shadow trades
+    try:
+        with db() as c:
+            st_rows=c.execute("SELECT sym,direction,capital,risk_amount,pnl,status FROM shadow_trades ORDER BY id DESC LIMIT 10").fetchall()
+    except: st_rows=[]
+    if st_rows:
+        lines.append("[bold]━━━  SHADOW PORTFÖY POZİSYONLARI  ━━━[/bold]")
+        lines.append("")
+        lines.append(f"  [bold dim]{'SEMBOL':<10} {'YÖN':<7} {'MARJ':>7} {'RİSK':>7} {'P&L':>8} {'DURUM':<8}[/bold dim]")
+        lines.append("  " + "─"*52)
+        for r in st_rows:
+            pnl_v=r["pnl"]
+            pnl_s=(f"[bright_green]£{pnl_v:+.2f}[/bright_green]" if pnl_v and pnl_v>0
+                   else f"[bright_red]£{pnl_v:+.2f}[/bright_red]" if pnl_v and pnl_v<0 else "[dim]—[/dim]")
+            st2=r["status"]
+            sc={"TP3":"bold bright_green","TP2":"bright_green","TP1":"green",
+                "SL":"bold bright_red","OPEN":"bright_yellow","EXPIRED":"dim"}.get(st2,"white")
+            dir_s="[bright_green]L[/bright_green]" if r["direction"]=="LONG" else "[bright_red]S[/bright_red]"
+            lines.append(f"  [bold white]{r['sym']:<10}[/bold white] {dir_s}  "
+                        f"[dim]£{r['capital'] or 0:.2f}[/dim]  "
+                        f"[dim]£{r['risk_amount'] or 0:.2f}[/dim]  "
+                        f"{pnl_s}  [{sc}]{st2}[/{sc}]")
+
+    return Panel("\n".join(lines),
+                 title="[bold bright_green]● EXECUTIVE DASHBOARD — Trade212 CFD Portfolio Engine[/bold bright_green]",
+                 border_style="bright_green",box=box.HEAVY,
+                 subtitle=f"[dim]Balance: £{bal:.2f}  |  Heat: {heat:.1f}%  |  IRS: {irs:.0f}/100[/dim]")
+
 def panel_market():
     t=Table(title="[bold]● LIVE MARKET FEED[/bold]",box=box.SIMPLE_HEAVY,
             border_style="bright_blue",header_style="bold bright_blue",show_lines=True)
@@ -1459,15 +1845,26 @@ def panel_details():
         # Header block — matches requested output format
         nr=s.get("news_risk","NO RISK"); ni=s.get("news_imp",0)
         nr_c={"CRITICAL":"bold bright_red","HIGH":"bright_red","MEDIUM":"yellow","LOW":"dim","NO RISK":"bright_green"}.get(nr,"dim")
+        sz=s.get("sizing",{}); irs=s.get("inst_risk_score",100); ph=s.get("portfolio_heat",0)
+        ic2="bright_green" if irs>=80 else "yellow" if irs>=60 else "bright_red"
+        hc2="bright_green" if ph<5 else "yellow" if ph<10 else "bright_red"
         header=(
             f"{qc(s['quality'])}  {dc(s['direction'])}  [bold white]{s['sym']}[/bold white]\n\n"
-            f"  [bold]TRADE SCORE   :[/bold] [bold bright_yellow]{sc:.0f}/100[/bold bright_yellow]\n"
-            f"  [bold]STATUS        :[/bold] [{st_c}]{st2}[/{st_c}]\n"
-            f"  [bold]CONFIDENCE    :[/bold] {conf:.0f}/100\n"
-            f"  [bold]HOLD TIME     :[/bold] ~{hold:.1f} saat\n"
-            f"  [bold]RISK REWARD   :[/bold] 1:{rr}\n"
-            f"  [bold]RSI / ATR     :[/bold] {s.get('rsi','—')} / {fp(s.get('atr'))}\n"
-            f"  [bold]NEWS RISK     :[/bold] [{nr_c}]{nr}[/{nr_c}]  [dim](impact {ni}/100)[/dim]\n")
+            f"  [bold]TRADE SCORE        :[/bold] [bold bright_yellow]{sc:.0f}/100[/bold bright_yellow]\n"
+            f"  [bold]STATUS             :[/bold] [{st_c}]{st2}[/{st_c}]\n"
+            f"  [bold]CONFIDENCE         :[/bold] {conf:.0f}/100\n"
+            f"  [bold]HOLD TIME          :[/bold] ~{hold:.1f} saat\n"
+            f"  [bold]RISK REWARD        :[/bold] 1:{rr}\n"
+            f"  [bold]NEWS RISK          :[/bold] [{nr_c}]{nr}[/{nr_c}]  [dim](impact {ni}/100)[/dim]\n"
+            f"  [bold]PORTFOLIO HEAT     :[/bold] [{hc2}]{ph:.1f}%[/{hc2}]\n"
+            f"  [bold]INST. RISK SCORE   :[/bold] [{ic2}]{irs:.0f}/100[/{ic2}]\n"
+            +(f"\n  [bold dim]── POZİSYON BOYUTU (Trade212 CFD) ──[/bold dim]\n"
+              f"  [bold]Önerilen Marj      :[/bold] [bright_white]£{sz.get('margin',0):.2f}[/bright_white]  [dim]({sz.get('leverage',1)}:1 kaldıraç → £{sz.get('notional',0):.2f} pozisyon)[/dim]\n"
+              f"  [bold]Beklenen Kayıp     :[/bold] [bright_red]£{sz.get('exp_loss',0):.2f}[/bright_red]\n"
+              f"  [bold]Beklenen Kâr TP2   :[/bold] [bright_green]£{sz.get('exp_profit_tp2',0):.2f}[/bright_green]\n"
+              f"  [bold]Beklenen Kâr TP3   :[/bold] [bold bright_green]£{sz.get('exp_profit_tp3',0):.2f}[/bold bright_green]\n"
+              f"  [bold]Risk / Trade       :[/bold] {sz.get('risk_pct',0):.2f}% sermaye\n"
+              if sz else ""))
 
         # Positive factors
         pos="\n".join(f"  [bright_green]✓[/bright_green] {r}" for r in s["reasons"]) or "  [dim]—[/dim]"
@@ -1869,7 +2266,7 @@ def panel_risk():
 # PAGE SYSTEM
 # ═══════════════════════════════════════════════════════════════
 current_page = 1
-PAGE_NAMES = {1:"PİYASA",2:"SETUPLAR",3:"DETAY",4:"COT",5:"JOURNAL",6:"HABERLER",7:"QUANT"}
+PAGE_NAMES = {1:"PİYASA",2:"SETUPLAR",3:"DETAY",4:"COT",5:"JOURNAL",6:"HABERLER",7:"QUANT",8:"PORTFÖY"}
 
 def nav_bar():
     parts=[]
@@ -1887,7 +2284,7 @@ def key_listener():
         while True:
             if msvcrt.kbhit():
                 ch=msvcrt.getch()
-                if ch in (b'1',b'2',b'3',b'4',b'5',b'6',b'7'):
+                if ch in (b'1',b'2',b'3',b'4',b'5',b'6',b'7',b'8'):
                     current_page=int(ch.decode())
             time.sleep(0.05)
     except: pass
@@ -1913,8 +2310,10 @@ def render():
         lo=Layout()
         body=Layout(); body.split_row(Layout(panel_news(),ratio=3),Layout(panel_risk(),ratio=1))
         lo.split_column(Layout(hdr,size=3),Layout(nav,size=3),body)
-    else:
+    elif current_page==7:
         lo=Layout(); lo.split_column(Layout(hdr,size=3),Layout(nav,size=3),Layout(panel_quant()))
+    else:
+        lo=Layout(); lo.split_column(Layout(hdr,size=3),Layout(nav,size=3),Layout(panel_portfolio()))
     return lo
 
 # ═══════════════════════════════════════════════════════════════
@@ -1930,7 +2329,8 @@ def main():
     threading.Thread(target=cot_loop,        daemon=True).start()
     threading.Thread(target=monitor_loop,    daemon=True).start()
     threading.Thread(target=stats_loop,      daemon=True).start()
-    threading.Thread(target=key_listener,    daemon=True).start()
+    threading.Thread(target=key_listener,     daemon=True).start()
+    threading.Thread(target=portfolio_loop,   daemon=True).start()
     # Açılışta mevcut sinyalleri hemen kontrol et
     try: _check_open()
     except: pass
