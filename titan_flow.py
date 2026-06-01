@@ -2266,6 +2266,10 @@ def panel_risk():
 # PAGE SYSTEM
 # ═══════════════════════════════════════════════════════════════
 current_page = 1
+_last_keypress = time.time()
+AUTO_SCROLL_SEC = 5   # sayfa geçiş süresi (boşta)
+AUTO_SCROLL_IDLE= 30  # kaç saniye sonra oto-scroll başlar
+
 PAGE_NAMES = {1:"PİYASA",2:"SETUPLAR",3:"DETAY",4:"COT",5:"JOURNAL",6:"HABERLER",7:"QUANT",8:"PORTFÖY"}
 
 def nav_bar():
@@ -2278,16 +2282,25 @@ def nav_bar():
     return "  ".join(parts)+"   [dim]( tuş 1-6 ile geç · Ctrl+C çıkış )[/dim]"
 
 def key_listener():
-    global current_page
+    global current_page, _last_keypress
     try:
         import msvcrt
         while True:
             if msvcrt.kbhit():
                 ch=msvcrt.getch()
+                _last_keypress=time.time()
                 if ch in (b'1',b'2',b'3',b'4',b'5',b'6',b'7',b'8'):
                     current_page=int(ch.decode())
             time.sleep(0.05)
     except: pass
+
+def auto_scroll_loop():
+    global current_page
+    total=len(PAGE_NAMES)
+    while True:
+        time.sleep(AUTO_SCROLL_SEC)
+        if time.time()-_last_keypress >= AUTO_SCROLL_IDLE:
+            current_page=(current_page % total)+1
 
 def render():
     run_analysis()
@@ -2330,6 +2343,7 @@ def main():
     threading.Thread(target=monitor_loop,    daemon=True).start()
     threading.Thread(target=stats_loop,      daemon=True).start()
     threading.Thread(target=key_listener,     daemon=True).start()
+    threading.Thread(target=auto_scroll_loop, daemon=True).start()
     threading.Thread(target=portfolio_loop,   daemon=True).start()
     # Açılışta mevcut sinyalleri hemen kontrol et
     try: _check_open()
