@@ -190,7 +190,7 @@ BEAR_W = ["drop","fall","crash","plunge","decline","selloff","bearish","miss",
           "inflation","recession","default","war","tariff","loss","rate hike","risk-off"]
 
 # ── Telegram (CHAT_ID ayarlı — BOT_TOKEN'ı @BotFather'dan al ve buraya yaz) ──
-TELEGRAM_TOKEN   = ""        # örn: "7123456789:AAExxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+TELEGRAM_TOKEN   = "7731993816:AAHZ1gRt7xxolBzEA9ptAlGv48igZfIuGL0"
 TELEGRAM_CHAT_ID = "8237226783"
 
 # ── High-impact keyword → base importance score ───────────────────────────────
