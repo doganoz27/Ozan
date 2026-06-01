@@ -292,7 +292,7 @@ ASSET_SYM_MAP = {
     "SPY": ["SPY","QQQ"], "NVDA":["NVDA"], "AAPL":["AAPL"],
 }
 
-console = Console()
+console = Console(width=240)
 lock    = threading.Lock()
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1899,13 +1899,14 @@ def panel_portfolio():
 
 def panel_market():
     t=Table(title="[bold]● LIVE MARKET FEED[/bold]",box=box.SIMPLE_HEAVY,
-            border_style="bright_blue",header_style="bold bright_blue",show_lines=True)
-    t.add_column("SYMBOL", width=12,style="bold white")
-    t.add_column("PRICE",  width=13,justify="right")
-    t.add_column("CHG",    width=9, justify="right")
-    t.add_column("HIGH",   width=12,justify="right",style="green")
-    t.add_column("LOW",    width=12,justify="right",style="red")
-    t.add_column("UPDATED",width=9, style="dim")
+            border_style="bright_blue",header_style="bold bright_blue",show_lines=True,
+            width=238)
+    t.add_column("SYMBOL", width=16,style="bold white")
+    t.add_column("PRICE",  width=16,justify="right")
+    t.add_column("CHG",    width=12,justify="right")
+    t.add_column("HIGH",   width=16,justify="right",style="green")
+    t.add_column("LOW",    width=16,justify="right",style="red")
+    t.add_column("UPDATED",width=12,style="dim")
     with lock: snap=dict(market)
     for label,syms in DISPLAY_GROUPS:
         t.add_row(f"[dim bold]── {label} ──[/dim bold]","","","","","")
@@ -1930,20 +1931,20 @@ def panel_setups():
             border_style="bright_yellow",box=box.HEAVY)
     t=Table(title="[bold bright_yellow]● AKTİF SETUPLАР — KURUMSAL KALİTE FİLTRESİ[/bold bright_yellow]",
             box=box.SIMPLE_HEAVY,border_style="bright_yellow",
-            header_style="bold bright_yellow",show_lines=True)
-    t.add_column("GRADE",  width=6,  justify="center")
-    t.add_column("STATUS", width=10, justify="center")
-    t.add_column("SYMBOL", width=10, style="bold white")
-    t.add_column("DIR",    width=8,  justify="center")
-    t.add_column("SKOR",   width=8,  justify="center")
-    t.add_column("GÜVEN",  width=7,  justify="center")
-    t.add_column("FİYAT",  width=12, justify="right")
-    t.add_column("GİRİŞ ZONU",width=22,justify="right")
-    t.add_column("STOP",   width=12, justify="right",style="bright_red")
-    t.add_column("TP",     width=12, justify="right",style="bright_green")
-    t.add_column("R:R",    width=7,  justify="center")
-    t.add_column("HOLD",   width=7,  justify="center",style="dim")
-    t.add_column("SAAT",   width=7)
+            header_style="bold bright_yellow",show_lines=True,width=238)
+    t.add_column("GRADE",  width=7,  justify="center")
+    t.add_column("STATUS", width=12, justify="center")
+    t.add_column("SYMBOL", width=12, style="bold white")
+    t.add_column("DIR",    width=9,  justify="center")
+    t.add_column("SKOR",   width=9,  justify="center")
+    t.add_column("GÜVEN",  width=8,  justify="center")
+    t.add_column("FİYAT",  width=15, justify="right")
+    t.add_column("GİRİŞ ZONU",width=26,justify="right")
+    t.add_column("STOP",   width=15, justify="right",style="bright_red")
+    t.add_column("TP",     width=15, justify="right",style="bright_green")
+    t.add_column("R:R",    width=8,  justify="center")
+    t.add_column("HOLD",   width=8,  justify="center",style="dim")
+    t.add_column("SAAT",   width=8)
     for s in ss:
         rv=s.get("rsi"); rc="bright_green" if rv and rv<40 else "bright_red" if rv and rv>65 else "white"
         sc=s["score"]; sk_c="bold bright_yellow" if sc>=85 else "bold green" if sc>=75 else "cyan" if sc>=65 else "dim"
@@ -2047,15 +2048,15 @@ def panel_cot():
     t=Table(box=box.SIMPLE_HEAVY,border_style="bright_magenta",
             header_style="bold bright_magenta",show_lines=True,
             title="[bold bright_magenta]● COT — CFTC Haftalık Pozisyonlar[/bold bright_magenta]")
-    t.add_column("SEMBOL",    width=11,style="bold white")
-    t.add_column("TARİH",     width=11,style="dim")
-    t.add_column("SPEC NET",  width=11,justify="right")
-    t.add_column("HAFTALIK Δ",width=11,justify="right")
-    t.add_column("COMM NET",  width=11,justify="right")
-    t.add_column("OI",        width=10,justify="right",style="dim")
-    t.add_column("12H RANK",  width=14,justify="center")
-    t.add_column("BIAS",      width=14,justify="center")
-    t.add_column("CONTRARIAN",width=10,justify="center")
+    t.add_column("SEMBOL",    width=14,style="bold white")
+    t.add_column("TARİH",     width=13,style="dim")
+    t.add_column("SPEC NET",  width=14,justify="right")
+    t.add_column("HAFTALIK Δ",width=14,justify="right")
+    t.add_column("COMM NET",  width=14,justify="right")
+    t.add_column("OI",        width=13,justify="right",style="dim")
+    t.add_column("12H RANK",  width=16,justify="center")
+    t.add_column("BIAS",      width=16,justify="center")
+    t.add_column("CONTRARIAN",width=13,justify="center")
     for sym,d in sorted(snap.items(),key=lambda x:abs(x[1].get("pct_rank",50)-50),reverse=True):
         sn=d.get("spec_net",0); sc=d.get("spec_chg",0); cn=d.get("comm_net",0)
         pr=d.get("pct_rank",50); ct=d.get("contrarian")
@@ -2078,14 +2079,14 @@ def panel_journal():
     t=Table(title=f"[bold bright_cyan]● TRADE JOURNAL  [dim](Açık: {open_n})[/dim][/bold bright_cyan]",
             box=box.SIMPLE_HEAVY,border_style="bright_cyan",
             header_style="bold bright_cyan",show_lines=True)
-    t.add_column("SAAT",   width=7, style="dim")
-    t.add_column("SEMBOL", width=11,style="bold white")
-    t.add_column("GR",     width=5, justify="center")
-    t.add_column("DIR",    width=7, justify="center")
-    t.add_column("GİRİŞ",  width=12,justify="right",style="dim")
-    t.add_column("DURUM",  width=8, justify="center")
-    t.add_column("GERÇEK R:R",width=10,justify="right")
-    t.add_column("HEDEF R:R", width=10,justify="right",style="dim")
+    t.add_column("SAAT",   width=9, style="dim")
+    t.add_column("SEMBOL", width=14,style="bold white")
+    t.add_column("GR",     width=6, justify="center")
+    t.add_column("DIR",    width=9, justify="center")
+    t.add_column("GİRİŞ",  width=15,justify="right",style="dim")
+    t.add_column("DURUM",  width=10, justify="center")
+    t.add_column("GERÇEK R:R",width=12,justify="right")
+    t.add_column("HEDEF R:R", width=12,justify="right",style="dim")
     if not recent:
         t.add_row("—","—","—","—","—","[dim]Henüz sinyal yok[/dim]","—","—")
     else:
