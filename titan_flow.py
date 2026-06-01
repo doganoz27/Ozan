@@ -189,9 +189,9 @@ BEAR_W = ["drop","fall","crash","plunge","decline","selloff","bearish","miss",
           "downgrade","sell","outflow","ban","hack","lawsuit","fine","hawkish",
           "inflation","recession","default","war","tariff","loss","rate hike","risk-off"]
 
-# ── Telegram (optional — set your credentials to enable alerts) ──────────────
-TELEGRAM_TOKEN   = ""   # e.g. "123456:ABCDef..."
-TELEGRAM_CHAT_ID = ""   # e.g. "-1001234567890"
+# ── Telegram (CHAT_ID ayarlı — BOT_TOKEN'ı @BotFather'dan al ve buraya yaz) ──
+TELEGRAM_TOKEN   = ""        # örn: "7123456789:AAExxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+TELEGRAM_CHAT_ID = "8237226783"
 
 # ── High-impact keyword → base importance score ───────────────────────────────
 HIGH_IMP_KW = {
@@ -298,8 +298,75 @@ lock    = threading.Lock()
 # ─────────────────────────────────────────────────────────────────────────────
 # NEWS ANALYSIS ENGINE
 # ─────────────────────────────────────────────────────────────────────────────
-analyzed_news: list = []
-_tg_sent: set      = set()
+analyzed_news: list  = []
+_tg_sent:      set   = set()
+_tg_setup_sent:set   = set()
+
+# ─────────────────────────────────────────────────────────────────────────────
+# TELEGRAM MODULE
+# ─────────────────────────────────────────────────────────────────────────────
+def send_telegram(message: str):
+    """Send a message via Telegram Bot API."""
+    if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID:
+        return
+    try:
+        requests.post(
+            f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage",
+            json={"chat_id": TELEGRAM_CHAT_ID, "text": message,
+                  "parse_mode": "HTML", "disable_web_page_preview": True},
+            timeout=8)
+    except: pass
+
+def tg_setup_alert(s):
+    """Send trade alert for A+/A/B+ setups."""
+    key=f"{s['sym']}_{s['direction']}_{round(s['score'])}"
+    if key in _tg_setup_sent: return
+    _tg_setup_sent.add(key)
+    sz=s.get("sizing",{}); rr=s["rr"]; q=s["quality"]
+    grade_emoji="🔥" if q=="A+" else "✅" if q=="A" else "🔔"
+    margin_line=(f"\nMarj: <b>£{sz['margin']:.2f}</b>  "
+                 f"(Risk: £{sz['exp_loss']:.2f} → Kâr TP3: £{sz['exp_profit_tp3']:.2f})"
+                 if sz else "")
+    msg=(
+        f"🚨 <b>TRADE ALERT</b>  {grade_emoji}\n\n"
+        f"Pair:      <b>{s['sym']}</b>\n"
+        f"Direction: <b>{s['direction']}</b>\n"
+        f"Grade:     <b>{q}</b>  |  Score: {s['score']:.0f}/100\n\n"
+        f"Entry:     <code>{fp(s['price'])}</code>  ({fp(s['el'])} – {fp(s['eh'])})\n"
+        f"Stop Loss: <code>{fp(s['sl'])}</code>\n"
+        f"TP1:       <code>{fp(s['tp1'])}</code>\n"
+        f"TP2:       <code>{fp(s['tp2'])}</code>\n"
+        f"TP3:       <code>{fp(s['tp3'])}</code>\n\n"
+        f"Risk Reward: <b>1:{rr}</b>\n"
+        f"Confidence: {s.get('confidence',s['score']):.0f}/100\n"
+        f"Hold Time:  ~{s.get('hold_h',0):.1f} saat"
+        f"{margin_line}\n\n"
+        f"News Risk:  {s.get('news_risk','—')}\n"
+        f"Portfolio Heat: {s.get('portfolio_heat',0):.1f}%\n\n"
+        f"✅ <b>POSITION OPENED</b>")
+    threading.Thread(target=send_telegram,args=(msg,),daemon=True).start()
+
+def tg_outcome_alert(sym, direction, status, entry, out_price, act_rr):
+    """Send TP / SL / Expired outcome notification."""
+    if status in ("TP1","TP2","TP3"):
+        emoji="🎯"; label=f"TAKE PROFIT HIT ({status})"
+        pnl_txt=f"\nR:R gerçekleşti: <b>+{act_rr:.2f}R</b>" if act_rr else ""
+    elif status=="SL":
+        emoji="❌"; label="STOP LOSS HIT"
+        pnl_txt=f"\nKayıp: <b>{act_rr:.2f}R</b>" if act_rr else ""
+    elif status=="EXPIRED":
+        emoji="⏰"; label="TRADE EXPIRED"
+        pnl_txt=""
+    else:
+        return
+    msg=(
+        f"{emoji} <b>{label}</b>\n\n"
+        f"Pair:      <b>{sym}</b>\n"
+        f"Direction: <b>{direction}</b>\n\n"
+        f"Entry:     <code>{fp(entry)}</code>\n"
+        f"Çıkış:     <code>{fp(out_price)}</code>"
+        f"{pnl_txt}")
+    threading.Thread(target=send_telegram,args=(msg,),daemon=True).start()
 
 def _importance(text):
     score = 0
@@ -1448,6 +1515,8 @@ def _check_open():
             if ns:
                 c.execute("UPDATE signals SET status=?,out_price=?,out_at=?,act_rr=? WHERE id=?",
                           (ns,cur,now,arr,r["id"]))
+                try: tg_outcome_alert(sym,r["direction"],ns,ep,cur,arr)
+                except: pass
                 # Update shadow trade
                 st_row=c.execute("SELECT * FROM shadow_trades WHERE signal_id=? AND status='OPEN'",
                                  (r["id"],)).fetchone()
@@ -1588,6 +1657,10 @@ def run_analysis():
                 results.append(r)
                 try: log_signal(r)
                 except: pass
+                # Telegram alert for A+/A/B+ setups
+                if r.get("quality") in ("A+","A","B+") and r.get("status")=="APPROVED":
+                    try: tg_setup_alert(r)
+                    except: pass
         except: pass
     results.sort(key=lambda x:({"A+":0,"A":1,"B+":2}.get(x["quality"],9),-x["rr"]))
     setups=results
