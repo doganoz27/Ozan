@@ -325,7 +325,7 @@ def tg_setup_alert(s):
     sz=s.get("sizing",{}); rr=s["rr"]; q=s["quality"]
     grade_emoji="🔥" if q=="A+" else "✅" if q=="A" else "🔔"
     margin_line=(f"\nMarj: <b>£{sz['margin']:.2f}</b>  "
-                 f"(Risk: £{sz['exp_loss']:.2f} → Kâr TP3: £{sz['exp_profit_tp3']:.2f})"
+                 f"(Risk: £{sz['exp_loss']:.2f} → Kâr: £{sz['exp_profit']:.2f})"
                  if sz else "")
     msg=(
         f"🚨 <b>TRADE ALERT</b>  {grade_emoji}\n\n"
@@ -334,9 +334,7 @@ def tg_setup_alert(s):
         f"Grade:     <b>{q}</b>  |  Score: {s['score']:.0f}/100\n\n"
         f"Entry:     <code>{fp(s['price'])}</code>  ({fp(s['el'])} – {fp(s['eh'])})\n"
         f"Stop Loss: <code>{fp(s['sl'])}</code>\n"
-        f"TP1:       <code>{fp(s['tp1'])}</code>\n"
-        f"TP2:       <code>{fp(s['tp2'])}</code>\n"
-        f"TP3:       <code>{fp(s['tp3'])}</code>\n\n"
+        f"Take Profit: <code>{fp(s['tp'])}</code>\n\n"
         f"Risk Reward: <b>1:{rr}</b>\n"
         f"Confidence: {s.get('confidence',s['score']):.0f}/100\n"
         f"Hold Time:  ~{s.get('hold_h',0):.1f} saat"
@@ -529,7 +527,7 @@ def db_init():
         CREATE TABLE IF NOT EXISTS signals(
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             sym TEXT, quality TEXT, direction TEXT,
-            entry REAL, sl REAL, tp1 REAL, tp2 REAL, tp3 REAL,
+            entry REAL, sl REAL, tp REAL,
             rr_t REAL, score INTEGER,
             f_ema INTEGER DEFAULT 0, f_rsi INTEGER DEFAULT 0,
             f_macd INTEGER DEFAULT 0, f_sweep INTEGER DEFAULT 0,
@@ -551,7 +549,7 @@ def db_init():
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             signal_id INTEGER,
             sym TEXT, direction TEXT,
-            entry REAL, sl REAL, tp3 REAL, rr REAL,
+            entry REAL, sl REAL, tp REAL, rr REAL,
             capital REAL, risk_amount REAL,
             status TEXT DEFAULT 'OPEN',
             pnl REAL, pnl_pct REAL,
@@ -580,7 +578,7 @@ def calc_sizing(setup):
     Returns dict with capital, risk_amount, expected_loss/profit, margin.
     """
     sym=setup["sym"]; entry=setup["price"]; sl=setup["sl"]
-    tp2=setup["tp2"]; tp3=setup["tp3"]; rr=setup["rr"]
+    rr=setup["rr"]
     lev=get_leverage(sym)
     with lock:
         bal=portfolio_state["shadow_balance"]
@@ -600,13 +598,12 @@ def calc_sizing(setup):
     # Recalculate actual risk at capped margin
     actual_notional=margin*lev
     actual_risk=round(actual_notional*sl_dist_pct,2)
-    exp_profit_tp2=round(actual_risk*rr*0.6,2)
-    exp_profit_tp3=round(actual_risk*rr,2)
+    exp_profit=round(actual_risk*rr,2)
     return {
         "margin":margin,"notional":round(actual_notional,2),
         "risk_amt":actual_risk,"leverage":lev,
         "exp_loss":actual_risk,
-        "exp_profit_tp2":exp_profit_tp2,"exp_profit_tp3":exp_profit_tp3,
+        "exp_profit":exp_profit,
         "risk_pct":round(actual_risk/bal*100,2),
         "asset_class":get_asset_class(sym),
     }
@@ -807,6 +804,85 @@ def ema(p, n):
     k = 2/(n+1); r = [sum(p[:n])/n]
     for x in p[n:]: r.append(x*k + r[-1]*(1-k))
     return r
+
+def swing_lows(candles, lb=5):
+    """Significant swing lows from recent candles."""
+    lows=[]
+    c=[c[3] for c in candles]
+    for i in range(lb, len(c)-lb):
+        if c[i]==min(c[i-lb:i+lb+1]):
+            lows.append(c[i])
+    return lows
+
+def swing_highs(candles, lb=5):
+    """Significant swing highs from recent candles."""
+    highs=[]
+    c=[c[2] for c in candles]
+    for i in range(lb, len(c)-lb):
+        if c[i]==max(c[i-lb:i+lb+1]):
+            highs.append(c[i])
+    return highs
+
+def structural_sl(candles, direction, price, av):
+    """
+    SL based on market structure (swing high/low) + ATR buffer.
+    Not random — placed beyond the nearest significant swing level.
+    """
+    if len(candles)<20 or not av: return None
+    recent=candles[-40:]
+    if direction=="LONG":
+        sl_levels=swing_lows(recent,lb=3)
+        # Use the highest swing low below current price
+        candidates=[s for s in sl_levels if s < price - av*0.1]
+        if candidates:
+            swing=max(candidates)
+            sl=swing - av*0.25      # buffer below swing low
+        else:
+            sl=price - av*2.0       # fallback: 2 ATR
+        # Don't let SL be more than 3 ATR away (over-exposed)
+        sl=max(sl, price - av*3.0)
+    else:
+        sl_levels=swing_highs(recent,lb=3)
+        candidates=[s for s in sl_levels if s > price + av*0.1]
+        if candidates:
+            swing=min(candidates)
+            sl=swing + av*0.25
+        else:
+            sl=price + av*2.0
+        sl=min(sl, price + av*3.0)
+    return round(sl, 8)
+
+def structural_tp(candles, direction, price, sl, min_rr=2.5):
+    """
+    TP placed just before nearest significant S/R level.
+    Guarantees minimum RR. Returns (tp, actual_rr).
+    """
+    if not sl: return None, 0
+    risk=abs(price-sl)
+    if risk==0: return None, 0
+    min_dist=risk*min_rr
+    recent=candles[-80:]
+
+    if direction=="LONG":
+        # Find resistance levels (swing highs) above price + min_dist
+        resistances=swing_highs(recent,lb=3)
+        targets=[r for r in resistances if r > price + min_dist]
+        if targets:
+            # Place TP just before the nearest resistance
+            tp=min(targets) * 0.9992
+        else:
+            # No clear resistance — use 3x ATR target for quality
+            tp=price + max(min_dist, abs(price-sl)*3.0)
+    else:
+        supports=swing_lows(recent,lb=3)
+        targets=[s for s in supports if s < price - min_dist]
+        if targets:
+            tp=max(targets) * 1.0008
+        else:
+            tp=price - max(min_dist, abs(price-sl)*3.0)
+
+    actual_rr=round(abs(tp-price)/risk, 2) if risk else 0
+    return round(tp, 8), actual_rr
 
 def rsi(p, n=14):
     if len(p) < n+1: return None
@@ -1090,32 +1166,29 @@ def score_setup(sym, candles, price, news_items=None):
     else:
         direction="SHORT"; raw=sr_; reasons=rs+news_rs; neg_factors=neg_s
 
-    # ── Compute entry/SL/TP ──────────────────────────────────────
+    # ── Compute entry zone ───────────────────────────────────────
     if direction=="LONG":
-        el=price-av*0.3; eh=price+av*0.15
-        sl=price-av*1.8; tp1=price+av*1.5
-        tp2=price+av*3.0; tp3=price+av*5.0
+        el=price-av*0.2; eh=price+av*0.1
     else:
-        el=price-av*0.15; eh=price+av*0.3
-        sl=price+av*1.8; tp1=price-av*1.5
-        tp2=price-av*3.0; tp3=price-av*5.0
+        el=price-av*0.1; eh=price+av*0.2
 
-    risk=abs(price-sl); reward=abs(tp3-price)
-    rr=round(reward/risk,2) if risk>0 else 0
+    # ── Structural SL (swing-based + ATR buffer) ─────────────────
+    sl=structural_sl(candles, direction, price, av)
+    if sl is None: return None
 
-    # ── HARD REJECT: RR < 2.0 ───────────────────────────────────
-    if rr<2.0:
-        return None
+    # ── Structural TP (S/R based, min 1:2.5) ────────────────────
+    tp, rr=structural_tp(candles, direction, price, sl, min_rr=2.5)
+    if tp is None or rr<2.5: return None   # HARD REJECT
 
-    # ── RR bonus (10-15 pts) ─────────────────────────────────────
-    rr_bonus = 15 if rr>=3.0 else 12 if rr>=2.5 else 10
-    if rr<2.5: neg_factors.append(f"RR {rr} below preferred 1:2.5 threshold")
+    # ── Prefer 1:3+ RR — bonus scoring ──────────────────────────
+    rr_bonus = 15 if rr>=3.5 else 13 if rr>=3.0 else 10  # 2.5 gets only 10
+    if rr<3.0: neg_factors.append(f"RR {rr} — acceptable but 1:3+ preferred")
 
     # ── Normalise to 100 then blend RR bonus ─────────────────────
     score_100=round(min(max(raw/MAX_RAW*85+rr_bonus-news_penalty,0),100),1)
 
-    # ── Expected hold time (TP2 distance ÷ ATR = hours) ──────────
-    hold_h=round(abs(tp2-price)/av,1) if av else 8.0
+    # ── Expected hold time (TP distance ÷ ATR = hours) ───────────
+    hold_h=round(abs(tp-price)/av,1) if av else 8.0
     time_bonus=(2 if hold_h<=4 else 1 if hold_h<=8 else 0 if hold_h<=24 else -3)
     score_100=round(min(max(score_100+time_bonus,0),100),1)
 
@@ -1150,7 +1223,7 @@ def score_setup(sym, candles, price, news_items=None):
                      else "MEDIUM" if n_imp<60 else "HIGH" if n_imp<80 else "CRITICAL")
 
     # Build placeholder setup for sizing (fill in entry/sl/tp before calling)
-    _tmp={"sym":sym,"price":price,"sl":sl,"tp2":tp2,"tp3":tp3,"rr":rr}
+    _tmp={"sym":sym,"price":price,"sl":sl,"rr":rr}
     sizing=calc_sizing(_tmp) or {}
 
     # Institutional risk score
@@ -1159,17 +1232,17 @@ def score_setup(sym, candles, price, news_items=None):
     return {
         "sym":sym,"quality":quality,"direction":direction,"status":status,
         "price":price,"el":el,"eh":eh,"sl":sl,
-        "tp1":tp1,"tp2":tp2,"tp3":tp3,"rr":rr,
+        "tp":tp,"rr":rr,
         "score":score_100,"confidence":confidence,"hold_h":hold_h,
         "reasons":reasons,"neg_factors":neg_factors,
         "flags":fl,"rsi":rv,"atr":av,"cot":cot,
         "news_score":news_score,"news_imp":n_imp,"news_risk":news_risk_label,
         "sizing":sizing,"inst_risk_score":inst_rs,"portfolio_heat":heat,
         "time":datetime.now().strftime("%H:%M:%S"),
-        "narrative": _narrative(sym,direction,price,el,eh,sl,tp1,tp2,tp3,rr,av,rv,mh,st,sw,bOB,beOB,bFVG,beFVG,cot,news_rl+news_rs,news_score),
+        "narrative": _narrative(sym,direction,price,el,eh,sl,tp,rr,av,rv,mh,st,sw,bOB,beOB,bFVG,beFVG,cot,news_rl+news_rs,news_score),
     }
 
-def _narrative(sym,dirn,price,el,eh,sl,tp1,tp2,tp3,rr,av,rv,mh,st,sw,bOB,beOB,bFVG,beFVG,cot,news,ns):
+def _narrative(sym,dirn,price,el,eh,sl,tp,rr,av,rv,mh,st,sw,bOB,beOB,bFVG,beFVG,cot,news,ns):
     L=[f"WHY ENTER {dirn} on {sym}:",""]
     ow="upside" if dirn=="LONG" else "downside"
     if st=="BULL" and dirn=="LONG": L.append("► HH+HL structure — bulls in control, trend continuation.")
@@ -1197,9 +1270,7 @@ def _narrative(sym,dirn,price,el,eh,sl,tp1,tp2,tp3,rr,av,rv,mh,st,sw,bOB,beOB,bF
     L+= ["","RISK MANAGEMENT:",
          f"  Entry   : {el:.5f} – {eh:.5f}",
          f"  Stop    : {sl:.5f}  (close beyond = immediate exit)",
-         f"  TP1 25% : {tp1:.5f}  → move SL to breakeven",
-         f"  TP2 50% : {tp2:.5f}  → reduce size",
-         f"  TP3 25% : {tp3:.5f}  → final runner",
+         f"  TP      : {tp:.5f}  → full exit at target",
          f"  R:R     : 1:{rr}  |  Risk max 1-2% of capital"]
     return "\n".join(L)
 
@@ -1455,12 +1526,12 @@ def log_signal(s):
     sz=s.get("sizing",{})
     created=datetime.utcnow().isoformat(timespec="seconds")
     with db() as c:
-        cur=c.execute("""INSERT INTO signals(sym,quality,direction,entry,sl,tp1,tp2,tp3,
+        cur=c.execute("""INSERT INTO signals(sym,quality,direction,entry,sl,tp,
             rr_t,score,f_ema,f_rsi,f_macd,f_sweep,f_ob,f_fvg,f_struct,f_cot,f_news,
             status,created)
-            VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,'OPEN',?)""",
+            VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,'OPEN',?)""",
             (s["sym"],s["quality"],s["direction"],s["price"],s["sl"],
-             s["tp1"],s["tp2"],s["tp3"],s["rr"],s["score"],
+             s["tp"],s["rr"],s["score"],
              fl["f_ema"],fl["f_rsi"],fl["f_macd"],fl["f_sweep"],
              fl["f_ob"],fl["f_fvg"],fl["f_struct"],fl["f_cot"],fl["f_news"],
              created))
@@ -1468,10 +1539,10 @@ def log_signal(s):
         # Shadow trade
         if sz:
             c.execute("""INSERT INTO shadow_trades(signal_id,sym,direction,
-                entry,sl,tp3,rr,capital,risk_amount,status,created)
+                entry,sl,tp,rr,capital,risk_amount,status,created)
                 VALUES(?,?,?,?,?,?,?,?,?,'OPEN',?)""",
                 (sig_id,s["sym"],s["direction"],s["price"],s["sl"],
-                 s["tp3"],s["rr"],sz.get("margin",0),sz.get("risk_amt",0),created))
+                 s["tp"],s["rr"],sz.get("margin",0),sz.get("risk_amt",0),created))
             # Update shadow balance state
             c.execute("INSERT OR REPLACE INTO account_state(key,value,updated) VALUES('shadow_balance',?,?)",
                       (portfolio_state["shadow_balance"],created))
@@ -1491,7 +1562,7 @@ def _check_open():
         rows=c.execute("SELECT * FROM signals WHERE status='OPEN'").fetchall()
         for r in rows:
             sym=r["sym"]; ep=r["entry"]; sl=r["sl"]
-            tp1=r["tp1"]; tp2=r["tp2"]; tp3=r["tp3"]
+            tp=r["tp"]
             with lock: md=market.get(sym); cur=md.price if md else None
             if cur is None: continue
             risk=abs(ep-sl)
@@ -1499,14 +1570,10 @@ def _check_open():
             ns=None; arr=None
             if r["direction"]=="LONG":
                 if cur<=sl:  ns="SL";  arr=-1.0
-                elif cur>=tp3: ns="TP3"; arr=round(r["rr_t"],2)
-                elif cur>=tp2: ns="TP2"; arr=round(r["rr_t"]*0.6,2)
-                elif cur>=tp1: ns="TP1"; arr=round(r["rr_t"]*0.3,2)
+                elif cur>=tp: ns="TP";  arr=round(r["rr_t"],2)
             else:
                 if cur>=sl:  ns="SL";  arr=-1.0
-                elif cur<=tp3: ns="TP3"; arr=round(r["rr_t"],2)
-                elif cur<=tp2: ns="TP2"; arr=round(r["rr_t"]*0.6,2)
-                elif cur<=tp1: ns="TP1"; arr=round(r["rr_t"]*0.3,2)
+                elif cur<=tp: ns="TP";  arr=round(r["rr_t"],2)
             try:
                 age=(datetime.utcnow()-datetime.fromisoformat(r["created"])).days
                 if age>=7 and ns is None:
@@ -1615,9 +1682,7 @@ def compute_stats():
 
         with lock:
             stats_cache={"total":total,"wins":len(wins),"wr":wr,"avg_rr":avg_rr,"pf":pf,
-                         "tp3":sum(1 for r in closed if r["status"]=="TP3"),
-                         "tp2":sum(1 for r in closed if r["status"]=="TP2"),
-                         "tp1":sum(1 for r in closed if r["status"]=="TP1"),
+                         "tp":sum(1 for r in closed if r["status"]=="TP"),
                          "sl":sum(1 for r in closed if r["status"]=="SL"),
                          "by_q":bq,"fstats":fstats,
                          "recent":[dict(r) for r in recent],
@@ -1875,9 +1940,7 @@ def panel_setups():
     t.add_column("FİYAT",  width=12, justify="right")
     t.add_column("GİRİŞ ZONU",width=22,justify="right")
     t.add_column("STOP",   width=12, justify="right",style="bright_red")
-    t.add_column("TP1",    width=12, justify="right",style="green")
-    t.add_column("TP2",    width=12, justify="right",style="bright_green")
-    t.add_column("TP3",    width=12, justify="right",style="bright_yellow")
+    t.add_column("TP",     width=12, justify="right",style="bright_green")
     t.add_column("R:R",    width=7,  justify="center")
     t.add_column("HOLD",   width=7,  justify="center",style="dim")
     t.add_column("SAAT",   width=7)
@@ -1896,7 +1959,7 @@ def panel_setups():
             f"{s.get('confidence',sc):.0f}%",
             f"[bright_white]{fp(s['price'])}[/bright_white]",
             f"{fp(s['el'])} – {fp(s['eh'])}",
-            fp(s["sl"]),fp(s["tp1"]),fp(s["tp2"]),fp(s["tp3"]),
+            fp(s["sl"]),fp(s["tp"]),
             f"[bold]1:{s['rr']}[/bold]",
             hold_s, s["time"])
     return Panel(t,border_style="bright_yellow",box=box.HEAVY)
@@ -1934,8 +1997,7 @@ def panel_details():
             +(f"\n  [bold dim]── POZİSYON BOYUTU (Trade212 CFD) ──[/bold dim]\n"
               f"  [bold]Önerilen Marj      :[/bold] [bright_white]£{sz.get('margin',0):.2f}[/bright_white]  [dim]({sz.get('leverage',1)}:1 kaldıraç → £{sz.get('notional',0):.2f} pozisyon)[/dim]\n"
               f"  [bold]Beklenen Kayıp     :[/bold] [bright_red]£{sz.get('exp_loss',0):.2f}[/bright_red]\n"
-              f"  [bold]Beklenen Kâr TP2   :[/bold] [bright_green]£{sz.get('exp_profit_tp2',0):.2f}[/bright_green]\n"
-              f"  [bold]Beklenen Kâr TP3   :[/bold] [bold bright_green]£{sz.get('exp_profit_tp3',0):.2f}[/bold bright_green]\n"
+              f"  [bold]Beklenen Kâr       :[/bold] [bold bright_green]£{sz.get('exp_profit',0):.2f}[/bold bright_green]\n"
               f"  [bold]Risk / Trade       :[/bold] {sz.get('risk_pct',0):.2f}% sermaye\n"
               if sz else ""))
 
@@ -2049,8 +2111,7 @@ def panel_stats():
     lines=[
         f"[bold]KPI[/bold]  [dim]{total} kapanmış[/dim]  [{wc}]{wr:.1f}% WR[/{wc}]  "
         f"[bold]PF {pf:.2f}[/bold]  Avg R:R [bold]{avg:+.2f}[/bold]",
-        f"TP3 [bright_green]{st.get('tp3',0)}[/bright_green]  "
-        f"TP2 [green]{st.get('tp2',0)}[/green]  TP1 {st.get('tp1',0)}  "
+        f"TP [bright_green]{st.get('tp',0)}[/bright_green]  "
         f"SL [bright_red]{st.get('sl',0)}[/bright_red]  |  "
         f"Adaptif: " + ("[bright_green]AKTİF[/bright_green]" if adap
                         else f"[dim]{max(0,MIN_TRADES_ADAPT-total)} trade daha[/dim]"),
@@ -2086,7 +2147,7 @@ def panel_stats():
     lines.append("[bold dim]━━━  KAPANMIŞ POZİSYONLAR  ━━━[/bold dim]")
     try:
         with db() as c:
-            rows=c.execute("""SELECT sym,quality,direction,entry,sl,tp1,tp3,
+            rows=c.execute("""SELECT sym,quality,direction,entry,sl,tp,
                                out_price,act_rr,rr_t,status,created
                                FROM signals WHERE status!='OPEN'
                                ORDER BY id DESC LIMIT 30""").fetchall()
@@ -2098,14 +2159,13 @@ def panel_stats():
         # Başlık satırı
         lines.append(
             f"  [bold dim]{'SAAT':<7} {'SEMBOL':<10} {'GR':<4} {'YÖN':<6} "
-            f"{'GİRİŞ':>10} {'STOP':>10} {'TP3':>10} "
+            f"{'GİRİŞ':>10} {'STOP':>10} {'TP':>10} "
             f"{'ÇIKIŞ':>10} {'DURUM':<7} {'GERÇEK R:R':>10} {'HEDEF R:R':>9}[/bold dim]")
         lines.append("  [dim]" + "─"*105 + "[/dim]")
         for r in rows:
             ts=str(r["created"])[-8:-3] if r["created"] else "—"
             st2=r["status"]
-            sc={"TP3":"bold bright_green","TP2":"bright_green","TP1":"green",
-                "SL":"bold bright_red","EXPIRED":"dim"}.get(st2,"white")
+            sc={"TP":"bold bright_green","SL":"bold bright_red","EXPIRED":"dim"}.get(st2,"white")
             arr=r["act_rr"]
             arr_s=(f"[bright_green]+{arr:.2f}R[/bright_green]" if arr and arr>0
                    else f"[bright_red]{arr:.2f}R[/bright_red]" if arr and arr<0 else "[dim]—[/dim]")
@@ -2115,7 +2175,7 @@ def panel_stats():
                 f"{dir_s:<6} "
                 f"[dim]{fp(r['entry']):>10}[/dim] "
                 f"[red]{fp(r['sl']):>10}[/red] "
-                f"[green]{fp(r['tp3']):>10}[/green] "
+                f"[green]{fp(r['tp']):>10}[/green] "
                 f"[dim]{fp(r['out_price']):>10}[/dim] "
                 f"[{sc}]{st2:<7}[/{sc}] "
                 f"{arr_s:>10}  "
