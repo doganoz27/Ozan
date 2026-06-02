@@ -633,6 +633,102 @@ cot_cache    = {}
 setups       = []
 stats_cache  = {}
 adap_weights = {}
+
+# ── Watchlist Lifecycle Manager ──────────────────────────────────────────────
+# Each entry: setup dict + "_wl_status", "_wl_added", "_wl_updated", "_wl_reason"
+_wl_active      = {}   # key → setup dict  (currently watching)
+_wl_triggered   = []   # list of closed-out setups that hit entry
+_wl_invalidated = []   # list with reason why cancelled
+_wl_expired     = []   # list that ran past max age
+_WL_MAX_AGE_H   = 48   # hours before auto-expiry
+_WL_MAX_HISTORY = 40   # keep last N per bucket
+
+def _wl_key(s):
+    return f"{s['sym']}_{s['direction']}"
+
+def _wl_structure_changed(old, new):
+    """True if market structure or score dropped significantly."""
+    if old["direction"] != new["direction"]: return True, "Piyasa yönü değişti"
+    if new["score"] < old["score"] - 20:    return True, f"Skor düştü {old['score']:.0f}→{new['score']:.0f}"
+    return False, ""
+
+def _wl_sl_invalidated(old, cur_price):
+    """True if current price has already moved past the SL."""
+    sl=old["sl"]; ep=old["price"]
+    if old["direction"]=="LONG"  and cur_price<=sl: return True, f"Fiyat ({fp_plain(cur_price)}) SL altına ({fp_plain(sl)}) düştü"
+    if old["direction"]=="SHORT" and cur_price>=sl: return True, f"Fiyat ({fp_plain(cur_price)}) SL üstüne ({fp_plain(sl)}) çıktı"
+    return False, ""
+
+def _wl_entry_triggered(old, cur_price):
+    """True if price entered the entry zone."""
+    el=old["el"]; eh=old["eh"]
+    return el<=cur_price<=eh
+
+def fp_plain(v):
+    if v is None: return "—"
+    a=abs(v)
+    if a>10000: return f"{v:,.1f}"
+    if a>100:   return f"{v:,.3f}"
+    if a>1:     return f"{v:.5f}"
+    return f"{v:.6f}"
+
+def update_watchlist(new_setups):
+    """Reconcile new analysis results against active watchlist."""
+    global _wl_active, _wl_triggered, _wl_invalidated, _wl_expired
+    now=datetime.now()
+    new_keys={_wl_key(s):s for s in new_setups}
+
+    # ── Check existing watchlist entries ─────────────────────────
+    to_remove=[]
+    for k,old in list(_wl_active.items()):
+        cur_md=market.get(old["sym"])
+        cur_price=cur_md.price if cur_md else None
+        added=old.get("_wl_added",now)
+        age_h=(now-added).total_seconds()/3600
+
+        # 1. Expired
+        if age_h>_WL_MAX_AGE_H:
+            exp={**old,"_wl_status":"EXPIRED",
+                 "_wl_updated":now,"_wl_reason":f"{age_h:.0f} saat sonra zaman aşımı"}
+            _wl_expired.insert(0,exp); _wl_expired=_wl_expired[:_WL_MAX_HISTORY]
+            to_remove.append(k); continue
+
+        if cur_price is None:
+            continue
+
+        # 2. SL invalidated
+        inv, reason=_wl_sl_invalidated(old, cur_price)
+        if inv:
+            inv_entry={**old,"_wl_status":"INVALIDATED",
+                       "_wl_updated":now,"_wl_reason":reason,
+                       "_wl_fail_condition":"Stop Loss Geçersiz Kılındı"}
+            _wl_invalidated.insert(0,inv_entry); _wl_invalidated=_wl_invalidated[:_WL_MAX_HISTORY]
+            to_remove.append(k); continue
+
+        # 3. Entry triggered
+        if _wl_entry_triggered(old, cur_price):
+            trig={**old,"_wl_status":"TRIGGERED","_wl_updated":now,
+                  "_wl_reason":f"Giriş bölgesine ulaşıldı ({fp_plain(cur_price)})"}
+            _wl_triggered.insert(0,trig); _wl_triggered=_wl_triggered[:_WL_MAX_HISTORY]
+            to_remove.append(k); continue
+
+        # 4. Structure changed (new analysis disagrees)
+        if k in new_keys:
+            changed, reason=_wl_structure_changed(old, new_keys[k])
+            if changed:
+                inv_entry={**old,"_wl_status":"INVALIDATED",
+                           "_wl_updated":now,"_wl_reason":reason,
+                           "_wl_fail_condition":"Piyasa Yapısı Değişti"}
+                _wl_invalidated.insert(0,inv_entry); _wl_invalidated=_wl_invalidated[:_WL_MAX_HISTORY]
+                to_remove.append(k); continue
+
+    for k in to_remove:
+        _wl_active.pop(k,None)
+
+    # ── Add new setups to watchlist if not already there ─────────
+    for k,s in new_keys.items():
+        if k not in _wl_active:
+            _wl_active[k]={**s,"_wl_added":now,"_wl_status":"ACTIVE","_wl_updated":now,"_wl_reason":"Yeni setup tespit edildi"}
 portfolio_state = {
     "heat": 0.0, "open_positions": {},
     "daily_pnl": 0.0, "weekly_pnl": 0.0,
@@ -1922,6 +2018,8 @@ def run_analysis():
         except: pass
     results.sort(key=lambda x:({"A+":0,"A":1,"B+":2}.get(x["quality"],9),-x["rr"]))
     setups=results
+    try: update_watchlist(results)
+    except: pass
 
 # ═══════════════════════════════════════════════════════════════
 # DISPLAY HELPERS
@@ -2648,7 +2746,7 @@ _last_keypress = time.time()
 AUTO_SCROLL_SEC = 5   # sayfa geçiş süresi (boşta)
 AUTO_SCROLL_IDLE= 30  # kaç saniye sonra oto-scroll başlar
 
-PAGE_NAMES = {1:"PİYASA",2:"SETUPLAR",3:"DETAY",4:"COT",5:"JOURNAL",6:"HABERLER",7:"QUANT",8:"PORTFÖY"}
+PAGE_NAMES = {1:"PİYASA",2:"SETUPLAR",3:"DETAY",4:"COT",5:"JOURNAL",6:"HABERLER",7:"QUANT",8:"PORTFÖY",9:"İZLEME"}
 
 def nav_bar():
     parts=[]
@@ -2680,6 +2778,89 @@ def auto_scroll_loop():
         if time.time()-_last_keypress >= AUTO_SCROLL_IDLE:
             current_page=(current_page % total)+1
 
+def panel_watchlist():
+    lines=[]
+    DIV="─"*108
+
+    def wl_row(s, badge, badge_col, show_reason=True):
+        q=s.get("quality","?"); st2=s.get("status","?")
+        sc=s.get("score",0); rr=s.get("rr",0)
+        updated=s.get("_wl_updated"); added=s.get("_wl_added")
+        age_s="";
+        if added:
+            age_h=(datetime.now()-added).total_seconds()/3600
+            age_s=f"{age_h:.1f}sa"
+        upd_s=updated.strftime("%H:%M") if updated else "—"
+        reason=s.get("_wl_reason",""); fail=s.get("_wl_fail_condition","")
+        c_score=s.get("contrarian_score",0)
+        row=(f"  [{badge_col}]{badge}[/{badge_col}]  "
+             f"{qc(q)}  {dc(s['direction'])}  "
+             f"[bold white]{s['sym']:<10}[/bold white]  "
+             f"Skor:[bold]{sc:.0f}[/bold]  R:R:[bold]1:{rr}[/bold]  "
+             f"Giriş:[dim]{fp_plain(s['price'])}[/dim]  "
+             f"SL:[bright_red]{fp_plain(s['sl'])}[/bright_red]  "
+             f"TP:[bright_green]{fp_plain(s['tp'])}[/bright_green]  "
+             f"[dim]{age_s} / {upd_s}[/dim]")
+        lines.append(row)
+        if show_reason and reason:
+            extra=""
+            if fail: extra=f"  [bright_red]→ {fail}[/bright_red]"
+            lines.append(f"    [dim]{reason}[/dim]{extra}")
+
+    # ── ACTIVE ───────────────────────────────────────────────────
+    active=sorted(_wl_active.values(),
+                  key=lambda x:({"A+":0,"A":1,"B+":2,"WATCH":3}.get(x.get("quality","?"),4),-x.get("rr",0)))
+    lines.append(f"[bold bright_green]● AKTİF İZLEME LİSTESİ  ({len(active)} setup)[/bold bright_green]")
+    lines.append(f"[dim]{DIV}[/dim]")
+    if not active:
+        lines.append("  [dim]Henüz izleme listesinde setup yok.[/dim]")
+    else:
+        for s in active:
+            wl_row(s,"◉ AKTİF","bright_green",show_reason=False)
+            # Show smart money + trap notes if any
+            sm=s.get("sm_notes",[]); traps=s.get("trap_warnings",[])
+            if traps:
+                lines.append("    "+"  ".join(f"[bright_red]{t[:60]}[/bright_red]" for t in traps[:1]))
+            elif sm:
+                lines.append(f"    [dim cyan]{sm[0][:80]}[/dim cyan]")
+    lines.append("")
+
+    # ── TRIGGERED ────────────────────────────────────────────────
+    lines.append(f"[bold bright_yellow]● TETİKLENEN İŞLEMLER  ({len(_wl_triggered)} setup)[/bold bright_yellow]")
+    lines.append(f"[dim]{DIV}[/dim]")
+    if not _wl_triggered:
+        lines.append("  [dim]Henüz tetiklenen setup yok.[/dim]")
+    else:
+        for s in _wl_triggered[:8]:
+            wl_row(s,"✓ TETİKLENDİ","bright_yellow")
+    lines.append("")
+
+    # ── INVALIDATED ──────────────────────────────────────────────
+    lines.append(f"[bold bright_red]● İPTAL EDİLEN SETUPLАР  ({len(_wl_invalidated)} setup)[/bold bright_red]")
+    lines.append(f"[dim]{DIV}[/dim]")
+    if not _wl_invalidated:
+        lines.append("  [dim]Henüz iptal edilen setup yok.[/dim]")
+    else:
+        for s in _wl_invalidated[:8]:
+            wl_row(s,"✗ İPTAL","bright_red")
+    lines.append("")
+
+    # ── EXPIRED ──────────────────────────────────────────────────
+    lines.append(f"[bold dim]● SÜRESI DOLAN SETUPLАР  ({len(_wl_expired)} setup)[/bold dim]")
+    lines.append(f"[dim]{DIV}[/dim]")
+    if not _wl_expired:
+        lines.append("  [dim]Henüz süresi dolan setup yok.[/dim]")
+    else:
+        for s in _wl_expired[:6]:
+            wl_row(s,"⏱ SÜRESI DOLDU","dim")
+
+    total=len(active)+len(_wl_triggered)+len(_wl_invalidated)+len(_wl_expired)
+    return Panel("\n".join(lines),
+                 title="[bold bright_cyan]● WATCHLIST YÖNETİM SİSTEMİ — Titan Prime Elite[/bold bright_cyan]",
+                 border_style="bright_cyan",box=box.ROUNDED,
+                 subtitle=f"[dim]Toplam takip edilen: {total}  ·  Max yaş: {_WL_MAX_AGE_H}sa  ·  Hiçbir setup sessizce silinmez[/dim]")
+
+
 def render():
     run_analysis()
     nav=Panel(nav_bar(),box=box.SIMPLE,border_style="dim",height=3)
@@ -2703,8 +2884,10 @@ def render():
         lo.split_column(Layout(hdr,size=3),Layout(nav,size=3),body)
     elif current_page==7:
         lo=Layout(); lo.split_column(Layout(hdr,size=3),Layout(nav,size=3),Layout(panel_quant()))
-    else:
+    elif current_page==8:
         lo=Layout(); lo.split_column(Layout(hdr,size=3),Layout(nav,size=3),Layout(panel_portfolio()))
+    else:
+        lo=Layout(); lo.split_column(Layout(hdr,size=3),Layout(nav,size=3),Layout(panel_watchlist()))
     return lo
 
 # ═══════════════════════════════════════════════════════════════
