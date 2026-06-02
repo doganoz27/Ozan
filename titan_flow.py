@@ -327,21 +327,30 @@ def tg_setup_alert(s):
     margin_line=(f"\nMarj: <b>£{sz['margin']:.2f}</b>  "
                  f"(Risk: £{sz['exp_loss']:.2f} → Kâr: £{sz['exp_profit']:.2f})"
                  if sz else "")
+    c_score=s.get("contrarian_score",0); c_label=s.get("contrarian_label","—")
+    regime=s.get("regime","Nötr")
+    traps=s.get("trap_warnings",[])
+    trap_line=("\n\n⚠️ <b>Tuzak Uyarısı:</b>\n"+"\n".join(f"  {t}" for t in traps)) if traps else ""
+    sm=s.get("sm_notes",[])
+    sm_line=("\n\n🧠 <b>Smart Money:</b>\n"+"\n".join(f"  • {n}" for n in sm[:2])) if sm else ""
     msg=(
         f"🚨 <b>TRADE ALERT</b>  {grade_emoji}\n\n"
         f"Pair:      <b>{s['sym']}</b>\n"
         f"Direction: <b>{s['direction']}</b>\n"
-        f"Grade:     <b>{q}</b>  |  Score: {s['score']:.0f}/100\n\n"
-        f"Entry:     <code>{fp(s['price'])}</code>  ({fp(s['el'])} – {fp(s['eh'])})\n"
-        f"Stop Loss: <code>{fp(s['sl'])}</code>\n"
+        f"Grade:     <b>{q}</b>  |  Score: {s['score']:.0f}/100\n"
+        f"Regime:    <b>{regime}</b>\n\n"
+        f"Entry:       <code>{fp(s['price'])}</code>  ({fp(s['el'])} – {fp(s['eh'])})\n"
+        f"Stop Loss:   <code>{fp(s['sl'])}</code>\n"
         f"Take Profit: <code>{fp(s['tp'])}</code>\n\n"
         f"Risk Reward: <b>1:{rr}</b>\n"
-        f"Confidence: {s.get('confidence',s['score']):.0f}/100\n"
-        f"Hold Time:  ~{s.get('hold_h',0):.1f} saat"
+        f"Confidence:  {s.get('confidence',s['score']):.0f}/100\n"
+        f"Hold Time:   ~{s.get('hold_h',0):.1f} saat"
         f"{margin_line}\n\n"
-        f"News Risk:  {s.get('news_risk','—')}\n"
-        f"Portfolio Heat: {s.get('portfolio_heat',0):.1f}%\n\n"
-        f"✅ <b>POSITION OPENED</b>")
+        f"Contrarian Skoru: {c_score}/100 — {c_label}\n"
+        f"News Risk: {s.get('news_risk','—')}\n"
+        f"Portfolio Heat: {s.get('portfolio_heat',0):.1f}%"
+        f"{sm_line}{trap_line}\n\n"
+        f"✅ <b>TITAN PRIME ELITE — EXECUTE</b>")
     threading.Thread(target=send_telegram,args=(msg,),daemon=True).start()
 
 def tg_outcome_alert(sym, direction, status, entry, out_price, act_rr):
@@ -981,7 +990,7 @@ def structural_sl(candles, direction, price, av):
         sl=min(sl, price + av*3.0)
     return round(sl, 8)
 
-def structural_tp(candles, direction, price, sl, min_rr=2.5):
+def structural_tp(candles, direction, price, sl, min_rr=2.0):
     """
     TP placed just before nearest significant S/R level.
     Guarantees minimum RR. Returns (tp, actual_rr).
@@ -1303,13 +1312,66 @@ def score_setup(sym, candles, price, news_items=None):
     sl=structural_sl(candles, direction, price, av)
     if sl is None: return None
 
-    # ── Structural TP (S/R based, min 1:2.5) ────────────────────
-    tp, rr=structural_tp(candles, direction, price, sl, min_rr=2.5)
-    if tp is None or rr<2.5: return None   # HARD REJECT
+    # ── Structural TP (S/R based, min 1:2.0) ────────────────────
+    tp, rr=structural_tp(candles, direction, price, sl, min_rr=2.0)
+    if tp is None or rr<2.0: return None   # HARD REJECT
 
-    # ── Prefer 1:3+ RR — bonus scoring ──────────────────────────
-    rr_bonus = 15 if rr>=3.5 else 13 if rr>=3.0 else 10  # 2.5 gets only 10
-    if rr<3.0: neg_factors.append(f"RR {rr} — acceptable but 1:3+ preferred")
+    # ── RR bonus scoring ─────────────────────────────────────────
+    rr_bonus = 15 if rr>=3.5 else 13 if rr>=3.0 else 11 if rr>=2.5 else 8  # 2.0 gets 8
+    if rr>=3.0: reasons.append(f"Excellent RR 1:{rr} — high expectancy setup")
+    elif rr>=2.5: reasons.append(f"Strong RR 1:{rr} — good risk/reward")
+    else: neg_factors.append(f"RR 1:{rr} — minimum acceptable, prefer 1:3+")
+
+    # ── Smart Money Analysis ─────────────────────────────────────
+    sm_notes=[]
+    trap_warnings=[]
+    # Liquidity trap: price at obvious level after big move — potential fake breakout
+    recent_hi=max(hi[-20:]) if hi else price
+    recent_lo=min(lo[-20:]) if lo else price
+    near_top=price>recent_hi*0.995
+    near_bot=price<recent_lo*1.005
+    if direction=="LONG" and near_bot and not sw:
+        sm_notes.append("Price at recent low — possible stop-hunt zone or accumulation")
+    if direction=="SHORT" and near_top and not sw:
+        sm_notes.append("Price at recent high — possible liquidity grab or distribution")
+    if sw:
+        sm_notes.append(f"Liquidity sweep confirmed at {sw[1]:.5f} — smart money absorbed stops")
+    if bOB:
+        sm_notes.append(f"Institutional order block present {bOB[0]:.5f}–{bOB[1]:.5f}")
+    if bFVG:
+        sm_notes.append(f"Fair Value Gap imbalance {bFVG[0]:.5f}–{bFVG[1]:.5f} — likely to fill")
+
+    # Fake breakout trap warning
+    if near_top and direction=="LONG" and not sw:
+        trap_warnings.append("⚠️ BREAKOUT TRAP: Buying at recent high without sweep — retail longs may be trapped")
+    if near_bot and direction=="SHORT" and not sw:
+        trap_warnings.append("⚠️ BREAKDOWN TRAP: Shorting at recent low without sweep — retail shorts may be trapped")
+    if not bOB and not beFVG and not sw:
+        trap_warnings.append("⚠️ No institutional confirmation — setup may lack smart money backing")
+
+    # ── Contrarian Score (0-100) ─────────────────────────────────
+    # High = contrarian opportunity; Low = follow the trend
+    c_score=0
+    if cot:
+        pr=cot.get("pct_rank",50)
+        if pr>=90 or pr<=10: c_score+=40   # extreme positioning
+        elif pr>=80 or pr<=20: c_score+=20
+    if sw: c_score+=25   # sweep = possible reversal
+    if (near_top and direction=="SHORT") or (near_bot and direction=="LONG"): c_score+=15
+    if n_imp>=60: c_score+=10   # news priced in risk
+    if rv and (rv>75 or rv<25): c_score+=10
+    c_score=min(c_score,100)
+    if c_score>=70:
+        c_label="Contrarian Fırsat"; c_col="bright_yellow"
+    elif c_score>=40:
+        c_label="Nötr"; c_col="yellow"
+    else:
+        c_label="Trend Takip Et"; c_col="bright_green"
+
+    # Market regime from structure + RSI + EMA
+    if st=="BULL" and (rv or 50)<65:   regime="Risk-On"
+    elif st=="BEAR" and (rv or 50)>35: regime="Risk-Off"
+    else: regime="Nötr"
 
     # ── Normalise to 100 then blend RR bonus ─────────────────────
     score_100=round(min(max(raw/MAX_RAW*85+rr_bonus-news_penalty,0),100),1)
@@ -1322,24 +1384,25 @@ def score_setup(sym, candles, price, news_items=None):
     if hold_h>24: neg_factors.append(f"Hold time ~{hold_h:.0f}h — capital locked overnight+")
     elif hold_h>8: neg_factors.append(f"Hold time ~{hold_h:.0f}h — crosses session boundary")
 
-    # ── HARD REJECT: confidence < 55 ─────────────────────────────
-    if score_100<55: return None
+    # ── HARD REJECT: score too low ───────────────────────────────
+    if score_100<45: return None
 
-    # ── Quality thresholds ───────────────────────────────────────
-    if   score_100>=85: quality="A+"
-    elif score_100>=75: quality="A"
-    elif score_100>=65: quality="B+"
-    elif score_100>=55: quality="WATCH"
+    # ── Quality thresholds (BALANCED mode) ───────────────────────
+    if   score_100>=82: quality="A+"
+    elif score_100>=70: quality="A"
+    elif score_100>=55: quality="B+"
+    elif score_100>=45: quality="WATCH"
     else: return None
 
-    # A+ requires liquidity sweep
+    # A+ requires liquidity sweep confirmation
     if quality=="A+" and not sweep_confirmed:
         quality="A"
 
-    # Status string
-    if score_100>=75:
+    # Status — WATCHLIST only when confidence genuinely missing (score<65)
+    # Confidence >70% → APPROVED immediately per TITAN PRIME ELITE rules
+    if score_100>=65:
         status="APPROVED"
-    elif score_100>=55:
+    elif score_100>=45:
         status="WATCHLIST"
     else:
         status="REJECTED"
@@ -1365,6 +1428,9 @@ def score_setup(sym, candles, price, news_items=None):
         "flags":fl,"rsi":rv,"atr":av,"cot":cot,
         "news_score":news_score,"news_imp":n_imp,"news_risk":news_risk_label,
         "sizing":sizing,"inst_risk_score":inst_rs,"portfolio_heat":heat,
+        "sm_notes":sm_notes,"trap_warnings":trap_warnings,
+        "contrarian_score":c_score,"contrarian_label":c_label,
+        "regime":regime,
         "time":datetime.now().strftime("%H:%M:%S"),
         "narrative": _narrative(sym,direction,price,el,eh,sl,tp,rr,av,rv,mh,st,sw,bOB,beOB,bFVG,beFVG,cot,news_rl+news_rs,news_score),
     }
@@ -2053,7 +2119,7 @@ def panel_setups():
     if not ss:
         return Panel(Align.center(
             "[bold bright_yellow]KURUMSAL SETUP TARANIYOR...[/bold bright_yellow]\n"
-            "[dim]Min R:R 1:2.0  ·  Skor ≥55/100  ·  Her 30 saniyede güncellenir[/dim]"),
+            "[dim]Min R:R 1:2.0  ·  A+ / A / B+  ·  TITAN PRIME ELITE — BALANCED MODE[/dim]"),
             title="[bold bright_yellow]● AKTİF SETUPLАР[/bold bright_yellow]",
             border_style="bright_yellow",box=box.HEAVY)
     t=Table(title="[bold bright_yellow]● AKTİF SETUPLАР — KURUMSAL KALİTE FİLTRESİ[/bold bright_yellow]",
@@ -2106,19 +2172,25 @@ def panel_details():
         dec=("Execute" if st2=="APPROVED" else "Watchlist" if st2=="WATCHLIST" else "Reject")
         dec_c="bright_green" if dec=="Execute" else "yellow" if dec=="Watchlist" else "bright_red"
 
-        # Header block — matches requested output format
+        # Header block
         nr=s.get("news_risk","NO RISK"); ni=s.get("news_imp",0)
         nr_c={"CRITICAL":"bold bright_red","HIGH":"bright_red","MEDIUM":"yellow","LOW":"dim","NO RISK":"bright_green"}.get(nr,"dim")
         sz=s.get("sizing",{}); irs=s.get("inst_risk_score",100); ph=s.get("portfolio_heat",0)
         ic2="bright_green" if irs>=80 else "yellow" if irs>=60 else "bright_red"
         hc2="bright_green" if ph<5 else "yellow" if ph<10 else "bright_red"
+        regime=s.get("regime","Nötr")
+        rc2="bright_green" if regime=="Risk-On" else "bright_red" if regime=="Risk-Off" else "yellow"
+        c_score=s.get("contrarian_score",0); c_label=s.get("contrarian_label","Trend Takip Et")
+        c_col="bright_yellow" if c_score>=70 else "yellow" if c_score>=40 else "bright_green"
         header=(
-            f"{qc(s['quality'])}  {dc(s['direction'])}  [bold white]{s['sym']}[/bold white]\n\n"
+            f"{qc(s['quality'])}  {dc(s['direction'])}  [bold white]{s['sym']}[/bold white]  "
+            f"[{rc2}]◆ {regime}[/{rc2}]\n\n"
             f"  [bold]TRADE SCORE        :[/bold] [bold bright_yellow]{sc:.0f}/100[/bold bright_yellow]\n"
             f"  [bold]STATUS             :[/bold] [{st_c}]{st2}[/{st_c}]\n"
             f"  [bold]CONFIDENCE         :[/bold] {conf:.0f}/100\n"
             f"  [bold]HOLD TIME          :[/bold] ~{hold:.1f} saat\n"
             f"  [bold]RISK REWARD        :[/bold] 1:{rr}\n"
+            f"  [bold]CONTRARIAN SKORU   :[/bold] [{c_col}]{c_score}/100 — {c_label}[/{c_col}]\n"
             f"  [bold]NEWS RISK          :[/bold] [{nr_c}]{nr}[/{nr_c}]  [dim](impact {ni}/100)[/dim]\n"
             f"  [bold]PORTFOLIO HEAT     :[/bold] [{hc2}]{ph:.1f}%[/{hc2}]\n"
             f"  [bold]INST. RISK SCORE   :[/bold] [{ic2}]{irs:.0f}/100[/{ic2}]\n"
@@ -2136,6 +2208,20 @@ def panel_details():
         neg_list=s.get("neg_factors",[])
         neg="\n".join(f"  [bright_red]✗[/bright_red] {r}" for r in neg_list) or "  [dim]Yok[/dim]"
 
+        # Smart Money block
+        sm_notes=s.get("sm_notes",[])
+        sm_txt=""
+        if sm_notes:
+            sm_txt=("\n[bold dim]── SMART MONEY ANALİZİ ──[/bold dim]\n"
+                    +"\n".join(f"  [bright_cyan]◈[/bright_cyan] {n}" for n in sm_notes)+"\n")
+
+        # Trap warnings
+        traps=s.get("trap_warnings",[])
+        trap_txt=""
+        if traps:
+            trap_txt=("\n[bold dim]── TUZAK UYARILARI ──[/bold dim]\n"
+                      +"\n".join(f"  [bright_red]{t}[/bright_red]" for t in traps)+"\n")
+
         # COT block
         cot=s.get("cot",{}); cot_txt=""
         if cot:
@@ -2151,6 +2237,8 @@ def panel_details():
             f"{header}\n"
             f"[bold dim]── POZİTİF FAKTÖRLER ──[/bold dim]\n{pos}\n\n"
             f"[bold dim]── NEGATİF FAKTÖRLER ──[/bold dim]\n{neg}"
+            f"{sm_txt}"
+            f"{trap_txt}"
             f"{cot_txt}\n"
             f"[bold dim]── GİRİŞ GEREKÇESİ ──[/bold dim]\n"
             +"\n".join(f"  {l}" for l in s["narrative"].split("\n"))+"\n\n"
