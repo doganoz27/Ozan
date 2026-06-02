@@ -426,9 +426,11 @@ def analyze_article(article):
     corr  =_corr_impact(asent,regs)
     rl    =("CRITICAL" if imp>=80 else "HIGH" if imp>=60
             else "MEDIUM" if imp>=40 else "LOW" if imp>=20 else "NOISE")
-    return {**article,"importance":imp,"risk_level":rl,
-            "asset_sent":asent,"regimes":regs,
-            "vol":vol,"vol_dur":vd,"sym_impacts":simp,"correlations":corr}
+    enriched={**article,"importance":imp,"risk_level":rl,
+              "asset_sent":asent,"regimes":regs,
+              "vol":vol,"vol_dur":vd,"sym_impacts":simp,"correlations":corr}
+    enriched["macro"]=_macro_analysis(enriched)
+    return enriched
 
 def send_telegram(article):
     if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID: return
@@ -436,23 +438,46 @@ def send_telegram(article):
     if h in _tg_sent: return
     _tg_sent.add(h)
     imp=article["importance"]
-    impacts_txt="\n".join(f"  {sym} {d}" for sym,(d,_,s) in list(article.get("sym_impacts",{}).items())[:6])
-    block_min=60 if imp>=80 else 30
-    msg=(f"🚨 <b>HIGH IMPACT NEWS</b>\n\n"
-         f"<b>Headline:</b>\n{h}\n\n"
-         f"<b>Impact Score:</b> {imp}/100\n"
-         f"<b>Risk Level:</b> {article['risk_level']}\n"
-         f"<b>Volatility:</b> {article['vol']} ({article['vol_dur']})\n"
-         f"<b>Regime:</b> {', '.join(article['regimes'])}\n\n"
-         f"<b>Affected Symbols:</b>\n{impacts_txt}\n\n"
-         f"⛔ <b>Trading Restriction:</b> New positions blocked for {block_min} minutes.")
+    m=article.get("macro",{})
+    bias_tr=m.get("bias_tr","Nötr")
+    bull_pct=m.get("bull_pct",0); bear_pct=m.get("bear_pct",0); neut_pct=m.get("neut_pct",0)
+    caution=m.get("caution","Normal İşlem")
+    dur=m.get("dur","1h"); conf=m.get("conf",50)
+    ad=m.get("asset_dirs",{})
+    assets_txt="\n".join(
+        f"  {'📈' if d=='↑' else '📉' if d=='↓' else '➡️'} {sym}: {d} ({s:.1f}%)"
+        for sym,(d,s) in ad.items() if d!="→"
+    )[:500]
+    hist_key=m.get("hist_key"); hist_match=m.get("hist_match",{})
+    hist_txt=""
+    if hist_key and hist_match:
+        hist_txt="\n\n📜 <b>Geçmiş Benzer Olaylar ({}):</b>\n".format(hist_key)
+        hist_txt+="\n".join(f"  {sym}: {'+' if v>0 else ''}{v:.1f}% ort. hareket" for sym,v in list(hist_match.items())[:5])
+    msg=(
+        f"📰 <b>MAKRO HABER ANALİZİ</b>\n\n"
+        f"<b>{h}</b>\n\n"
+        f"<b>Etki Skoru:</b> {imp}/100  |  <b>Risk:</b> {article['risk_level']}\n"
+        f"<b>Yön Önyargısı:</b> {bias_tr}\n\n"
+        f"<b>Olasılıklar:</b>\n"
+        f"  📈 Yükseliş: %{bull_pct}\n"
+        f"  📉 Düşüş: %{bear_pct}\n"
+        f"  ➡️ Nötr: %{neut_pct}\n\n"
+        f"<b>Etkilenen Varlıklar:</b>\n{assets_txt}"
+        f"{hist_txt}\n\n"
+        f"<b>MARKET BEKLENTİSİ</b>\n"
+        f"  Yön: {bias_tr}\n"
+        f"  Güven: {conf}/100\n"
+        f"  Süre: {dur}\n"
+        f"  📊 {caution}"
+    )
     try:
         requests.post(f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage",
                       json={"chat_id":TELEGRAM_CHAT_ID,"text":msg,"parse_mode":"HTML"},timeout=5)
     except: pass
 
 def news_risk_for_sym(sym, max_age_min=90):
-    """Returns (importance, risk_level, block_trade) for a symbol from recent news."""
+    """Returns (importance, risk_level, caution_flag) for a symbol from recent news.
+    Never blocks trading — only flags caution level."""
     now=time.time()
     with lock: arts=list(analyzed_news)
     best=(0,"NOISE",False)
@@ -462,9 +487,113 @@ def news_risk_for_sym(sym, max_age_min=90):
         if age_min>max_age_min: continue
         imp=a.get("importance",0)
         if sym not in a.get("sym_impacts",{}): continue
-        block=(imp>=80 and age_min<=60) or (imp>=60 and age_min<=30)
-        if imp>best[0]: best=(imp,a.get("risk_level","NOISE"),block)
+        caution=(imp>=60)   # only caution, never block
+        if imp>best[0]: best=(imp,a.get("risk_level","NOISE"),caution)
     return best
+
+# ── Macro news sentiment direction helper ─────────────────────────────────────
+MACRO_ASSETS = ["XAUUSD","BTCUSD","ETHUSD","NAS100","SPX500","USOIL","EURUSD","GBPUSD","USDJPY"]
+
+HIST_PATTERNS = {
+    "iran":       {"XAUUSD":+1.8,"USOIL":+2.4,"NAS100":-1.2,"SPX500":-0.9,"BTCUSD":-0.8},
+    "israel":     {"XAUUSD":+1.6,"USOIL":+2.1,"NAS100":-1.0,"SPX500":-0.8},
+    "fed rate":   {"XAUUSD":-0.5,"BTCUSD":-1.2,"NAS100":+1.1,"SPX500":+0.9,"USDJPY":+0.4},
+    "rate hike":  {"XAUUSD":-1.1,"BTCUSD":-2.0,"NAS100":-0.8,"SPX500":-0.7,"USDJPY":+0.6},
+    "rate cut":   {"XAUUSD":+1.2,"BTCUSD":+2.5,"NAS100":+1.5,"SPX500":+1.3,"USDJPY":-0.5},
+    "inflation":  {"XAUUSD":+0.8,"BTCUSD":+0.5,"NAS100":-0.6,"SPX500":-0.5,"USDJPY":-0.3},
+    "nfp":        {"USDJPY":+0.4,"EURUSD":-0.3,"GBPUSD":-0.2,"XAUUSD":-0.4,"SPX500":+0.5},
+    "recession":  {"XAUUSD":+1.5,"BTCUSD":-1.5,"NAS100":-2.0,"SPX500":-2.2,"USOIL":-1.8},
+    "china":      {"NAS100":-0.7,"SPX500":-0.5,"USOIL":-0.8,"BTCUSD":-1.0},
+    "russia":     {"XAUUSD":+1.2,"USOIL":+1.8,"NAS100":-0.9,"EURUSD":-0.6},
+    "ukraine":    {"XAUUSD":+1.5,"USOIL":+2.0,"NAS100":-1.1,"EURUSD":-0.7},
+    "gdp":        {"SPX500":+0.4,"NAS100":+0.5,"USDJPY":+0.2},
+    "tariff":     {"NAS100":-1.0,"SPX500":-0.8,"USOIL":-0.5,"BTCUSD":-0.7},
+    "opec":       {"USOIL":+1.5,"XAUUSD":+0.3,"SPX500":-0.3},
+    "bank":       {"SPX500":-0.6,"NAS100":-0.5,"BTCUSD":-0.8},
+    "etf":        {"BTCUSD":+2.0,"ETHUSD":+1.5},
+    "halving":    {"BTCUSD":+3.0,"ETHUSD":+2.0},
+    "default":    {"XAUUSD":+1.0,"USOIL":-0.5,"NAS100":-1.0},
+}
+
+def _macro_analysis(article):
+    """Build full Turkish macro analysis for a news article."""
+    headline = article.get("headline","")
+    summary  = article.get("summary","")
+    text     = (headline+" "+summary).lower()
+    imp      = article.get("importance",0)
+    rl       = article.get("risk_level","NOISE")
+    asent    = article.get("asset_sent",{})
+    regs     = article.get("regimes",[])
+
+    # Determine overall directional bias
+    bull_words=sum(1 for w in BULL_W if w in text)
+    bear_words=sum(1 for w in BEAR_W if w in text)
+    total_w=bull_words+bear_words+1
+    bull_pct=round(bull_words/total_w*100)
+    bear_pct=round(bear_words/total_w*100)
+    neut_pct=max(0,100-bull_pct-bear_pct)
+    if bull_pct>bear_pct+15: bias="BULLISH"; bias_tr="Yükseliş"
+    elif bear_pct>bull_pct+15: bias="BEARISH"; bias_tr="Düşüş"
+    else: bias="NEUTRAL"; bias_tr="Nötr"
+
+    # Historical pattern match
+    hist_match=None; hist_key=None
+    for kw,moves in HIST_PATTERNS.items():
+        if kw in text:
+            hist_match=moves; hist_key=kw; break
+
+    # Timeframe impact estimate
+    if imp>=80:   tf15m="Yüksek"; tf1h="Yüksek";  tf4h="Orta";  tf24h="Orta"
+    elif imp>=60: tf15m="Orta";   tf1h="Yüksek";  tf4h="Orta";  tf24h="Düşük"
+    elif imp>=40: tf15m="Düşük";  tf1h="Orta";    tf4h="Düşük"; tf24h="Çok Düşük"
+    else:         tf15m="Çok Düşük"; tf1h="Düşük"; tf4h="Çok Düşük"; tf24h="—"
+
+    # Per-asset direction
+    asset_dirs={}
+    for sym in MACRO_ASSETS:
+        d="→"; strength=0
+        # From sentiment
+        for asset,(s,st) in asent.items():
+            if asset in sym or sym in asset:
+                d="↑" if s=="BULLISH" else "↓"
+                strength=st; break
+        # Override from hist pattern
+        if hist_match and sym in hist_match:
+            mv=hist_match[sym]
+            d="↑" if mv>0 else "↓"
+            strength=abs(mv)
+        asset_dirs[sym]=(d,round(strength,1))
+
+    # Volatility expectation
+    vol="YÜKSEK" if imp>=80 else "ORTA-YÜKSEK" if imp>=60 else "ORTA" if imp>=40 else "DÜŞÜK"
+
+    # Confidence
+    conf=min(95,imp+10) if bias!="NEUTRAL" else max(20,50-imp//4)
+
+    # Duration
+    if imp>=80:   dur="Multi-day"
+    elif imp>=60: dur="4h"
+    elif imp>=40: dur="1h"
+    else:         dur="15m"
+
+    # Risk label — never 'Trading Blocked'
+    if imp>=80:   risk_label="⚠️  Yüksek Volatilite Bekleniyor"; caution="Dikkatli İşlem Yap"
+    elif imp>=60: risk_label="📊 Yönsel Önyargı Onaylandı";      caution="Dikkatli İşlem Yap"
+    elif imp>=40: risk_label="📈 Orta Etki";                      caution="Normal İşlem"
+    else:         risk_label="🔵 Düşük Etki";                     caution="Normal İşlem"
+
+    # Permanent vs temporary
+    perm = any(w in text for w in ["policy","rate","law","regulation","ban","permanent","struktur","yapısal"])
+
+    return {
+        "bias":bias,"bias_tr":bias_tr,
+        "bull_pct":bull_pct,"bear_pct":bear_pct,"neut_pct":neut_pct,
+        "tf15m":tf15m,"tf1h":tf1h,"tf4h":tf4h,"tf24h":tf24h,
+        "asset_dirs":asset_dirs,"vol":vol,"conf":conf,"dur":dur,
+        "risk_label":risk_label,"caution":caution,
+        "hist_key":hist_key,"hist_match":hist_match,
+        "permanent":perm,
+    }
 
 
 class MD:
@@ -1116,22 +1245,20 @@ def score_setup(sym, candles, price, news_items=None):
     if heat>=15:
         return None   # HARD REJECT — portfolio heat too high
 
-    # ── News Risk Check (auto-reject on high-impact fresh news) ──
-    n_imp, n_rl, n_block = news_risk_for_sym(sym)
-    if n_block:
-        return None   # HARD REJECT — critical/high news active
+    # ── News Risk Check (caution only — never blocks trading) ──
+    n_imp, n_rl, n_caution = news_risk_for_sym(sym)
 
     # ── News Sentiment (0-10) ────────────────────────────────────
     news_score=0; news_rl=[]; news_rs=[]
     news_penalty=0
-    if n_imp>=60:
-        news_penalty=8   # medium news → -8 pts confidence
-        neg_l.append(f"MEDIUM NEWS RISK (impact {n_imp}/100) — confidence reduced")
-        neg_s.append(f"MEDIUM NEWS RISK (impact {n_imp}/100) — confidence reduced")
-    elif n_imp>=40:
-        news_penalty=4
-        neg_l.append(f"Low-medium news risk (impact {n_imp}/100)")
-        neg_s.append(f"Low-medium news risk (impact {n_imp}/100)")
+    if n_caution and n_imp>=80:
+        news_penalty=5   # high-impact news → slight confidence reduction only
+        neg_l.append(f"⚠️ Yüksek Volatilite Bekleniyor (impact {n_imp}/100) — Dikkatli İşlem Yap")
+        neg_s.append(f"⚠️ Yüksek Volatilite Bekleniyor (impact {n_imp}/100) — Dikkatli İşlem Yap")
+    elif n_imp>=60:
+        news_penalty=2
+        neg_l.append(f"📊 Yönsel Önyargı Onaylandı (impact {n_imp}/100)")
+        neg_s.append(f"📊 Yönsel Önyargı Onaylandı (impact {n_imp}/100)")
 
     if news_items:
         for n in news_items:
@@ -2194,66 +2321,95 @@ def panel_news():
                      title="[bold bright_blue]● KURUMSAL MAKRO İSTİHBARAT[/bold bright_blue]",
                      border_style="bright_blue",box=box.ROUNDED)
     lines=[]
-    for x in arts[:10]:
+    DIV="━"*110
+    for x in arts[:6]:
         imp   =x.get("importance",0)
         rl    =x.get("risk_level","NOISE")
-        regs  =x.get("regimes",["NEUTRAL"])
-        vol   =x.get("vol","—")
-        vol_d =x.get("vol_dur","")
-        simp  =x.get("sym_impacts",{})
-        asent =x.get("asset_sent",{})
         ts    =x.get("datetime",0)
         age_m =(time.time()-ts)/60 if ts else 0
         age_s =f"{age_m:.0f}dk" if age_m<60 else f"{age_m/60:.1f}sa"
+        m     =x.get("macro",{})
 
-        # Colour by risk level
         rc={"CRITICAL":"bold bright_red","HIGH":"bright_red",
             "MEDIUM":"yellow","LOW":"dim green","NOISE":"dim"}.get(rl,"dim")
-        vc={"EXTREME":"bold bright_red","HIGH":"bright_red","NORMAL":"yellow","LOW":"dim"}.get(vol,"dim")
-
-        # Score bar
-        bar_w=12; filled=int(imp/100*bar_w)
+        bar_w=14; filled=int(imp/100*bar_w)
         bar="█"*filled+"░"*(bar_w-filled)
         bc="bright_red" if imp>=80 else "yellow" if imp>=60 else "green" if imp>=40 else "dim"
 
-        lines.append(f"[{rc}]{'━'*96}[/{rc}]")
+        # ── Header ──
+        lines.append(f"[{rc}]{DIV}[/{rc}]")
         lines.append(
             f"  [{bc}]{bar}[/{bc}] [bold {rc}]{imp:>3}/100[/bold {rc}]  "
-            f"[bold white]{x.get('headline','')[:80]}[/bold white]")
+            f"[bold white]{x.get('headline','')[:95]}[/bold white]")
         lines.append(
-            f"  [dim]{x.get('source','')[:14]}  ·  {age_s}[/dim]  "
-            f"[{rc}]{rl}[/{rc}]  "
-            f"[{vc}]VOL: {vol}[/{vc}]  [dim]{vol_d}[/dim]  "
-            f"[dim]Regime: {', '.join(regs[:2])}[/dim]")
+            f"  [dim]{x.get('source','')[:16]}  ·  {age_s}[/dim]  [{rc}]{rl}[/{rc}]")
 
-        # Summary snippet
         summ=x.get("summary","").replace("\n"," ").strip()
         if summ:
-            lines.append(f"  [dim]{summ[:130]}{'...' if len(summ)>130 else ''}[/dim]")
+            lines.append(f"  [dim italic]{summ[:140]}{'...' if len(summ)>140 else ''}[/dim italic]")
 
-        # Asset sentiment row
-        if asent:
-            sent_parts=[]
-            for asset,(s,strength) in list(asent.items())[:6]:
-                ac="bright_green" if s=="BULLISH" else "bright_red"
-                arr="↑" if s=="BULLISH" else "↓"
-                sent_parts.append(f"[{ac}]{asset} {arr}{strength:.0f}[/{ac}]")
-            lines.append("  " + "  ".join(sent_parts))
+        if not m:
+            lines.append("")
+            continue
 
-        # Symbol impact row
-        if simp:
-            imp_parts=[]
-            for sym,(d,strength,s) in list(simp.items())[:8]:
-                ic="bright_green" if d=="↑" else "bright_red"
-                imp_parts.append(f"[{ic}]{sym}{d}[/{ic}]")
-            lines.append("  " + "  ".join(imp_parts))
+        bias_tr=m.get("bias_tr","Nötr")
+        bull_pct=m.get("bull_pct",0); bear_pct=m.get("bear_pct",0); neut_pct=m.get("neut_pct",0)
+        caution=m.get("caution","Normal İşlem"); conf=m.get("conf",50); dur=m.get("dur","1h")
+        risk_label=m.get("risk_label",""); permanent=m.get("permanent",False)
+        tf15m=m.get("tf15m","—"); tf1h=m.get("tf1h","—")
+        tf4h=m.get("tf4h","—"); tf24h=m.get("tf24h","—")
+        ad=m.get("asset_dirs",{})
+        hist_key=m.get("hist_key"); hist_match=m.get("hist_match",{})
 
+        # ── Türkçe Analiz ──
+        bc2="bright_green" if bias_tr=="Yükseliş" else "bright_red" if bias_tr=="Düşüş" else "yellow"
+        lines.append(
+            f"\n  [bold]Yön Önyargısı:[/bold] [{bc2}]{bias_tr}[/{bc2}]  "
+            f"[dim]|[/dim]  "
+            f"[bright_green]Yükseliş %{bull_pct}[/bright_green]  "
+            f"[bright_red]Düşüş %{bear_pct}[/bright_red]  "
+            f"[yellow]Nötr %{neut_pct}[/yellow]  "
+            f"[dim]|[/dim]  Güven: [bold]{conf}/100[/bold]")
+
+        lines.append(
+            f"  [bold]Zaman Dilimi Etkisi:[/bold]  "
+            f"[dim]15m:[/dim] {tf15m}  "
+            f"[dim]1h:[/dim] {tf1h}  "
+            f"[dim]4h:[/dim] {tf4h}  "
+            f"[dim]24h:[/dim] {tf24h}  "
+            f"[dim]|[/dim]  Kalıcı: {'[bright_red]EVET[/bright_red]' if permanent else '[dim]Hayır[/dim]'}")
+
+        # ── Per-asset directions ──
+        if ad:
+            bull_assets=[f"[bright_green]{s}↑{v:.1f}%[/bright_green]" for s,(d,v) in ad.items() if d=="↑"]
+            bear_assets=[f"[bright_red]{s}↓{v:.1f}%[/bright_red]"   for s,(d,v) in ad.items() if d=="↓"]
+            neutral_assets=[f"[dim]{s}→[/dim]" for s,(d,v) in ad.items() if d=="→"]
+            if bull_assets:  lines.append("  [bold]Yükseliş Eğilimi:[/bold]  "+"  ".join(bull_assets))
+            if bear_assets:  lines.append("  [bold]Düşüş Eğilimi:[/bold]    "+"  ".join(bear_assets))
+
+        # ── Historical comparison ──
+        if hist_key and hist_match:
+            lines.append(f"\n  [bold dim]📜 Geçmiş Benzer Olaylar ({hist_key.upper()}):[/bold dim]")
+            hist_parts=[]
+            for sym,mv in list(hist_match.items())[:5]:
+                hc="bright_green" if mv>0 else "bright_red"
+                hist_parts.append(f"[{hc}]{sym} {'+' if mv>0 else ''}{mv:.1f}%[/{hc}]")
+            lines.append("  "+"  ".join(hist_parts))
+
+        # ── Market Expectation conclusion ──
+        lines.append(f"\n  [bold]━━  MARKET BEKLENTİSİ  ━━[/bold]")
+        lines.append(
+            f"  Yön: [{bc2}]{bias_tr}[/{bc2}]  |  "
+            f"Güven: [bold]{conf}/100[/bold]  |  "
+            f"Süre: [bold]{dur}[/bold]  |  "
+            f"{risk_label}")
+        lines.append(f"  [bold bright_yellow]► {caution}[/bold bright_yellow]")
         lines.append("")
 
     return Panel("\n".join(lines).rstrip(),
-                 title="[bold bright_blue]● KURUMSAL MAKRO İSTİHBARAT — Haber Etki Analizi[/bold bright_blue]",
+                 title="[bold bright_blue]● KURUMSAL MAKRO İSTİHBARAT — Gelişmiş Haber Analizi[/bold bright_blue]",
                  border_style="bright_blue",box=box.ROUNDED,
-                 subtitle="[dim]Impact 80+ → Telegram · Impact 60+/30dk → TRADE BLOCK · Impact 80+/60dk → TRADE BLOCK[/dim]")
+                 subtitle="[dim]Impact 80+ → Telegram · Yönsel Önyargı · Geçmiş Karşılaştırma · Türkçe Analiz[/dim]")
 
 def panel_quant():
     with lock: st=dict(stats_cache)
