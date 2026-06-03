@@ -2287,28 +2287,55 @@ def panel_portfolio():
             lines.append(f"  [bright_cyan]{basket:<18}[/bright_cyan] {', '.join(syms)}")
         lines.append("")
 
-    # Shadow trades
+    # Active trades (live)
+    with lock: at=dict(active_trades)
+    if at:
+        lines.append("[bold]━━━  AKTİF AÇIK POZİSYONLAR  ━━━[/bold]")
+        lines.append("")
+        lines.append(f"  [bold dim]{'SEMBOL':<10} {'YÖN':<6} {'GİRİŞ':>9} {'ŞU AN':>9} {'P&L':>8} {'R:R':>5} {'DURUM':<8}[/bold dim]")
+        lines.append("  " + "─"*60)
+        for k,t2 in at.items():
+            sym2=t2.get("sym","?"); ep=t2.get("_trade_entry_price") or t2.get("price",0)
+            sl2=t2.get("sl",0); tp2=t2.get("tp",0); dir2=t2.get("direction","")
+            cur=market.get(sym2); cp=cur.price if cur else ep
+            if ep and sl2:
+                risk_pts=abs(ep-sl2)
+                if dir2=="LONG": pnl_pts=cp-ep; rr_live=pnl_pts/risk_pts if risk_pts else 0
+                else: pnl_pts=ep-cp; rr_live=pnl_pts/risk_pts if risk_pts else 0
+            else: pnl_pts=0; rr_live=0
+            lev=LEVERAGE.get(get_asset_class(sym2),5)
+            pnl_pct2=pnl_pts/ep*100*lev if ep else 0
+            pnl_gbp=round(bal*ACCOUNT["risk_pct"]*rr_live,2)
+            pc="bright_green" if pnl_gbp>=0 else "bright_red"
+            dir_s="[bright_green]LONG[/bright_green]" if dir2=="LONG" else "[bright_red]SHORT[/bright_red]"
+            rr_s=f"[bright_green]{rr_live:+.2f}R[/bright_green]" if rr_live>=0 else f"[bright_red]{rr_live:+.2f}R[/bright_red]"
+            lines.append(f"  [bold white]{sym2:<10}[/bold white] {dir_s}  "
+                        f"[dim]{fp(ep):>9}[/dim]  [bright_white]{fp(cp):>9}[/bright_white]  "
+                        f"[{pc}]£{pnl_gbp:+.2f}[/{pc}]  {rr_s}  [bright_yellow]OPEN[/bright_yellow]")
+        lines.append("")
+
+    # Recent closed trades from DB
     try:
         with db() as c:
-            st_rows=c.execute("SELECT sym,direction,capital,risk_amount,pnl,status FROM shadow_trades ORDER BY id DESC LIMIT 10").fetchall()
+            st_rows=c.execute("SELECT sym,direction,entry_price,exit_price,pnl,status,created FROM signals WHERE status!='OPEN' ORDER BY id DESC LIMIT 12").fetchall()
     except: st_rows=[]
     if st_rows:
-        lines.append("[bold]━━━  SHADOW PORTFÖY POZİSYONLARI  ━━━[/bold]")
+        lines.append("[bold]━━━  SON KAPANAN POZİSYONLAR  ━━━[/bold]")
         lines.append("")
-        lines.append(f"  [bold dim]{'SEMBOL':<10} {'YÖN':<7} {'MARJ':>7} {'RİSK':>7} {'P&L':>8} {'DURUM':<8}[/bold dim]")
-        lines.append("  " + "─"*52)
+        lines.append(f"  [bold dim]{'SEMBOL':<10} {'YÖN':<6} {'GİRİŞ':>9} {'ÇIKIŞ':>9} {'SONUÇ':<10} {'TARİH':<16}[/bold dim]")
+        lines.append("  " + "─"*60)
         for r in st_rows:
-            pnl_v=r["pnl"]
-            pnl_s=(f"[bright_green]£{pnl_v:+.2f}[/bright_green]" if pnl_v and pnl_v>0
-                   else f"[bright_red]£{pnl_v:+.2f}[/bright_red]" if pnl_v and pnl_v<0 else "[dim]—[/dim]")
             st2=r["status"]
-            sc={"TP3":"bold bright_green","TP2":"bright_green","TP1":"green",
-                "SL":"bold bright_red","OPEN":"bright_yellow","EXPIRED":"dim"}.get(st2,"white")
-            dir_s="[bright_green]L[/bright_green]" if r["direction"]=="LONG" else "[bright_red]S[/bright_red]"
+            if st2=="TP": em="🎯"; sc="bright_green"
+            elif st2=="SL": em="❌"; sc="bright_red"
+            elif st2=="EXPIRED": em="⏰"; sc="dim"
+            else: em="🚫"; sc="yellow"
+            ep2=r["entry_price"] or 0; xp=r["exit_price"] or 0
+            dir_s="[bright_green]L[/bright_green]" if (r["direction"] or "")=="LONG" else "[bright_red]S[/bright_red]"
+            dt=(r["created"] or "")[:16]
             lines.append(f"  [bold white]{r['sym']:<10}[/bold white] {dir_s}  "
-                        f"[dim]£{r['capital'] or 0:.2f}[/dim]  "
-                        f"[dim]£{r['risk_amount'] or 0:.2f}[/dim]  "
-                        f"{pnl_s}  [{sc}]{st2}[/{sc}]")
+                        f"[dim]{fp(ep2):>9}[/dim]  [dim]{fp(xp):>9}[/dim]  "
+                        f"[{sc}]{em} {st2:<8}[/{sc}]  [dim]{dt}[/dim]")
 
     return Panel("\n".join(lines),
                  title="[bold bright_green]● EXECUTIVE DASHBOARD — Trade212 CFD Portfolio Engine[/bold bright_green]",
