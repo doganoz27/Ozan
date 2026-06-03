@@ -117,7 +117,7 @@ YF_SYMBOLS = {
 }
 
 # Finnhub REST equities
-EQ_SYMBOLS = ["NVDA","AAPL","SPY","QQQ","MSFT","TSLA"]
+EQ_SYMBOLS = ["NVDA","AAPL","SPY","QQQ","MSFT","TSLA","AMZN","META","GOOGL","JPM"]
 
 ALL_SYMBOLS = list(YF_SYMBOLS.keys()) + EQ_SYMBOLS
 
@@ -180,29 +180,34 @@ TELEGRAM_CHAT_ID = "8237226783"
 
 # ── High-impact keyword → base importance score ───────────────────────────────
 HIGH_IMP_KW = {
-    "fomc":95,"federal reserve":90,"rate decision":90,"rate hike":88,"rate cut":88,
-    "emergency meeting":95,"quantitative tightening":80,"quantitative easing":82,
-    "powell":72,"lagarde":72,"ueda":72,"bailey":72,"jordan":70,
-    "ecb decision":90,"boe decision":90,"boj decision":90,"snb decision":85,
-    "rba decision":82,"boc decision":82,"rbnz decision":80,
-    "cpi":85,"inflation":72,"core inflation":85,"pce":83,"deflation":80,
-    "non-farm payroll":90,"nfp":90,"unemployment rate":82,"jobless claims":68,
-    "gdp":80,"recession":85,"stagflation":88,
-    "retail sales":65,"pmi":60,"ism":62,"trade balance":58,
-    "producer price":65,"ppi":65,"consumer confidence":55,
-    "war":88,"military":75,"sanctions":82,"nuclear":95,"attack":80,"invasion":90,
-    "conflict":72,"ceasefire":70,"tariff":75,"trade war":82,
-    "default":90,"bankruptcy":85,"collapse":88,"crisis":85,"contagion":88,
-    "bank run":92,"bailout":85,"systemic":88,"flash crash":90,"margin call":80,
-    "earnings miss":65,"earnings beat":62,"guidance cut":68,"guidance raise":60,
-    "sec investigation":75,"fraud":80,"circuit breaker":88,
+    # Central bank decisions — genuinely market-moving
+    "fomc":90,"federal reserve":82,"rate decision":88,"rate hike":85,"rate cut":85,
+    "emergency meeting":92,"quantitative tightening":75,"quantitative easing":78,
+    "powell":60,"lagarde":60,"ueda":60,"bailey":60,"jordan":58,
+    "ecb decision":88,"boe decision":88,"boj decision":88,"snb decision":82,
+    "rba decision":78,"boc decision":78,"rbnz decision":75,
+    # Inflation / employment — major
+    "cpi":80,"core inflation":82,"pce":80,"non-farm payroll":88,"nfp":88,
+    "unemployment rate":75,"gdp":72,"recession":78,"stagflation":80,
+    # Geopolitical — only truly major events
+    "war":82,"nuclear":90,"invasion":88,"sanctions":75,
+    # Financial crisis — rare but major
+    "default":88,"bank run":90,"flash crash":88,"systemic":82,
+    # Earnings — moderate, not over-inflated
+    "earnings miss":52,"earnings beat":50,"guidance cut":55,
 }
 MED_IMP_KW = {
-    "interest rate":55,"monetary policy":58,"fiscal":52,"stimulus":60,
-    "upgrade":42,"downgrade":45,"buy rating":38,"sell rating":40,
-    "geopolitical":55,"election":58,"debt ceiling":65,"budget":50,
-    "opec":62,"production cut":60,"merger":48,"acquisition":50,
-    "regulatory":52,"antitrust":55,"lawsuit":48,
+    "interest rate":48,"monetary policy":50,"fiscal":45,"stimulus":52,
+    "inflation":58,"deflation":62,"ppi":52,"retail sales":48,"pmi":42,"ism":44,
+    "jobless claims":50,"consumer confidence":40,"trade balance":42,
+    "upgrade":30,"downgrade":32,"buy rating":28,"sell rating":30,
+    "geopolitical":45,"election":50,"debt ceiling":58,"budget":38,
+    "opec":55,"production cut":52,"merger":35,"acquisition":38,
+    "tariff":60,"trade war":68,"conflict":52,"ceasefire":48,
+    "regulatory":40,"antitrust":42,"lawsuit":35,"bankruptcy":62,"collapse":70,
+    "sec investigation":55,"fraud":62,"circuit breaker":72,"bailout":68,
+    "attack":55,"military":52,"margin call":60,"crisis":65,"contagion":70,
+    "producer price":48,"guidance raise":38,
 }
 
 # ── Per-asset directional keyword banks ──────────────────────────────────────
@@ -345,35 +350,87 @@ def tg_setup_alert(s):
     threading.Thread(target=_send,daemon=True).start()
 
 def tg_outcome_alert(sym, direction, status, entry, out_price, act_rr):
-    """Send TP / SL / Expired outcome notification."""
-    if status in ("TP1","TP2","TP3"):
-        emoji="🎯"; label=f"TAKE PROFIT HIT ({status})"
-        pnl_txt=f"\nR:R gerçekleşti: <b>+{act_rr:.2f}R</b>" if act_rr else ""
+    """Categorized TP / SL / Cancelled / Expired outcome notifications."""
+    if status=="TP":
+        emoji="🎯"; cat="✅ TAKE PROFIT HIT"
+        color="green"; pnl_txt=f"\nKâr: <b>+{act_rr:.2f}R</b>" if act_rr else ""
     elif status=="SL":
-        emoji="❌"; label="STOP LOSS HIT"
-        pnl_txt=f"\nKayıp: <b>{act_rr:.2f}R</b>" if act_rr else ""
+        emoji="❌"; cat="🛑 STOP LOSS HIT"
+        color="red"; pnl_txt=f"\nKayıp: <b>{act_rr:.2f}R</b>" if act_rr else ""
+    elif status=="INVALIDATED":
+        emoji="🚫"; cat="⛔ İPTAL EDİLDİ"
+        color="orange"; pnl_txt=""
     elif status=="EXPIRED":
-        emoji="⏰"; label="TRADE EXPIRED"
-        pnl_txt=""
+        emoji="⏰"; cat="📭 ZAMAN AŞIMI"
+        color="grey"; pnl_txt=""
     else:
         return
+    move=""
+    if entry and out_price:
+        pct=round((out_price-entry)/entry*100,3) if direction=="LONG" else round((entry-out_price)/entry*100,3)
+        move=f"\nHareket: <b>{pct:+.3f}%</b>"
     msg=(
-        f"{emoji} <b>{label}</b>\n\n"
-        f"Pair:      <b>{sym}</b>\n"
-        f"Direction: <b>{direction}</b>\n\n"
-        f"Entry:     <code>{fp(entry)}</code>\n"
-        f"Çıkış:     <code>{fp(out_price)}</code>"
-        f"{pnl_txt}")
-    threading.Thread(target=send_telegram,args=(msg,),daemon=True).start()
+        f"{emoji} <b>{cat}</b>\n\n"
+        f"━━━━━━━━━━━━━━━━━━━\n"
+        f"Parite:  <b>{sym}</b>\n"
+        f"Yön:     <b>{direction}</b>\n\n"
+        f"Giriş:   <code>{fp(entry)}</code>\n"
+        f"Çıkış:   <code>{fp(out_price)}</code>"
+        f"{move}{pnl_txt}\n"
+        f"━━━━━━━━━━━━━━━━━━━")
+    def _send():
+        try:
+            requests.post(f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage",
+                json={"chat_id":TELEGRAM_CHAT_ID,"text":msg,"parse_mode":"HTML"},timeout=8)
+        except: pass
+    threading.Thread(target=_send,daemon=True).start()
+
+# ── Best-probability digest ───────────────────────────────────────────────────
+_tg_digest_sent: set = set()
+def _tg_best_picks(results):
+    """Send top-3 highest probability setups per analysis cycle (deduplicated)."""
+    if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID: return
+    approved=[r for r in results if r.get("status")=="APPROVED" and r.get("quality") in ("A+","A","B+")]
+    if not approved: return
+    # Pick top 3 by score
+    top=approved[:3]
+    # Deduplicate: only send if any pick is new
+    keys=tuple(f"{s['sym']}_{s['direction']}_{round(s['score'])}" for s in top)
+    if keys in _tg_digest_sent: return
+    _tg_digest_sent.add(keys)
+    lines=["🔭 <b>TITAN PRIME — EN YÜKSEK OLASILIKLI SETUPLАР</b>\n"]
+    for i,s in enumerate(top,1):
+        q=s["quality"]; rr=s["rr"]; sc=s["score"]
+        grade_e="🔥" if q=="A+" else "✅" if q=="A" else "🔔"
+        regime=s.get("regime","Nötr")
+        c_score=s.get("contrarian_score",0)
+        lines.append(
+            f"{grade_e} <b>#{i} {s['sym']} — {s['direction']}</b>  [{q}  {sc:.0f}/100]\n"
+            f"  Giriş: <code>{fp(s['el'])} – {fp(s['eh'])}</code>\n"
+            f"  SL: <code>{fp(s['sl'])}</code>  TP: <code>{fp(s['tp'])}</code>\n"
+            f"  R:R: <b>1:{rr}</b>  ·  Rejim: {regime}  ·  Kontraryan: {c_score}/100\n")
+    lines.append("━━━━━━━━━━━━━━━━━━━\n<i>Titan Prime Elite — Yalnızca en yüksek olasılıklı fırsatlar</i>")
+    msg="\n".join(lines)
+    def _send():
+        try:
+            requests.post(f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage",
+                json={"chat_id":TELEGRAM_CHAT_ID,"text":msg,"parse_mode":"HTML"},timeout=8)
+        except: pass
+    threading.Thread(target=_send,daemon=True).start()
 
 def _importance(text):
-    score = 0
+    high_score = 0
     for kw,pts in HIGH_IMP_KW.items():
-        if kw in text: score = max(score, pts)
+        if kw in text: high_score = max(high_score, pts)
+    med_score = 0
     for kw,pts in MED_IMP_KW.items():
-        if kw in text: score = max(score, pts)
-    hits = sum(1 for kw in HIGH_IMP_KW if kw in text)
-    return min(score + hits*2, 100)
+        if kw in text: med_score = max(med_score, pts)
+    # Base = highest keyword match; medium only bumps if no high hit
+    score = high_score if high_score>0 else med_score
+    # Small hits bonus capped at +5 — prevents over-inflation
+    high_hits = sum(1 for kw in HIGH_IMP_KW if kw in text)
+    bonus = min(high_hits, 3) * 1  # max +3
+    return min(score + bonus, 100)
 
 def _asset_sentiment(text):
     result = {}
@@ -1114,7 +1171,7 @@ def structural_sl(candles, direction, price, av):
         sl=min(sl, price + av*3.0)
     return round(sl, 8)
 
-def structural_tp(candles, direction, price, sl, min_rr=2.0):
+def structural_tp(candles, direction, price, sl, min_rr=1.8):
     """
     TP placed just before nearest significant S/R level.
     Guarantees minimum RR. Returns (tp, actual_rr).
@@ -1436,15 +1493,16 @@ def score_setup(sym, candles, price, news_items=None):
     sl=structural_sl(candles, direction, price, av)
     if sl is None: return None
 
-    # ── Structural TP (S/R based, min 1:2.0) ────────────────────
-    tp, rr=structural_tp(candles, direction, price, sl, min_rr=2.0)
-    if tp is None or rr<2.0: return None   # HARD REJECT
+    # ── Structural TP (S/R based, min 1:1.8) ────────────────────
+    tp, rr=structural_tp(candles, direction, price, sl, min_rr=1.8)
+    if tp is None or rr<1.8: return None   # HARD REJECT
 
     # ── RR bonus scoring ─────────────────────────────────────────
-    rr_bonus = 15 if rr>=3.5 else 13 if rr>=3.0 else 11 if rr>=2.5 else 8  # 2.0 gets 8
-    if rr>=3.0: reasons.append(f"Excellent RR 1:{rr} — high expectancy setup")
-    elif rr>=2.5: reasons.append(f"Strong RR 1:{rr} — good risk/reward")
-    else: neg_factors.append(f"RR 1:{rr} — minimum acceptable, prefer 1:3+")
+    rr_bonus = 16 if rr>=3.5 else 14 if rr>=3.0 else 12 if rr>=2.5 else 9 if rr>=2.0 else 6
+    if rr>=3.0:  reasons.append(f"Excellent RR 1:{rr} — yüksek beklenti")
+    elif rr>=2.5: reasons.append(f"Güçlü RR 1:{rr}")
+    elif rr>=2.0: reasons.append(f"İyi RR 1:{rr}")
+    else: neg_factors.append(f"RR 1:{rr} — kabul edilebilir minimum")
 
     # ── Smart Money Analysis ─────────────────────────────────────
     sm_notes=[]
@@ -1497,8 +1555,13 @@ def score_setup(sym, candles, price, news_items=None):
     elif st=="BEAR" and (rv or 50)>35: regime="Risk-Off"
     else: regime="Nötr"
 
+    # ── Equity bonus — stocks get +4 if EMA+structure aligned ───
+    eq_bonus=0
+    if get_asset_class(sym) in ("stocks","indices") and fl["f_ema"] and fl["f_struct"]:
+        eq_bonus=4
+
     # ── Normalise to 100 then blend RR bonus ─────────────────────
-    score_100=round(min(max(raw/MAX_RAW*85+rr_bonus-news_penalty,0),100),1)
+    score_100=round(min(max(raw/MAX_RAW*85+rr_bonus+eq_bonus-news_penalty,0),100),1)
 
     # ── Expected hold time (TP distance ÷ ATR = hours) ───────────
     hold_h=round(abs(tp-price)/av,1) if av else 8.0
@@ -1509,24 +1572,23 @@ def score_setup(sym, candles, price, news_items=None):
     elif hold_h>8: neg_factors.append(f"Hold time ~{hold_h:.0f}h — crosses session boundary")
 
     # ── HARD REJECT: score too low ───────────────────────────────
-    if score_100<45: return None
+    if score_100<38: return None
 
-    # ── Quality thresholds (BALANCED mode) ───────────────────────
-    if   score_100>=82: quality="A+"
-    elif score_100>=70: quality="A"
-    elif score_100>=55: quality="B+"
-    elif score_100>=45: quality="WATCH"
+    # ── Quality thresholds ───────────────────────────────────────
+    if   score_100>=80: quality="A+"
+    elif score_100>=66: quality="A"
+    elif score_100>=50: quality="B+"
+    elif score_100>=38: quality="WATCH"
     else: return None
 
-    # A+ requires liquidity sweep confirmation
+    # A+ requires liquidity sweep
     if quality=="A+" and not sweep_confirmed:
         quality="A"
 
-    # Status — WATCHLIST only when confidence genuinely missing (score<65)
-    # Confidence >70% → APPROVED immediately per TITAN PRIME ELITE rules
-    if score_100>=65:
+    # Status: score>=58 → APPROVED directly
+    if score_100>=58:
         status="APPROVED"
-    elif score_100>=45:
+    elif score_100>=38:
         status="WATCHLIST"
     else:
         status="REJECTED"
@@ -1713,7 +1775,7 @@ def load_equity_candles():
 def load_news():
     global news_cache, cat_news, analyzed_news
     items=[]
-    for cat in ["general","crypto","forex","merger"]:
+    for cat in ["general","forex","merger","macro"]:
         try:
             r=requests.get(f"{BASE_URL}/news",params={"category":cat,"token":API_KEY},timeout=5)
             d=r.json()
@@ -2039,9 +2101,12 @@ def run_analysis():
                     try: tg_setup_alert(r)
                     except: pass
         except: pass
-    results.sort(key=lambda x:({"A+":0,"A":1,"B+":2}.get(x["quality"],9),-x["rr"]))
+    results.sort(key=lambda x:({"A+":0,"A":1,"B+":2}.get(x["quality"],9),-x["score"]))
     setups=results
     try: update_watchlist(results)
+    except: pass
+    # ── Best-probability Telegram digest (top 3 picks per cycle) ─
+    try: _tg_best_picks(results)
     except: pass
 
 # ═══════════════════════════════════════════════════════════════
