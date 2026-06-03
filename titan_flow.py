@@ -1695,14 +1695,13 @@ def load_finnhub_equity():
         except: pass
 
 def load_equity_candles():
-    """Fetch equity + crypto candles from Finnhub."""
+    """Fetch equity candles from Finnhub."""
     all_syms=EQ_SYMBOLS
     for sym in all_syms:
-        fh_sym=f"BINANCE:{sym}" if sym.endswith("USDT") else sym
         try:
             now=int(time.time()); frm=now-200*3600
-            p={"symbol":fh_sym,"resolution":"60","from":frm,"to":now,"token":API_KEY}
-            ep=f"{BASE_URL}/crypto/candle" if sym.endswith("USDT") else f"{BASE_URL}/stock/candle"
+            p={"symbol":sym,"resolution":"60","from":frm,"to":now,"token":API_KEY}
+            ep=f"{BASE_URL}/stock/candle"
             r=requests.get(ep,params=p,timeout=6); d=r.json()
             if d.get("s")=="ok":
                 c=list(zip(d["t"],d["o"],d["h"],d["l"],d["c"],d["v"]))
@@ -2289,96 +2288,78 @@ def panel_setups():
     return Panel(t,border_style="bright_yellow",box=box.HEAVY)
 
 def panel_details():
-    ss=list(setups)[:3]
+    ss=[s for s in list(setups) if s.get("status")=="APPROVED"][:2]
     if not ss:
-        return Panel("[dim]Setup oluşunca burada detay görünür.[/dim]",
-                     title="[bold bright_yellow]● SETUP DETAY[/bold bright_yellow]",
+        return Panel(Align.center("[dim]Onaylanan setup bekleniyor...[/dim]"),
+                     title="[bold bright_yellow]● TRADE PLANI[/bold bright_yellow]",
                      border_style="bright_yellow",box=box.ROUNDED)
     panels=[]
     for s in ss:
-        sc=s["score"]; conf=s.get("confidence",sc); hold=s.get("hold_h",0)
-        st2=s.get("status","?"); rr=s["rr"]
-        st_c="bold bright_green" if st2=="APPROVED" else "yellow" if st2=="WATCHLIST" else "bold bright_red"
-        dec=("Execute" if st2=="APPROVED" else "Watchlist" if st2=="WATCHLIST" else "Reject")
-        dec_c="bright_green" if dec=="Execute" else "yellow" if dec=="Watchlist" else "bright_red"
-
-        # Header block
-        nr=s.get("news_risk","NO RISK"); ni=s.get("news_imp",0)
-        nr_c={"CRITICAL":"bold bright_red","HIGH":"bright_red","MEDIUM":"yellow","LOW":"dim","NO RISK":"bright_green"}.get(nr,"dim")
-        sz=s.get("sizing",{}); irs=s.get("inst_risk_score",100); ph=s.get("portfolio_heat",0)
-        ic2="bright_green" if irs>=80 else "yellow" if irs>=60 else "bright_red"
-        hc2="bright_green" if ph<5 else "yellow" if ph<10 else "bright_red"
+        sc=s["score"]; rr=s["rr"]; q=s["quality"]
         regime=s.get("regime","Nötr")
         rc2="bright_green" if regime=="Risk-On" else "bright_red" if regime=="Risk-Off" else "yellow"
-        c_score=s.get("contrarian_score",0); c_label=s.get("contrarian_label","Trend Takip Et")
+        c_score=s.get("contrarian_score",0); c_label=s.get("contrarian_label","—")
         c_col="bright_yellow" if c_score>=70 else "yellow" if c_score>=40 else "bright_green"
-        header=(
-            f"{qc(s['quality'])}  {dc(s['direction'])}  [bold white]{s['sym']}[/bold white]  "
-            f"[{rc2}]◆ {regime}[/{rc2}]\n\n"
-            f"  [bold]TRADE SCORE        :[/bold] [bold bright_yellow]{sc:.0f}/100[/bold bright_yellow]\n"
-            f"  [bold]STATUS             :[/bold] [{st_c}]{st2}[/{st_c}]\n"
-            f"  [bold]CONFIDENCE         :[/bold] {conf:.0f}/100\n"
-            f"  [bold]HOLD TIME          :[/bold] ~{hold:.1f} saat\n"
-            f"  [bold]RISK REWARD        :[/bold] 1:{rr}\n"
-            f"  [bold]CONTRARIAN SKORU   :[/bold] [{c_col}]{c_score}/100 — {c_label}[/{c_col}]\n"
-            f"  [bold]NEWS RISK          :[/bold] [{nr_c}]{nr}[/{nr_c}]  [dim](impact {ni}/100)[/dim]\n"
-            f"  [bold]PORTFOLIO HEAT     :[/bold] [{hc2}]{ph:.1f}%[/{hc2}]\n"
-            f"  [bold]INST. RISK SCORE   :[/bold] [{ic2}]{irs:.0f}/100[/{ic2}]\n"
-            +(f"\n  [bold dim]── POZİSYON BOYUTU (Trade212 CFD) ──[/bold dim]\n"
-              f"  [bold]Önerilen Marj      :[/bold] [bright_white]£{sz.get('margin',0):.2f}[/bright_white]  [dim]({sz.get('leverage',1)}:1 kaldıraç → £{sz.get('notional',0):.2f} pozisyon)[/dim]\n"
-              f"  [bold]Beklenen Kayıp     :[/bold] [bright_red]£{sz.get('exp_loss',0):.2f}[/bright_red]\n"
-              f"  [bold]Beklenen Kâr       :[/bold] [bold bright_green]£{sz.get('exp_profit',0):.2f}[/bold bright_green]\n"
-              f"  [bold]Risk / Trade       :[/bold] {sz.get('risk_pct',0):.2f}% sermaye\n"
-              if sz else ""))
+        sz=s.get("sizing",{})
+        nr=s.get("news_risk","NO RISK"); ni=s.get("news_imp",0)
+        nr_c={"CRITICAL":"bold bright_red","HIGH":"bright_red","MEDIUM":"yellow","LOW":"dim","NO RISK":"bright_green"}.get(nr,"dim")
+        hold=s.get("hold_h",0)
+        in_active=_wl_key(s) in active_trades
+        in_wl=_wl_key(s) in _wl_active
+        status_line=""
+        if in_active: status_line="\n  [bold bright_green]▶ AKTİF İŞLEMDE[/bold bright_green]"
+        elif in_wl:   status_line="\n  [bold cyan]◎ İZLEME LİSTESİNDE[/bold cyan]"
 
-        # Positive factors
-        pos="\n".join(f"  [bright_green]✓[/bright_green] {r}" for r in s["reasons"]) or "  [dim]—[/dim]"
-
-        # Negative factors
-        neg_list=s.get("neg_factors",[])
-        neg="\n".join(f"  [bright_red]✗[/bright_red] {r}" for r in neg_list) or "  [dim]Yok[/dim]"
-
-        # Smart Money block
-        sm_notes=s.get("sm_notes",[])
-        sm_txt=""
-        if sm_notes:
-            sm_txt=("\n[bold dim]── SMART MONEY ANALİZİ ──[/bold dim]\n"
-                    +"\n".join(f"  [bright_cyan]◈[/bright_cyan] {n}" for n in sm_notes)+"\n")
-
-        # Trap warnings
-        traps=s.get("trap_warnings",[])
-        trap_txt=""
+        # Trade plan card
+        plan=(
+            f"{qc(q)}  {dc(s['direction'])}  [bold white]{s['sym']}[/bold white]  "
+            f"[{rc2}]◆ {regime}[/{rc2}]{status_line}\n\n"
+            f"  [bold dim]━━  TRADE PLANI  ━━[/bold dim]\n"
+            f"  [bold]Giriş Zonu :[/bold] [bright_white]{fp(s['el'])} – {fp(s['eh'])}[/bright_white]\n"
+            f"  [bold]Stop Loss  :[/bold] [bright_red]{fp(s['sl'])}[/bright_red]  "
+            f"[dim](yapısal swing + ATR)[/dim]\n"
+            f"  [bold]Take Profit:[/bold] [bold bright_green]{fp(s['tp'])}[/bold bright_green]  "
+            f"[dim](direnç/destek öncesi)[/dim]\n"
+            f"  [bold]Risk/Reward:[/bold] [bold]1:{rr}[/bold]\n"
+            f"  [bold]Skor       :[/bold] [bold bright_yellow]{sc:.0f}/100[/bold bright_yellow]\n"
+            f"  [bold]Hold       :[/bold] ~{hold:.1f} saat\n\n"
+        )
+        if sz:
+            plan+=(
+                f"  [bold dim]━━  POZİSYON BOYUTU (Trade212 CFD)  ━━[/bold dim]\n"
+                f"  Marj: [bright_white]£{sz.get('margin',0):.2f}[/bright_white]  "
+                f"[dim]{sz.get('leverage',1)}:1 → £{sz.get('notional',0):.2f}[/dim]\n"
+                f"  Risk: [bright_red]£{sz.get('exp_loss',0):.2f}[/bright_red]  "
+                f"Kâr: [bold bright_green]£{sz.get('exp_profit',0):.2f}[/bold bright_green]  "
+                f"[dim]{sz.get('risk_pct',0):.2f}% sermaye[/dim]\n\n"
+            )
+        # Reasons (max 4)
+        pos=s.get("reasons",[])[:4]
+        neg_list=s.get("neg_factors",[])[:2]
+        plan+="  [bold dim]━━  NEDEN GİR?  ━━[/bold dim]\n"
+        for r in pos: plan+=f"  [bright_green]✓[/bright_green] {r}\n"
+        if neg_list:
+            plan+="\n  [bold dim]━━  RİSKLER  ━━[/bold dim]\n"
+            for r in neg_list: plan+=f"  [bright_red]✗[/bright_red] {r}\n"
+        # Smart money
+        sm=s.get("sm_notes",[])[:2]; traps=s.get("trap_warnings",[])[:1]
+        if sm:
+            plan+="\n  [bold dim]━━  SMART MONEY  ━━[/bold dim]\n"
+            for n in sm: plan+=f"  [bright_cyan]◈[/bright_cyan] {n}\n"
         if traps:
-            trap_txt=("\n[bold dim]── TUZAK UYARILARI ──[/bold dim]\n"
-                      +"\n".join(f"  [bright_red]{t}[/bright_red]" for t in traps)+"\n")
-
-        # COT block
-        cot=s.get("cot",{}); cot_txt=""
+            plan+="\n"
+            for t2 in traps: plan+=f"  [bright_red]{t2}[/bright_red]\n"
+        # COT
+        cot=s.get("cot",{})
         if cot:
             pr=cot.get("pct_rank",50)
-            cot_txt=(f"\n[bold dim]── COT (CFTC) ──[/bold dim]\n"
-                     f"  {cot.get('date','—')}  |  {bias_c(cot.get('bias',''))}  |  {pbar(pr)} {pr:.0f}%\n"
-                     f"  Spec net: {cot.get('spec_net',0):+,}  Δ {cot.get('spec_chg',0):+,}  "
-                     f"Comm net: {cot.get('comm_net',0):+,}\n")
-            if cot.get("contrarian"):
-                cot_txt+=f"  [bold bright_yellow]⚠ CONTRARIAN {cot['contrarian']}[/bold bright_yellow]\n"
-
-        content=(
-            f"{header}\n"
-            f"[bold dim]── POZİTİF FAKTÖRLER ──[/bold dim]\n{pos}\n\n"
-            f"[bold dim]── NEGATİF FAKTÖRLER ──[/bold dim]\n{neg}"
-            f"{sm_txt}"
-            f"{trap_txt}"
-            f"{cot_txt}\n"
-            f"[bold dim]── GİRİŞ GEREKÇESİ ──[/bold dim]\n"
-            +"\n".join(f"  {l}" for l in s["narrative"].split("\n"))+"\n\n"
-            f"  [bold]KARAR:[/bold] [{dec_c}]{dec.upper()}[/{dec_c}]")
-        panels.append(Panel(content,
+            plan+=(f"\n  [bold dim]━━  COT  ━━[/bold dim]\n"
+                   f"  {bias_c(cot.get('bias',''))}  {pbar(pr)} {pr:.0f}th pct\n")
+        plan+=(f"\n  [{nr_c}]Haber: {nr}[/{nr_c}]  [dim]etki {ni}/100[/dim]  "
+               f"[{c_col}]Kontraryan: {c_score}/100[/{c_col}]")
+        panels.append(Panel(plan,
             title=f"[bold bright_yellow]{s['sym']} — {s['time']}[/bold bright_yellow]",
             border_style="bright_yellow",box=box.ROUNDED))
-    if len(panels)==3:
-        lo=Layout(); lo.split_row(Layout(panels[0]),Layout(panels[1]),Layout(panels[2]))
-        return lo
     if len(panels)==2:
         lo=Layout(); lo.split_row(Layout(panels[0]),Layout(panels[1]))
         return lo
@@ -2487,6 +2468,28 @@ def panel_stats():
              else f"[bright_red]↓×{wt:.2f}[/bright_red]" if wt<0.95
              else f"[dim]×{wt:.2f}[/dim]")
         lines.append(f"  [dim]{feat_names.get(col,col):<14}[/dim] {bar}  {wts}")
+
+    # ── Aktif işlemler ──
+    lines.append("")
+    lines.append(f"[bold bright_green]━━━  AKTİF İŞLEMLER ({len(active_trades)})  ━━━[/bold bright_green]")
+    if not active_trades:
+        lines.append("  [dim]Açık işlem yok.[/dim]")
+    else:
+        _now2=datetime.now()
+        for _k,_t in active_trades.items():
+            _ep=_t.get("_trade_entry_price",_t.get("price",0))
+            _cur_md=market.get(_t["sym"]); _cur=_cur_md.price if _cur_md else _ep
+            _sl=_t["sl"]; _risk=abs(_ep-_sl); _risk=_risk if _risk>0 else 1
+            if _t["direction"]=="LONG": _live_rr=round((_cur-_ep)/_risk,2)
+            else: _live_rr=round((_ep-_cur)/_risk,2)
+            _pnl_col="bright_green" if _live_rr>=0 else "bright_red"
+            _age_h=(_now2-_t.get("_trade_entered",_now2)).total_seconds()/3600
+            lines.append(
+                f"  [bright_green]▶[/bright_green] {qc(_t.get('quality','?'))} {dc(_t['direction'])} "
+                f"[bold white]{_t['sym']:<10}[/bold white]  "
+                f"Giriş:[dim]{fp(_ep)}[/dim]  Şu An:[bright_white]{fp(_cur)}[/bright_white]  "
+                f"SL:[bright_red]{fp(_sl)}[/bright_red]  TP:[bright_green]{fp(_t.get('tp',0))}[/bright_green]  "
+                f"Canlı:[{_pnl_col}]{_live_rr:+.2f}R[/{_pnl_col}]  [dim]{_age_h:.1f}sa[/dim]")
 
     # ── Kapanmış pozisyonlar tablosu ──
     lines.append("")
@@ -2812,85 +2815,94 @@ def auto_scroll_loop():
 
 def panel_watchlist():
     lines=[]
-    DIV="─"*108
+    DIV="─"*106
+    now=datetime.now()
 
-    def wl_row(s, badge, badge_col, show_reason=True):
-        q=s.get("quality","?"); st2=s.get("status","?")
-        sc=s.get("score",0); rr=s.get("rr",0)
-        updated=s.get("_wl_updated"); added=s.get("_wl_added")
-        age_s="";
-        if added:
-            age_h=(datetime.now()-added).total_seconds()/3600
-            age_s=f"{age_h:.1f}sa"
-        upd_s=updated.strftime("%H:%M") if updated else "—"
-        reason=s.get("_wl_reason",""); fail=s.get("_wl_fail_condition","")
-        c_score=s.get("contrarian_score",0)
-        row=(f"  [{badge_col}]{badge}[/{badge_col}]  "
-             f"{qc(q)}  {dc(s['direction'])}  "
-             f"[bold white]{s['sym']:<10}[/bold white]  "
-             f"Skor:[bold]{sc:.0f}[/bold]  R:R:[bold]1:{rr}[/bold]  "
-             f"Giriş:[dim]{fp_plain(s['price'])}[/dim]  "
-             f"SL:[bright_red]{fp_plain(s['sl'])}[/bright_red]  "
-             f"TP:[bright_green]{fp_plain(s['tp'])}[/bright_green]  "
-             f"[dim]{age_s} / {upd_s}[/dim]")
-        lines.append(row)
-        if show_reason and reason:
-            extra=""
-            if fail: extra=f"  [bright_red]→ {fail}[/bright_red]"
-            lines.append(f"    [dim]{reason}[/dim]{extra}")
+    def age_str(dt):
+        if not dt: return "—"
+        h=(now-dt).total_seconds()/3600
+        return f"{h:.1f}sa" if h<24 else f"{h/24:.1f}g"
 
-    # ── ACTIVE ───────────────────────────────────────────────────
-    active=sorted(_wl_active.values(),
-                  key=lambda x:({"A+":0,"A":1,"B+":2,"WATCH":3}.get(x.get("quality","?"),4),-x.get("rr",0)))
-    lines.append(f"[bold bright_green]● AKTİF İZLEME LİSTESİ  ({len(active)} setup)[/bold bright_green]")
-    lines.append(f"[dim]{DIV}[/dim]")
-    if not active:
-        lines.append("  [dim]Henüz izleme listesinde setup yok.[/dim]")
+    def trade_row(s, badge, badge_col, extra=""):
+        q=s.get("quality","?"); sc=s.get("score",0); rr=s.get("rr",0)
+        added=s.get("_wl_added") or s.get("_trade_entered")
+        lines.append(
+            f"  [{badge_col}]{badge:<14}[/{badge_col}]  "
+            f"{qc(q)}  {dc(s['direction'])}  "
+            f"[bold white]{s['sym']:<10}[/bold white]  "
+            f"[dim]Skor:[/dim][bold]{sc:.0f}[/bold]  "
+            f"[dim]R:R:[/dim][bold]1:{rr}[/bold]  "
+            f"[dim]SL:[/dim][bright_red]{fp_plain(s.get('sl',0))}[/bright_red]  "
+            f"[dim]TP:[/dim][bright_green]{fp_plain(s.get('tp',0))}[/bright_green]  "
+            f"[dim]{age_str(added)}[/dim]{extra}")
+
+    # ── AKTİF İŞLEMLER ──
+    lines.append(f"[bold bright_green]▶ AKTİF İŞLEMLER  ({len(active_trades)})[/bold bright_green]")
+    lines.append(f"[bright_green]{DIV}[/bright_green]")
+    if not active_trades:
+        lines.append("  [dim]Henüz açık işlem yok. İzleme listesinden giriş yapın.[/dim]")
     else:
-        for s in active:
-            wl_row(s,"◉ AKTİF","bright_green",show_reason=False)
-            # Show smart money + trap notes if any
-            sm=s.get("sm_notes",[]); traps=s.get("trap_warnings",[])
-            if traps:
-                lines.append("    "+"  ".join(f"[bright_red]{t[:60]}[/bright_red]" for t in traps[:1]))
-            elif sm:
-                lines.append(f"    [dim cyan]{sm[0][:80]}[/dim cyan]")
+        for k,t in active_trades.items():
+            ep=t.get("_trade_entry_price",t.get("price",0))
+            cur_md=market.get(t["sym"]); cur=cur_md.price if cur_md else ep
+            sl=t["sl"]; risk=abs(ep-sl) if abs(ep-sl)>0 else 1
+            if t["direction"]=="LONG": live_rr=round((cur-ep)/risk,2)
+            else: live_rr=round((ep-cur)/risk,2)
+            pnl_col="bright_green" if live_rr>=0 else "bright_red"
+            trade_row(t,"▶ AKTİF","bright_green",
+                      f"  Giriş:[dim]{fp_plain(ep)}[/dim]  Şu An:[bright_white]{fp_plain(cur)}[/bright_white]  "
+                      f"Canlı R:R:[{pnl_col}]{live_rr:+.2f}R[/{pnl_col}]")
     lines.append("")
 
-    # ── TRIGGERED ────────────────────────────────────────────────
-    lines.append(f"[bold bright_yellow]● TETİKLENEN İŞLEMLER  ({len(_wl_triggered)} setup)[/bold bright_yellow]")
-    lines.append(f"[dim]{DIV}[/dim]")
+    # ── AKTİF İZLEME ──
+    active=sorted(_wl_active.values(),
+                  key=lambda x:({"A+":0,"A":1,"B+":2,"WATCH":3}.get(x.get("quality","?"),4),-x.get("rr",0)))
+    lines.append(f"[bold bright_cyan]◎ AKTİF İZLEME  ({len(active)})  [dim]— girmek için: aktif setuplarda E tuşu planlaniyor[/dim][/bold bright_cyan]")
+    lines.append(f"[bright_cyan]{DIV}[/bright_cyan]")
+    if not active:
+        lines.append("  [dim]İzleme listesi boş.[/dim]")
+    else:
+        for s in active:
+            sm=s.get("sm_notes",[]); traps=s.get("trap_warnings",[])
+            extra=""
+            if traps: extra=f"  [bright_red]{traps[0][:50]}[/bright_red]"
+            elif sm:  extra=f"  [dim cyan]{sm[0][:50]}[/dim cyan]"
+            trade_row(s,"◎ İZLEME","bright_cyan",extra)
+    lines.append("")
+
+    # ── TETİKLENEN ──
+    lines.append(f"[bold bright_yellow]✓ TETİKLENEN İŞLEMLER  ({len(_wl_triggered)})[/bold bright_yellow]")
+    lines.append(f"[yellow]{DIV}[/yellow]")
     if not _wl_triggered:
         lines.append("  [dim]Henüz tetiklenen setup yok.[/dim]")
     else:
-        for s in _wl_triggered[:8]:
-            wl_row(s,"✓ TETİKLENDİ","bright_yellow")
+        for s in _wl_triggered[:6]:
+            reason=s.get("_wl_reason","")
+            trade_row(s,"✓ TETİKLENDİ","bright_yellow",f"  [dim]{reason}[/dim]")
     lines.append("")
 
-    # ── INVALIDATED ──────────────────────────────────────────────
-    lines.append(f"[bold bright_red]● İPTAL EDİLEN SETUPLАР  ({len(_wl_invalidated)} setup)[/bold bright_red]")
-    lines.append(f"[dim]{DIV}[/dim]")
-    if not _wl_invalidated:
-        lines.append("  [dim]Henüz iptal edilen setup yok.[/dim]")
+    # ── İPTAL / SÜRESI DOLDU ──
+    lines.append(f"[bold bright_red]✗ İPTAL  ({len(_wl_invalidated)})  [dim]|[/dim]  [dim]⏱ SÜRESI DOLDU  ({len(_wl_expired)})[/dim][/bold bright_red]")
+    lines.append(f"[bright_red]{DIV}[/bright_red]")
+    combined=sorted(_wl_invalidated[:4]+_wl_expired[:3],
+                    key=lambda x: x.get("_wl_updated",datetime.min), reverse=True)
+    if not combined:
+        lines.append("  [dim]Henüz iptal edilen veya süresi dolan setup yok.[/dim]")
     else:
-        for s in _wl_invalidated[:8]:
-            wl_row(s,"✗ İPTAL","bright_red")
-    lines.append("")
+        for s in combined:
+            st2=s.get("_wl_status","?")
+            badge="✗ İPTAL" if st2=="INVALIDATED" else "⏱ SÜRESI DOLDU"
+            bc="bright_red" if st2=="INVALIDATED" else "dim"
+            fail=s.get("_wl_fail_condition",""); reason=s.get("_wl_reason","")
+            note=f"  [dim]{reason}[/dim]"
+            if fail: note+=f"  [bright_red]({fail})[/bright_red]"
+            trade_row(s,badge,bc,note)
 
-    # ── EXPIRED ──────────────────────────────────────────────────
-    lines.append(f"[bold dim]● SÜRESI DOLAN SETUPLАР  ({len(_wl_expired)} setup)[/bold dim]")
-    lines.append(f"[dim]{DIV}[/dim]")
-    if not _wl_expired:
-        lines.append("  [dim]Henüz süresi dolan setup yok.[/dim]")
-    else:
-        for s in _wl_expired[:6]:
-            wl_row(s,"⏱ SÜRESI DOLDU","dim")
-
-    total=len(active)+len(_wl_triggered)+len(_wl_invalidated)+len(_wl_expired)
+    total=len(active_trades)+len(active)+len(_wl_triggered)+len(_wl_invalidated)+len(_wl_expired)
     return Panel("\n".join(lines),
                  title="[bold bright_cyan]● WATCHLIST YÖNETİM SİSTEMİ — Titan Prime Elite[/bold bright_cyan]",
                  border_style="bright_cyan",box=box.ROUNDED,
-                 subtitle=f"[dim]Toplam takip edilen: {total}  ·  Max yaş: {_WL_MAX_AGE_H}sa  ·  Hiçbir setup sessizce silinmez[/dim]")
+                 subtitle=f"[dim]Toplam: {total}  ·  Aktif işlem: {len(active_trades)}  ·  İzleme: {len(active)}  ·  Hiçbir setup sessizce silinmez[/dim]")
 
 
 def render():
