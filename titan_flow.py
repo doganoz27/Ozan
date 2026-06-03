@@ -40,7 +40,7 @@ DB_PATH  = os.path.join(os.path.expanduser("~"), "titan_journal.db")
 REFRESH_SEC       = 2
 ANALYSIS_SEC      = 30
 DEDUP_SEC         = 7200
-MIN_TRADES_ADAPT  = 20
+MIN_TRADES_ADAPT  = 5
 
 # ── Trade212 CFD Account Settings ────────────────────────────────────────────
 ACCOUNT = {
@@ -1935,38 +1935,42 @@ def _check_open():
     with db() as c:
         rows=c.execute("SELECT * FROM signals WHERE status='OPEN'").fetchall()
         for r in rows:
-            sym=r["sym"]; ep=r["entry"]; sl=r["sl"]
-            tp=r["tp"]
+            sym=r["sym"]; ep=r["entry"]; sl=r["sl"]; tp=r["tp"]
             with lock: md=market.get(sym); cur=md.price if md else None
             if cur is None: continue
             risk=abs(ep-sl)
             if risk==0: continue
             ns=None; arr=None
             if r["direction"]=="LONG":
-                if cur<=sl:  ns="SL";  arr=-1.0
-                elif cur>=tp: ns="TP";  arr=round(r["rr_t"],2)
+                if cur<=sl:    ns="SL";  arr=round(-risk/ep*100,3) if ep else -1.0; arr_r=-1.0
+                elif cur>=tp:  ns="TP";  arr_r=round(r["rr_t"],2); arr=round((cur-ep)/ep*100,3) if ep else arr_r
             else:
-                if cur>=sl:  ns="SL";  arr=-1.0
-                elif cur<=tp: ns="TP";  arr=round(r["rr_t"],2)
+                if cur>=sl:    ns="SL";  arr=round(-risk/ep*100,3) if ep else -1.0; arr_r=-1.0
+                elif cur<=tp:  ns="TP";  arr_r=round(r["rr_t"],2); arr=round((ep-cur)/ep*100,3) if ep else arr_r
+            # Auto-expire after 7 days
             try:
                 age=(datetime.utcnow()-datetime.fromisoformat(r["created"])).days
                 if age>=7 and ns is None:
-                    ns="EXPIRED"; arr=round((cur-ep)/risk,2) if r["direction"]=="LONG" else round((ep-cur)/risk,2)
+                    ns="EXPIRED"
+                    arr_r=round((cur-ep)/risk,2) if r["direction"]=="LONG" else round((ep-cur)/risk,2)
+                    arr=arr_r
             except: pass
             if ns:
+                act_rr_val=arr_r if 'arr_r' in dir() else arr
                 c.execute("UPDATE signals SET status=?,out_price=?,out_at=?,act_rr=? WHERE id=?",
-                          (ns,cur,now,arr,r["id"]))
-                try: tg_outcome_alert(sym,r["direction"],ns,ep,cur,arr)
+                          (ns,cur,now,act_rr_val,r["id"]))
+                # Categorized Telegram outcome
+                try: tg_outcome_alert(sym,r["direction"],ns,ep,cur,act_rr_val)
                 except: pass
-                # Update shadow trade
+                # Update shadow trade + balance
                 st_row=c.execute("SELECT * FROM shadow_trades WHERE signal_id=? AND status='OPEN'",
                                  (r["id"],)).fetchone()
                 if st_row:
-                    cap=st_row["capital"] or 0
-                    risk=st_row["risk_amount"] or 0
-                    pnl=round(arr*risk,2) if arr is not None else 0
+                    cap=st_row["capital"] or 0; risk_amt=st_row["risk_amount"] or 0
+                    pnl=round(act_rr_val*risk_amt,2) if act_rr_val is not None else 0
                     bal_row=c.execute("SELECT value FROM account_state WHERE key='shadow_balance'").fetchone()
-                    new_bal=round((bal_row["value"] if bal_row else ACCOUNT["balance"])+pnl,2)
+                    old_bal=bal_row["value"] if bal_row else ACCOUNT["balance"]
+                    new_bal=round(old_bal+pnl,2)
                     c.execute("UPDATE shadow_trades SET status=?,out_price=?,out_at=?,pnl=?,pnl_pct=? WHERE id=?",
                               (ns,cur,now,pnl,round(pnl/cap*100,1) if cap else 0,st_row["id"]))
                     c.execute("INSERT OR REPLACE INTO account_state(key,value,updated) VALUES('shadow_balance',?,?)",
@@ -1974,50 +1978,79 @@ def _check_open():
                     with lock:
                         portfolio_state["shadow_balance"]=new_bal
                         portfolio_state["shadow_equity"].append(new_bal)
-                        if ns in ("TP1","TP2","TP3"): portfolio_state["shadow_wins"]+=1
+                        if ns=="TP":   portfolio_state["shadow_wins"]+=1
                         elif ns=="SL": portfolio_state["shadow_losses"]+=1
+                # Trigger adaptive learning immediately after each close
+                try: compute_stats()
+                except: pass
         c.commit()
 
 def compute_stats():
     global stats_cache, adap_weights
     with db() as c:
-        closed=c.execute("SELECT * FROM signals WHERE status!='OPEN'").fetchall()
+        # Use only signals from last 90 days for relevance
+        cutoff=(datetime.utcnow()-__import__('datetime').timedelta(days=90)).isoformat(timespec="seconds")
+        all_closed=c.execute("SELECT * FROM signals WHERE status!='OPEN'").fetchall()
+        closed=[r for r in all_closed if (r["created"] or "")>=cutoff] or all_closed
         if not closed: return
         total=len(closed)
-        wins=[r for r in closed if r["status"] in ("TP1","TP2","TP3")]
+        wins=[r for r in closed if r["status"]=="TP"]
+        losses=[r for r in closed if r["status"]=="SL"]
+        expired=[r for r in closed if r["status"]=="EXPIRED"]
         wr=round(len(wins)/total*100,1)
         rrs=[r["act_rr"] for r in closed if r["act_rr"] is not None]
         avg_rr=round(sum(rrs)/len(rrs),2) if rrs else 0
         gw=sum(r for r in rrs if r>0); gl=abs(sum(r for r in rrs if r<0))
         pf=round(gw/gl,2) if gl else 99.0
+
+        # Quality breakdown
         bq={}
         for q in ("A+","A","B+"):
             qr=[r for r in closed if r["quality"]==q]
-            qw=[r for r in qr if r["status"] in ("TP1","TP2","TP3")]
+            qw=[r for r in qr if r["status"]=="TP"]
             bq[q]={"t":len(qr),"w":len(qw),"wr":round(len(qw)/len(qr)*100,1) if qr else 0}
+
+        # Feature win-rate → adaptive weights (lower threshold to 5 trades for faster learning)
         feats=["f_ema","f_rsi","f_macd","f_sweep","f_ob","f_fvg","f_struct","f_cot","f_news"]
         fstats={}; new_w={}
         for f in feats:
             fr=[r for r in closed if r[f]==1]
-            fw=[r for r in fr if r["status"] in ("TP1","TP2","TP3")]
+            fw=[r for r in fr if r["status"]=="TP"]
             fwr=round(len(fw)/len(fr)*100,1) if fr else None
             fstats[f]={"n":len(fr),"w":len(fw),"wr":fwr}
-            if len(fr)>=10 and fwr is not None:
-                new_w[f]=round(max(0.5,min(1.5,0.5+fwr/50)),3)
+            if len(fr)>=5 and fwr is not None:
+                # Stronger weighting: high win-rate features get boosted more
+                new_w[f]=round(max(0.4,min(1.8,0.4+fwr/55)),3)
                 c.execute("UPDATE weights SET mult=?,win_rate=?,n=?,updated=? WHERE feature=?",
                           (new_w[f],fwr,len(fr),datetime.utcnow().isoformat(timespec="seconds"),f))
-            else: new_w[f]=1.0
+            else: new_w[f]=adap_weights.get(f,1.0)  # keep existing weight
         c.commit()
-        recent=c.execute("SELECT sym,quality,direction,status,act_rr,rr_t,entry,created FROM signals ORDER BY id DESC LIMIT 12").fetchall()
 
-        # ── Quant metrics ──
+        # Best symbols (top 5 by win rate, min 2 trades)
+        sym_perf={}
+        for r in closed:
+            s=r["sym"]
+            sym_perf.setdefault(s,{"t":0,"w":0,"rr":[]})
+            sym_perf[s]["t"]+=1
+            if r["status"]=="TP": sym_perf[s]["w"]+=1
+            if r["act_rr"]: sym_perf[s]["rr"].append(r["act_rr"])
+        for s in sym_perf:
+            d=sym_perf[s]
+            d["wr"]=round(d["w"]/d["t"]*100,1) if d["t"] else 0
+            d["avg_rr"]=round(sum(d["rr"])/len(d["rr"]),2) if d["rr"] else 0
+        best_syms=sorted([(s,d) for s,d in sym_perf.items() if d["t"]>=2],
+                         key=lambda x:-x[1]["wr"])[:5]
+
+        recent=c.execute("SELECT sym,quality,direction,status,act_rr,rr_t,entry,created FROM signals ORDER BY id DESC LIMIT 20").fetchall()
+
+        # Quant metrics
         trade_rets=[r["act_rr"]*0.01 for r in closed if r["act_rr"] is not None]
-        equity=[1.0]
-        for r in trade_rets: equity.append(equity[-1]*(1+r))
+        equity=[ACCOUNT["balance"]]
+        for rt in trade_rets: equity.append(equity[-1]*(1+rt))
         wins_rr=[r["act_rr"] for r in wins if r["act_rr"]]
-        loss_rr=[abs(r["act_rr"]) for r in closed if r["status"]=="SL" and r["act_rr"]]
-        avg_win=sum(wins_rr)/len(wins_rr) if wins_rr else 0
-        avg_loss=sum(loss_rr)/len(loss_rr) if loss_rr else 1
+        loss_rr=[abs(r["act_rr"]) for r in losses if r["act_rr"]]
+        avg_win=round(sum(wins_rr)/len(wins_rr),2) if wins_rr else 0
+        avg_loss=round(sum(loss_rr)/len(loss_rr),2) if loss_rr else 1
         sharpe=sharpe_ratio(trade_rets)
         sortino=sortino_ratio(trade_rets)
         mdd=max_drawdown_pct(equity)
@@ -2028,10 +2061,10 @@ def compute_stats():
         # Monte Carlo
         mc=None
         if total>=5:
-            try: mc=monte_carlo(wr, avg_win, avg_loss, n_trades=max(total,163))
+            try: mc=monte_carlo(wr,avg_win,avg_loss,n_trades=max(total,163))
             except: pass
 
-        # Seans analizi
+        # Session analysis
         sess_stats={}
         for r in closed:
             try: hr=int(str(r["created"])[11:13])
@@ -2042,36 +2075,42 @@ def compute_stats():
             else: sess="ASYA"
             sess_stats.setdefault(sess,{"t":0,"w":0})
             sess_stats[sess]["t"]+=1
-            if r["status"] in ("TP1","TP2","TP3"): sess_stats[sess]["w"]+=1
+            if r["status"]=="TP": sess_stats[sess]["w"]+=1
 
-        # Sembol bazlı performans
-        sym_perf={}
-        for r in closed:
-            s=r["sym"]
-            sym_perf.setdefault(s,{"t":0,"w":0,"rr":[]})
-            sym_perf[s]["t"]+=1
-            if r["status"] in ("TP1","TP2","TP3"):
-                sym_perf[s]["w"]+=1
-            if r["act_rr"]: sym_perf[s]["rr"].append(r["act_rr"])
+        # Consecutive streak
+        streak=0; streak_type=""
+        for r in reversed(closed):
+            if r["status"]=="TP":
+                if streak_type in ("","TP"): streak+=1; streak_type="TP"
+                else: break
+            elif r["status"]=="SL":
+                if streak_type in ("","SL"): streak+=1; streak_type="SL"
+                else: break
+            else: break
 
         with lock:
-            stats_cache={"total":total,"wins":len(wins),"wr":wr,"avg_rr":avg_rr,"pf":pf,
-                         "tp":sum(1 for r in closed if r["status"]=="TP"),
-                         "sl":sum(1 for r in closed if r["status"]=="SL"),
-                         "by_q":bq,"fstats":fstats,
-                         "recent":[dict(r) for r in recent],
-                         "sharpe":sharpe,"sortino":sortino,"calmar":calmar,
-                         "mdd":mdd,"var95":var95,"kelly":kelly,
-                         "avg_win":avg_win,"avg_loss":avg_loss,
-                         "sess_stats":sess_stats,"sym_perf":sym_perf,"mc":mc}
-        if total>=MIN_TRADES_ADAPT:
+            stats_cache={
+                "total":total,"wins":len(wins),"losses":len(losses),"expired":len(expired),
+                "wr":wr,"avg_rr":avg_rr,"pf":pf,
+                "tp":len(wins),"sl":len(losses),
+                "by_q":bq,"fstats":fstats,
+                "recent":[dict(r) for r in recent],
+                "sharpe":sharpe,"sortino":sortino,"calmar":calmar,
+                "mdd":mdd,"var95":var95,"kelly":kelly,
+                "avg_win":avg_win,"avg_loss":avg_loss,
+                "sess_stats":sess_stats,"sym_perf":sym_perf,"mc":mc,
+                "best_syms":best_syms,"equity_curve":equity[-50:],
+                "streak":streak,"streak_type":streak_type,
+            }
+        # Adaptive learning: lower threshold to 5 trades
+        if total>=5:
             adap_weights.update(new_w)
 
 def stats_loop():
     while True:
         try: compute_stats()
         except: pass
-        time.sleep(300)
+        time.sleep(120)   # refresh every 2 min instead of 5
 
 # ═══════════════════════════════════════════════════════════════
 # ANALYSIS
@@ -2494,53 +2533,82 @@ def panel_journal():
 def panel_stats():
     with lock: st=dict(stats_cache)
     if not st:
-        return Panel(Align.center("[dim]İstatistik bekleniyor — ilk sinyaller kapanınca görünür.[/dim]"),
-                     title="[bold bright_cyan]● PERFORMANS & ADAPTİF ÖĞRENME[/bold bright_cyan]",
-                     border_style="bright_cyan",box=box.ROUNDED)
+        return Panel(Align.center(
+            "[dim]İstatistik bekleniyor — ilk sinyaller kapanınca görünür.\n"
+            f"DB: {DB_PATH}[/dim]"),
+            title="[bold bright_cyan]● PERFORMANS & ADAPTİF ÖĞRENME[/bold bright_cyan]",
+            border_style="bright_cyan",box=box.ROUNDED)
+
     total=st.get("total",0); wr=st.get("wr",0); pf=st.get("pf",0); avg=st.get("avg_rr",0)
+    tp_n=st.get("tp",0); sl_n=st.get("sl",0); exp_n=st.get("expired",0)
+    avg_win=st.get("avg_win",0); avg_loss=st.get("avg_loss",1)
+    streak=st.get("streak",0); streak_type=st.get("streak_type","")
     wc="bright_green" if wr>=55 else "bright_red" if wr<45 else "yellow"
-    adap=len(adap_weights)>0 and total>=MIN_TRADES_ADAPT
-    lines=[
-        f"[bold]KPI[/bold]  [dim]{total} kapanmış[/dim]  [{wc}]{wr:.1f}% WR[/{wc}]  "
-        f"[bold]PF {pf:.2f}[/bold]  Avg R:R [bold]{avg:+.2f}[/bold]",
-        f"TP [bright_green]{st.get('tp',0)}[/bright_green]  "
-        f"SL [bright_red]{st.get('sl',0)}[/bright_red]  |  "
-        f"Adaptif: " + ("[bright_green]AKTİF[/bright_green]" if adap
-                        else f"[dim]{max(0,MIN_TRADES_ADAPT-total)} trade daha[/dim]"),
-        "",
-    ]
+    adap=len(adap_weights)>0
+    lines=[]
+
+    # ── KPI header ──
+    lines.append(
+        f"[bold]KPI[/bold]  {total} kapanmış  [{wc}][bold]{wr:.1f}% WR[/bold][/{wc}]  "
+        f"PF [bold]{pf:.2f}[/bold]  Avg R:R [bold]{avg:+.2f}[/bold]  "
+        f"Avg Kazanç [bright_green]+{avg_win:.2f}R[/bright_green]  "
+        f"Avg Kayıp [bright_red]-{avg_loss:.2f}R[/bright_red]")
+    streak_col="bright_green" if streak_type=="TP" else "bright_red" if streak_type=="SL" else "dim"
+    streak_lbl="🔥 Kazanma serisi" if streak_type=="TP" else "❄️ Kayıp serisi" if streak_type=="SL" else ""
+    lines.append(
+        f"🎯 TP:[bright_green]{tp_n}[/bright_green]  "
+        f"🛑 SL:[bright_red]{sl_n}[/bright_red]  "
+        f"⏰ Süresi Dolan:{exp_n}  |  "
+        f"Adaptif: " + ("[bright_green]AKTİF ✓[/bright_green]" if adap else "[dim]bekleniyor[/dim]") +
+        (f"  [{streak_col}]{streak_lbl}: {streak}[/{streak_col}]" if streak>=2 else ""))
+
+    # ── Quality breakdown ──
+    lines.append("")
     bq=st.get("by_q",{})
     row="[bold dim]KALİTE:[/bold dim]  "
     for q in ("A+","A","B+"):
         d=bq.get(q,{"t":0,"w":0,"wr":0})
         if d["t"]:
-            wc2="bright_green" if d["wr"]>=55 else "bright_red" if d["wr"]<45 else "yellow"
-            row+=f"{qc(q)} [{wc2}]{d['wr']:.0f}%[/{wc2}] {d['w']}/{d['t']}   "
-    lines.append(row); lines.append("")
-    lines.append("[bold dim]ÖZELLİK SIRALAMASI  (kazanma oranı → adaptif ağırlık)[/bold dim]")
+            wc2="bright_green" if d["wr"]>=60 else "bright_red" if d["wr"]<40 else "yellow"
+            row+=f"{qc(q)} [{wc2}]{d['wr']:.0f}%[/{wc2}] ({d['w']}/{d['t']})   "
+    lines.append(row)
+
+    # ── Best symbols ──
+    best_syms=st.get("best_syms",[])
+    if best_syms:
+        lines.append("")
+        lines.append("[bold dim]EN BAŞARILI SEMBOLLERnEN İYİ 5 (son 90 gün):[/bold dim]")
+        row2=""
+        for sym,d in best_syms:
+            wc3="bright_green" if d["wr"]>=60 else "yellow"
+            row2+=f"  [bold white]{sym}[/bold white] [{wc3}]{d['wr']:.0f}%[/{wc3}] {d['w']}/{d['t']} [dim]avg {d['avg_rr']:+.2f}R[/dim]"
+        lines.append(row2)
+
+    # ── Feature weights ──
+    lines.append("")
+    lines.append("[bold dim]ADAPTİF ÖĞRENME — Özellik Win-Rate → Ağırlık Çarpanı:[/bold dim]")
     feat_names={"f_ema":"EMA Stack","f_rsi":"RSI Extreme","f_macd":"MACD Cross",
                 "f_sweep":"Liq Sweep","f_ob":"Order Block","f_fvg":"FVG",
-                "f_struct":"Structure","f_cot":"COT Signal","f_news":"News Cat"}
+                "f_struct":"Structure","f_cot":"COT Signal","f_news":"News Kataliz"}
     fst=st.get("fstats",{})
-    sorted_f=sorted(fst.items(),key=lambda x:(x[1].get("wr") or 0) if x[1]["n"]>=5 else -1,reverse=True)
+    sorted_f=sorted(fst.items(),key=lambda x:(x[1].get("wr") or 0) if x[1]["n"]>=3 else -1,reverse=True)
+    row3=""
     for col,fd in sorted_f:
         n=fd["n"]; fw=fd.get("wr"); wt=adap_weights.get(col,1.0)
-        if n<3: bar="[dim]veri yok[/dim]"
-        else:
-            wc3="bright_green" if (fw or 0)>=60 else "bright_red" if (fw or 0)<40 else "yellow"
-            bar=f"[{wc3}]{fw:.0f}%[/{wc3}] [dim]({fd['w']}/{n})[/dim]"
-        wts=(f"[bright_green]↑×{wt:.2f}[/bright_green]" if wt>1.05
-             else f"[bright_red]↓×{wt:.2f}[/bright_red]" if wt<0.95
-             else f"[dim]×{wt:.2f}[/dim]")
-        lines.append(f"  [dim]{feat_names.get(col,col):<14}[/dim] {bar}  {wts}")
+        if n<2: continue
+        wc3="bright_green" if (fw or 0)>=60 else "bright_red" if (fw or 0)<40 else "yellow"
+        wts=(f"[bright_green]↑{wt:.2f}x[/bright_green]" if wt>1.05
+             else f"[bright_red]↓{wt:.2f}x[/bright_red]" if wt<0.95 else f"[dim]{wt:.2f}x[/dim]")
+        row3+=f"  {feat_names.get(col,col)}: [{wc3}]{fw:.0f}%[/{wc3}] {wts}"
+    lines.append(row3 or "  [dim]Henüz yeterli veri yok[/dim]")
 
-    # ── Aktif işlemler ──
+    # ── Active trades ──
+    _now2=datetime.now()
     lines.append("")
     lines.append(f"[bold bright_green]━━━  AKTİF İŞLEMLER ({len(active_trades)})  ━━━[/bold bright_green]")
     if not active_trades:
-        lines.append("  [dim]Açık işlem yok.[/dim]")
+        lines.append("  [dim]Açık işlem yok. Sayfa 9'dan izleme listesini takip edin.[/dim]")
     else:
-        _now2=datetime.now()
         for _k,_t in active_trades.items():
             _ep=_t.get("_trade_entry_price",_t.get("price",0))
             _cur_md=market.get(_t["sym"]); _cur=_cur_md.price if _cur_md else _ep
@@ -2549,56 +2617,55 @@ def panel_stats():
             else: _live_rr=round((_ep-_cur)/_risk,2)
             _pnl_col="bright_green" if _live_rr>=0 else "bright_red"
             _age_h=(_now2-_t.get("_trade_entered",_now2)).total_seconds()/3600
+            _sz=_t.get("sizing",{})
+            _pnl_gbp=round(_live_rr*_sz.get("exp_loss",0),2) if _sz else 0
             lines.append(
                 f"  [bright_green]▶[/bright_green] {qc(_t.get('quality','?'))} {dc(_t['direction'])} "
                 f"[bold white]{_t['sym']:<10}[/bold white]  "
-                f"Giriş:[dim]{fp(_ep)}[/dim]  Şu An:[bright_white]{fp(_cur)}[/bright_white]  "
+                f"Giriş:[dim]{fp(_ep)}[/dim] → [bright_white]{fp(_cur)}[/bright_white]  "
                 f"SL:[bright_red]{fp(_sl)}[/bright_red]  TP:[bright_green]{fp(_t.get('tp',0))}[/bright_green]  "
-                f"Canlı:[{_pnl_col}]{_live_rr:+.2f}R[/{_pnl_col}]  [dim]{_age_h:.1f}sa[/dim]")
+                f"[{_pnl_col}]{_live_rr:+.2f}R[/{_pnl_col}]"
+                +(f" [dim](£{_pnl_gbp:+.2f})[/dim]" if _pnl_gbp else "")
+                +f"  [dim]{_age_h:.1f}sa[/dim]")
 
-    # ── Kapanmış pozisyonlar tablosu ──
+    # ── Closed trades ──
     lines.append("")
-    lines.append("[bold dim]━━━  KAPANMIŞ POZİSYONLAR  ━━━[/bold dim]")
+    lines.append("[bold dim]━━━  SON KAPANMIŞ POZİSYONLAR (son 20)  ━━━[/bold dim]")
     try:
         with db() as c:
             rows=c.execute("""SELECT sym,quality,direction,entry,sl,tp,
                                out_price,act_rr,rr_t,status,created
                                FROM signals WHERE status!='OPEN'
-                               ORDER BY id DESC LIMIT 30""").fetchall()
+                               ORDER BY id DESC LIMIT 20""").fetchall()
     except: rows=[]
-
     if not rows:
         lines.append("  [dim]Henüz kapanmış pozisyon yok.[/dim]")
     else:
-        # Başlık satırı
         lines.append(
-            f"  [bold dim]{'SAAT':<7} {'SEMBOL':<10} {'GR':<4} {'YÖN':<6} "
-            f"{'GİRİŞ':>10} {'STOP':>10} {'TP':>10} "
-            f"{'ÇIKIŞ':>10} {'DURUM':<7} {'GERÇEK R:R':>10} {'HEDEF R:R':>9}[/bold dim]")
-        lines.append("  [dim]" + "─"*105 + "[/dim]")
+            f"  [bold dim]{'SAAT':<6} {'SEMBOL':<10} {'YÖN':<6} "
+            f"{'GİRİŞ':>11} {'ÇIKIŞ':>11} "
+            f"{'DURUM':<8} {'GERÇEK R:R':>10} {'HEDEF':>8}[/bold dim]")
+        lines.append("  [dim]" + "─"*82 + "[/dim]")
         for r in rows:
-            ts=str(r["created"])[-8:-3] if r["created"] else "—"
+            ts=str(r["created"])[11:16] if r["created"] else "—"
             st2=r["status"]
             sc={"TP":"bold bright_green","SL":"bold bright_red","EXPIRED":"dim"}.get(st2,"white")
             arr=r["act_rr"]
             arr_s=(f"[bright_green]+{arr:.2f}R[/bright_green]" if arr and arr>0
                    else f"[bright_red]{arr:.2f}R[/bright_red]" if arr and arr<0 else "[dim]—[/dim]")
-            dir_s="[bright_green]▲ LONG[/bright_green]" if r["direction"]=="LONG" else "[bright_red]▼ SHORT[/bright_red]"
+            st_emoji={"TP":"🎯","SL":"🛑","EXPIRED":"⏰"}.get(st2,"?")
             lines.append(
-                f"  [dim]{ts:<7}[/dim] [bold white]{r['sym']:<10}[/bold white] {qc(r['quality']):<4} "
-                f"{dir_s:<6} "
-                f"[dim]{fp(r['entry']):>10}[/dim] "
-                f"[red]{fp(r['sl']):>10}[/red] "
-                f"[green]{fp(r['tp']):>10}[/green] "
-                f"[dim]{fp(r['out_price']):>10}[/dim] "
-                f"[{sc}]{st2:<7}[/{sc}] "
-                f"{arr_s:>10}  "
-                f"[dim]1:{r['rr_t']:.2f}[/dim]")
+                f"  [dim]{ts:<6}[/dim] [bold white]{r['sym']:<10}[/bold white] "
+                f"{'▲' if r['direction']=='LONG' else '▼'} "
+                f"[dim]{fp(r['entry']):>11}[/dim] "
+                f"[dim]{fp(r['out_price']):>11}[/dim]  "
+                f"{st_emoji}[{sc}]{st2:<6}[/{sc}]  "
+                f"{arr_s:>10}  [dim]1:{r['rr_t']:.1f}[/dim]")
 
     return Panel("\n".join(lines),
                  title="[bold bright_cyan]● PERFORMANS & ADAPTİF ÖĞRENME[/bold bright_cyan]",
                  border_style="bright_cyan",box=box.ROUNDED,
-                 subtitle=f"[dim]{DB_PATH}[/dim]")
+                 subtitle=f"[dim]{DB_PATH}  ·  Son güncelleme: {datetime.now().strftime('%H:%M:%S')}[/dim]")
 
 def panel_news():
     with lock: arts=list(analyzed_news) or list(news_cache)
@@ -2714,7 +2781,31 @@ def panel_quant():
         c="bright_green" if v>=good else "bright_red" if v<=bad else "yellow"
         return f"[{c}]{v}[/{c}]"
 
-    lines=["[bold]━━━  TEMEL ORANLAR  ━━━[/bold]",""]
+    # ── Equity curve (ASCII sparkline) ──
+    equity_curve=st.get("equity_curve",[])
+    lines=[]
+    if len(equity_curve)>=3:
+        mn=min(equity_curve); mx=max(equity_curve); rng=mx-mn or 1
+        h=4; w=min(len(equity_curve),60)
+        step=max(1,len(equity_curve)//w)
+        sampled=equity_curve[::step][-w:]
+        bars=["▁","▂","▃","▄","▅","▆","▇","█"]
+        spark=""
+        for v in sampled:
+            idx=int((v-mn)/rng*(len(bars)-1))
+            c2="bright_green" if v>=equity_curve[0] else "bright_red"
+            spark+=f"[{c2}]{bars[idx]}[/{c2}]"
+        cur_bal=equity_curve[-1]; start_bal=equity_curve[0]
+        pct_chg=(cur_bal-start_bal)/start_bal*100 if start_bal else 0
+        pct_col="bright_green" if pct_chg>=0 else "bright_red"
+        lines.append(f"[bold]━━━  EQUİTY EĞRİSİ  ━━━[/bold]  "
+                     f"[{pct_col}]{pct_chg:+.2f}%[/{pct_col}]  "
+                     f"[dim]£{start_bal:.2f} → [/dim][bright_white]£{cur_bal:.2f}[/bright_white]")
+        lines.append(f"  {spark}")
+        lines.append("")
+
+    lines.append("[bold]━━━  TEMEL ORANLAR  ━━━[/bold]")
+    lines.append("")
     lines.append(f"  Sharpe Oranı    : {fc(sharpe,1.5,0.5)}  [dim](>1.5 mükemmel · >1.0 iyi)[/dim]")
     lines.append(f"  Sortino Oranı   : {fc(sortino,2.0,0.8)}  [dim](aşağı risk odaklı Sharpe)[/dim]")
     lines.append(f"  Calmar Oranı    : {fc(calmar,1.0,0.3)}  [dim](return/max drawdown)[/dim]")
@@ -2805,11 +2896,11 @@ def panel_quant():
         lines.append("")
         lines.append(f"  [bold dim]{'SEMBOL':<12} {'W/T':>6} {'WIN%':>6} {'AVG R:R':>8}[/bold dim]")
         lines.append("  " + "─"*36)
-        for sym,d in sorted(sym_perf.items(),key=lambda x:-(x[1]["w"]/x[1]["t"] if x[1]["t"] else 0)):
+        for sym,d in sorted(sym_perf.items(),key=lambda x:-x[1].get("wr",0)):
             t=d["t"]; w=d["w"]
             if t<2: continue
-            swr=round(w/t*100,1)
-            avg_r=round(sum(d["rr"])/len(d["rr"]),2) if d["rr"] else 0
+            swr=d.get("wr",round(w/t*100,1) if t else 0)
+            avg_r=d.get("avg_rr",round(sum(d["rr"])/len(d["rr"]),2) if d["rr"] else 0)
             sc="bright_green" if swr>=60 else "bright_red" if swr<40 else "yellow"
             rc="bright_green" if avg_r>0 else "bright_red"
             lines.append(f"  [bold white]{sym:<12}[/bold white] [{sc}]{w}/{t}[/{sc}] [{sc}]{swr:>5.1f}%[/{sc}] [{rc}]{avg_r:>+7.2f}R[/{rc}]")
