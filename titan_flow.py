@@ -2765,7 +2765,7 @@ def key_listener():
             if msvcrt.kbhit():
                 ch=msvcrt.getch()
                 _last_keypress=time.time()
-                if ch in (b'1',b'2',b'3',b'4',b'5',b'6',b'7',b'8'):
+                if ch in (b'1',b'2',b'3',b'4',b'5',b'6',b'7',b'8',b'9'):
                     current_page=int(ch.decode())
             time.sleep(0.05)
     except: pass
