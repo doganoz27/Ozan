@@ -95,7 +95,7 @@ CURR_EXP_MAP = {
 # Correlation clusters (pairs that move together, treat as 1 risk unit)
 CORR_CLUSTERS = [
     {"label":"USD Strength",  "syms":["EUR/USD","GBP/USD","AUD/USD","NZD/USD","XAU/USD"]},
-    {"label":"Risk-On",       "syms":["BTCUSDT","ETHUSDT","SPY","QQQ","AUD/USD"]},
+    {"label":"Risk-On",       "syms":["SPY","QQQ","AUD/USD","NZD/USD"]},
     {"label":"Oil-CAD",       "syms":["WTI","BRENT","USD/CAD"]},
     {"label":"Safe Haven",    "syms":["XAU/USD","USD/CHF","USD/JPY"]},
     {"label":"EUR Complex",   "syms":["EUR/USD","EUR/GBP","EUR/JPY","EUR/CHF"]},
@@ -116,24 +116,15 @@ YF_SYMBOLS = {
     "WTI":"CL=F", "BRENT":"BZ=F",
 }
 
-# Finnhub WebSocket (crypto only — free plan)
-WS_SYMBOLS = [
-    "BINANCE:BTCUSDT","BINANCE:ETHUSDT","BINANCE:SOLUSDT",
-    "BINANCE:BNBUSDT","BINANCE:XRPUSDT",
-]
-
 # Finnhub REST equities
 EQ_SYMBOLS = ["NVDA","AAPL","SPY","QQQ","MSFT","TSLA"]
 
-ALL_SYMBOLS = list(YF_SYMBOLS.keys()) + \
-              [s.replace("BINANCE:","") for s in WS_SYMBOLS] + \
-              EQ_SYMBOLS
+ALL_SYMBOLS = list(YF_SYMBOLS.keys()) + EQ_SYMBOLS
 
 DISPLAY_GROUPS = [
     ("FOREX MAJORS",  ["EUR/USD","GBP/USD","USD/JPY","USD/CHF","AUD/USD","USD/CAD","NZD/USD"]),
     ("FOREX CROSSES", ["EUR/GBP","EUR/JPY","GBP/JPY","EUR/CHF","AUD/JPY","GBP/CHF"]),
     ("METALS & OIL",  ["XAU/USD","XAG/USD","WTI","BRENT"]),
-    ("CRYPTO",        ["BTCUSDT","ETHUSDT","SOLUSDT","BNBUSDT","XRPUSDT"]),
     ("EQUITIES",      EQ_SYMBOLS),
 ]
 
@@ -149,7 +140,6 @@ COT_MAP = {
     "XAG/USD":"SILVER - COMMODITY EXCHANGE INC.",
     "WTI":    "CRUDE OIL, LIGHT SWEET - NEW YORK MERCANTILE EXCHANGE",
     "BRENT":  "BRENT LAST DAY FINANCIAL - ICE FUTURES EUROPE",
-    "BTCUSDT":"BITCOIN - CHICAGO MERCANTILE EXCHANGE",
     "SPY":    "S&P 500 STOCK INDEX - CHICAGO MERCANTILE EXCHANGE",
 }
 
@@ -169,11 +159,6 @@ NEWS_KW = {
     "XAG/USD":["silver","xag"],
     "WTI":    ["wti","crude","oil","opec","barrel"],
     "BRENT":  ["brent","crude","opec","oil"],
-    "BTCUSDT":["bitcoin","btc","crypto"],
-    "ETHUSDT":["ethereum","eth"],
-    "SOLUSDT":["solana","sol"],
-    "BNBUSDT":["binance","bnb"],
-    "XRPUSDT":["xrp","ripple"],
     "NVDA":   ["nvidia","nvda","gpu","ai chip"],
     "AAPL":   ["apple","aapl","iphone"],
     "SPY":    ["s&p 500","spx","equity market","fed"],
@@ -351,7 +336,13 @@ def tg_setup_alert(s):
         f"Portfolio Heat: {s.get('portfolio_heat',0):.1f}%"
         f"{sm_line}{trap_line}\n\n"
         f"✅ <b>TITAN PRIME ELITE — EXECUTE</b>")
-    threading.Thread(target=send_telegram,args=(msg,),daemon=True).start()
+    def _send():
+        try:
+            requests.post(f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage",
+                json={"chat_id":TELEGRAM_CHAT_ID,"text":msg,"parse_mode":"HTML",
+                      "disable_web_page_preview":True},timeout=8)
+        except: pass
+    threading.Thread(target=_send,daemon=True).start()
 
 def tg_outcome_alert(sym, direction, status, entry, out_price, act_rr):
     """Send TP / SL / Expired outcome notification."""
@@ -637,6 +628,7 @@ adap_weights = {}
 # ── Watchlist Lifecycle Manager ──────────────────────────────────────────────
 # Each entry: setup dict + "_wl_status", "_wl_added", "_wl_updated", "_wl_reason"
 _wl_active      = {}   # key → setup dict  (currently watching)
+active_trades   = {}   # key → trade dict  (entered from watchlist)
 _wl_triggered   = []   # list of closed-out setups that hit entry
 _wl_invalidated = []   # list with reason why cancelled
 _wl_expired     = []   # list that ran past max age
@@ -729,6 +721,42 @@ def update_watchlist(new_setups):
     for k,s in new_keys.items():
         if k not in _wl_active:
             _wl_active[k]={**s,"_wl_added":now,"_wl_status":"ACTIVE","_wl_updated":now,"_wl_reason":"Yeni setup tespit edildi"}
+
+def enter_trade(key):
+    """Move a watchlist setup to active trades."""
+    global active_trades
+    s=_wl_active.get(key)
+    if not s: return False
+    now=datetime.now()
+    active_trades[key]={**s,
+        "_trade_entered":now,
+        "_trade_status":"OPEN",
+        "_trade_entry_price":market.get(s["sym"],MD(s["sym"])).price or s["price"],
+    }
+    _wl_active.pop(key,None)
+    # Log to DB and send Telegram
+    try: log_signal(s)
+    except: pass
+    try: tg_setup_alert(s)
+    except: pass
+    return True
+
+def close_trade(key, reason="MANUAL"):
+    """Close an active trade."""
+    t=active_trades.get(key)
+    if not t: return
+    now=datetime.now()
+    sym=t["sym"]
+    cur=market.get(sym)
+    out_p=cur.price if cur else t["_trade_entry_price"]
+    ep=t["_trade_entry_price"]; sl=t["sl"]
+    risk=abs(ep-sl) if abs(ep-sl)>0 else 1
+    if t["direction"]=="LONG": act_rr=round((out_p-ep)/risk,2)
+    else: act_rr=round((ep-out_p)/risk,2)
+    t.update({"_trade_status":reason,"_trade_closed":now,"_trade_out_price":out_p,"_trade_act_rr":act_rr})
+    _wl_triggered.insert(0,{**t,"_wl_status":"TRIGGERED","_wl_reason":f"Kapatıldı: {reason} @ {fp_plain(out_p)}"})
+    active_trades.pop(key,None)
+
 portfolio_state = {
     "heat": 0.0, "open_positions": {},
     "daily_pnl": 0.0, "weekly_pnl": 0.0,
@@ -1668,7 +1696,7 @@ def load_finnhub_equity():
 
 def load_equity_candles():
     """Fetch equity + crypto candles from Finnhub."""
-    all_syms=EQ_SYMBOLS+[s.replace("BINANCE:","") for s in WS_SYMBOLS[:2]]
+    all_syms=EQ_SYMBOLS
     for sym in all_syms:
         fh_sym=f"BINANCE:{sym}" if sym.endswith("USDT") else sym
         try:
@@ -1713,7 +1741,7 @@ def load_news():
             # Telegram alert for high-impact fresh news
             ts=a.get("datetime",0)
             age_min=(time.time()-ts)/60 if ts else 999
-            if a["importance"]>=80 and age_min<=60:
+            if a["importance"]>=70 and age_min<=60:
                 threading.Thread(target=send_telegram,args=(a,),daemon=True).start()
         except: enriched.append(x)
     enriched.sort(key=lambda x:-x.get("importance",0))
@@ -1783,12 +1811,8 @@ def ws_close(ws,c,m): global ws_ok; ws_ok=False
 def ws_err(ws,e):     global ws_ok; ws_ok=False
 
 def ws_loop():
-    while True:
-        try:
-            websocket.WebSocketApp(WS_URL,on_message=ws_msg,on_open=ws_open,
-                on_close=ws_close,on_error=ws_err).run_forever(ping_interval=20)
-        except: pass
-        time.sleep(5)
+    """WebSocket disabled — crypto removed."""
+    pass
 
 def ticks_to_candles(ticks,sec=60):
     if not ticks: return []
@@ -2045,8 +2069,8 @@ def dc(d):
     return "[bright_green]▲ LONG[/bright_green]" if d=="LONG" else "[bright_red]▼ SHORT[/bright_red]"
 
 def oc(s):
-    c={"TP3":"bold bright_green","TP2":"bright_green","TP1":"green",
-       "SL":"bold bright_red","OPEN":"bright_yellow","EXPIRED":"dim"}.get(s,"white")
+    c={"TP":"bold bright_green","SL":"bold bright_red",
+       "OPEN":"bright_yellow","EXPIRED":"dim","TRIGGERED":"bright_cyan"}.get(s,"white")
     return f"[{c}]{s}[/{c}]"
 
 def bias_c(b):
@@ -2213,46 +2237,54 @@ def panel_market():
     return Panel(t,border_style="bright_blue",box=box.ROUNDED)
 
 def panel_setups():
-    ss=list(setups)
+    ss=[s for s in list(setups) if s.get("status")=="APPROVED"]
+    act=len(active_trades)
+    wl=len(_wl_active)
     if not ss:
-        return Panel(Align.center(
-            "[bold bright_yellow]KURUMSAL SETUP TARANIYOR...[/bold bright_yellow]\n"
-            "[dim]Min R:R 1:2.0  ·  A+ / A / B+  ·  TITAN PRIME ELITE — BALANCED MODE[/dim]"),
-            title="[bold bright_yellow]● AKTİF SETUPLАР[/bold bright_yellow]",
+        return Panel(
+            Align.center(
+                f"[bold bright_yellow]TITAN PRIME ELITE — TARAMA DEVAM EDİYOR[/bold bright_yellow]\n"
+                f"[dim]Aktif İşlem: {act}  ·  İzleme: {wl}  ·  Her 30sn güncellenir[/dim]"),
+            title="[bold bright_yellow]● ONAYLANAN SETUPLАР[/bold bright_yellow]",
             border_style="bright_yellow",box=box.HEAVY)
-    t=Table(title="[bold bright_yellow]● AKTİF SETUPLАР — KURUMSAL KALİTE FİLTRESİ[/bold bright_yellow]",
-            box=box.SIMPLE_HEAVY,border_style="bright_yellow",
-            header_style="bold bright_yellow",show_lines=True,width=238)
-    t.add_column("GRADE",  width=7,  justify="center")
-    t.add_column("STATUS", width=12, justify="center")
-    t.add_column("SYMBOL", width=12, style="bold white")
-    t.add_column("DIR",    width=9,  justify="center")
-    t.add_column("SKOR",   width=9,  justify="center")
-    t.add_column("GÜVEN",  width=8,  justify="center")
-    t.add_column("FİYAT",  width=15, justify="right")
-    t.add_column("GİRİŞ ZONU",width=26,justify="right")
-    t.add_column("STOP",   width=15, justify="right",style="bright_red")
-    t.add_column("TP",     width=15, justify="right",style="bright_green")
-    t.add_column("R:R",    width=8,  justify="center")
-    t.add_column("HOLD",   width=8,  justify="center",style="dim")
-    t.add_column("SAAT",   width=8)
-    for s in ss:
-        rv=s.get("rsi"); rc="bright_green" if rv and rv<40 else "bright_red" if rv and rv>65 else "white"
-        sc=s["score"]; sk_c="bold bright_yellow" if sc>=85 else "bold green" if sc>=75 else "cyan" if sc>=65 else "dim"
-        st2=s.get("status","?")
-        st_c="bold bright_green" if st2=="APPROVED" else "yellow" if st2=="WATCHLIST" else "bright_red"
-        hold=s.get("hold_h",0)
-        hold_s=f"{hold:.0f}h" if hold else "—"
+    t=Table(
+        title=f"[bold bright_yellow]● ONAYLANAN SETUPLАР  —  {len(ss)} fırsat  ·  Aktif: {act}  ·  İzleme: {wl}[/bold bright_yellow]",
+        box=box.SIMPLE_HEAVY,border_style="bright_yellow",
+        header_style="bold bright_yellow",show_lines=True,width=238)
+    t.add_column("GR",    width=5,  justify="center")
+    t.add_column("SEMBOL",width=11, style="bold white")
+    t.add_column("YÖN",   width=9,  justify="center")
+    t.add_column("SKOR",  width=8,  justify="center")
+    t.add_column("R:R",   width=7,  justify="center")
+    t.add_column("FİYAT", width=13, justify="right")
+    t.add_column("GİRİŞ ZONU",width=24,justify="right")
+    t.add_column("STOP",  width=13, justify="right",style="bright_red")
+    t.add_column("HEDEF", width=13, justify="right",style="bright_green")
+    t.add_column("REJİM", width=10, justify="center")
+    t.add_column("KONTRARYAN",width=12,justify="center")
+    t.add_column("HOLD",  width=7,  justify="center",style="dim")
+    t.add_column("SAAT",  width=7)
+    for s in ss[:14]:
+        sc=s["score"]
+        sk_c="bold bright_yellow" if sc>=82 else "bold green" if sc>=70 else "cyan"
+        regime=s.get("regime","Nötr")
+        rc="bright_green" if regime=="Risk-On" else "bright_red" if regime=="Risk-Off" else "yellow"
+        c_score=s.get("contrarian_score",0)
+        c_col="bright_yellow" if c_score>=70 else "yellow" if c_score>=40 else "dim green"
+        hold=s.get("hold_h",0); hold_s=f"{hold:.0f}h" if hold else "—"
+        in_wl="[dim cyan]◎[/dim cyan] " if _wl_key(s) in _wl_active else ""
+        in_at="[bright_green]▶[/bright_green] " if _wl_key(s) in active_trades else ""
         t.add_row(
             qc(s["quality"]),
-            f"[{st_c}]{st2}[/{st_c}]",
-            s["sym"], dc(s["direction"]),
-            f"[{sk_c}]{sc:.0f}/100[/{sk_c}]",
-            f"{s.get('confidence',sc):.0f}%",
-            f"[bright_white]{fp(s['price'])}[/bright_white]",
-            f"{fp(s['el'])} – {fp(s['eh'])}",
-            fp(s["sl"]),fp(s["tp"]),
+            f"{in_at}{in_wl}[bold white]{s['sym']}[/bold white]",
+            dc(s["direction"]),
+            f"[{sk_c}]{sc:.0f}[/{sk_c}]",
             f"[bold]1:{s['rr']}[/bold]",
+            f"[bright_white]{fp(s['price'])}[/bright_white]",
+            f"[dim]{fp(s['el'])} – {fp(s['eh'])}[/dim]",
+            fp(s["sl"]),fp(s["tp"]),
+            f"[{rc}]{regime}[/{rc}]",
+            f"[{c_col}]{c_score}/100[/{c_col}]",
             hold_s, s["time"])
     return Panel(t,border_style="bright_yellow",box=box.HEAVY)
 
