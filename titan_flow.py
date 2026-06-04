@@ -312,6 +312,9 @@ def tg_setup_alert(s):
     key=f"{s['sym']}_{s['direction']}_{round(s['score'])}"
     if key in _tg_setup_sent: return
     _tg_setup_sent.add(key)
+    # Assign signal ID for tracking
+    sig_id=s.get("db_id") or abs(hash(key))%100000
+    s["_tg_signal_id"]=sig_id
     sz=s.get("sizing",{}); rr=s["rr"]; q=s["quality"]
     sc=s["score"]; regime=s.get("regime","Nötr")
     direction=s["direction"]; sym=s["sym"]
@@ -401,7 +404,8 @@ def tg_setup_alert(s):
         f"   {c_bar}  {c_label}\n"
         f"{cv_block}{sm_block}{trap_block}{sz_block}\n"
         f"━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-        f"🕐 {now_str}  |  <i>Titan Prime Elite</i>\n"
+        f"🕐 {now_str}\n"
+        f"🔖 Sinyal ID: <code>#{s.get('_tg_signal_id',0):05d}</code>\n"
         f"⚡ <b>BU SİNYAL ÖZEL VE KİŞİSELDİR</b> ⚡")
     def _send():
         try:
@@ -411,9 +415,13 @@ def tg_setup_alert(s):
         except: pass
     threading.Thread(target=_send,daemon=True).start()
 
-def tg_outcome_alert(sym, direction, status, entry, out_price, act_rr):
+def tg_outcome_alert(sym, direction, status, entry, out_price, act_rr, sig_id=None):
     """VIP-grade trade outcome notification."""
     now_str=datetime.now().strftime("%d.%m.%Y %H:%M")
+    # Running stats for context
+    with lock: sc=dict(stats_cache)
+    total=sc.get("total",0)+1; wins=sc.get("wins",0)+(1 if status=="TP" else 0)
+    run_wr=round(wins/total*100,1) if total else 0
     if status=="TP":
         header="╔══════════════════════════╗\n║  🎯  TAKE PROFIT HIT  🎯  ║\n╚══════════════════════════╝"
         result_line=f"✅ <b>BAŞARILI — +{act_rr:.2f}R KÂR</b>" if act_rr else "✅ <b>TAKE PROFIT HIT</b>"
@@ -449,7 +457,11 @@ def tg_outcome_alert(sym, direction, status, entry, out_price, act_rr):
         f"{pnl_emoji} Sonuç    : <b>{act_rr:+.2f}R</b>  {rr_bar}\n"
         f"━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
         f"{result_line}\n\n"
-        f"🕐 {now_str}  |  <i>Titan Prime Elite</i>")
+        f"━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"📊 Sistem Win Rate: <b>{run_wr:.1f}%</b>  ({wins}TP/{total-wins}SL / {total} işlem)\n"
+        f"🕐 {now_str}"
+        +(f"\n🔖 Sinyal ID: <code>#{sig_id:05d}</code>" if sig_id else "")+
+        f"\n<i>Titan Prime Elite — sistem bu sonuçtan öğreniyor</i>")
     def _send():
         try:
             requests.post(f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage",
@@ -505,6 +517,116 @@ def _tg_best_picks(results):
                 json={"chat_id":TELEGRAM_CHAT_ID,"text":msg,"parse_mode":"HTML"},timeout=8)
         except: pass
     threading.Thread(target=_send,daemon=True).start()
+
+# ── Performance report (daily/weekly) ────────────────────────────────────────
+_last_daily_report = 0
+_last_weekly_report = 0
+
+def tg_performance_report(period="daily"):
+    """Send daily or weekly performance card to Telegram."""
+    if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID: return
+    with lock: sc=dict(stats_cache)
+    if not sc.get("total"): return
+    total=sc.get("total",0); wins=sc.get("wins",0); losses=sc.get("losses",0)
+    wr=sc.get("wr",0); avg_rr=sc.get("avg_rr",0); pf=sc.get("pf",0)
+    sharpe=sc.get("sharpe"); sortino=sc.get("sortino")
+    streak=sc.get("streak",0); streak_type=sc.get("streak_type","")
+    best_syms=sc.get("best_syms",[])
+    by_q=sc.get("by_q",{})
+    kelly=sc.get("kelly",0); mdd=sc.get("mdd",0)
+    with lock: bal=portfolio_state.get("shadow_balance",ACCOUNT["balance"])
+    pnl=round(bal-ACCOUNT["balance"],2); pnl_pct=round(pnl/ACCOUNT["balance"]*100,1)
+    now_str=datetime.now().strftime("%d.%m.%Y %H:%M")
+
+    # Win rate visual bar
+    wr_filled=int(wr/10); wr_bar="█"*wr_filled+"░"*(10-wr_filled)
+    wr_emoji="🟢" if wr>=60 else ("🟡" if wr>=50 else "🔴")
+
+    # Streak line
+    streak_line=""
+    if streak>=2:
+        streak_line=f"\n🔥 <b>{'Kazanma' if streak_type=='TP' else 'Kayıp'} Serisi: {streak} art arda {'✅' if streak_type=='TP' else '❌'}</b>"
+
+    # Quality breakdown
+    q_lines=""
+    for q,d in by_q.items():
+        if d["t"]>0:
+            q_emoji="🔥" if q=="A+" else ("✅" if q=="A" else "🔔")
+            q_lines+=f"  {q_emoji} {q}: {d['wr']:.0f}% WR  ({d['w']}W/{d['t']-d['w']}L / {d['t']} işlem)\n"
+
+    # Best symbols
+    best_lines=""
+    if best_syms:
+        best_lines="\n🏆 <b>EN BAŞARILI SEMBOLLER</b>\n"
+        medals=["🥇","🥈","🥉","4️⃣","5️⃣"]
+        for i,(sym,d) in enumerate(best_syms[:5]):
+            best_lines+=f"  {medals[i]} {sym}: {d['wr']:.0f}% WR  avg {d['avg_rr']:+.2f}R  ({d['t']} işlem)\n"
+
+    # Learning status
+    adap=dict(adap_weights)
+    top_feat=sorted(adap.items(),key=lambda x:-x[1])[:3]
+    bot_feat=sorted(adap.items(),key=lambda x:x[1])[:2]
+    learn_lines="  En güçlü: "+", ".join(f"{f}={w:.2f}x" for f,w in top_feat)
+    learn_lines+="\n  En zayıf: "+", ".join(f"{f}={w:.2f}x" for f,w in bot_feat)
+
+    period_hdr="📅 GÜNLÜK PERFORMANS RAPORU" if period=="daily" else "📆 HAFTALIK PERFORMANS RAPORU"
+
+    msg=(
+        f"╔══════════════════════════╗\n"
+        f"║  🏆 <b>TITAN PRIME ELITE</b>  🏆  ║\n"
+        f"╚══════════════════════════╝\n\n"
+        f"<b>{period_hdr}</b>\n"
+        f"🕐 {now_str}\n\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"📊 <b>GENEL PERFORMANS</b>\n"
+        f"  Toplam İşlem : <b>{total}</b>  ({wins} TP / {losses} SL)\n"
+        f"  {wr_emoji} Win Rate    : <b>{wr:.1f}%</b>  {wr_bar}\n"
+        f"  Ort. R:R     : <b>{avg_rr:+.2f}R</b>\n"
+        f"  Kâr Faktörü  : <b>{pf:.2f}</b>\n"
+        f"  Max DD       : <b>{mdd:.1f}%</b>\n"
+        f"  Kelly        : <b>{kelly:.1f}%</b>\n"
+        f"{streak_line}\n\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"💰 <b>HESAP DURUMU</b>\n"
+        f"  Başlangıç : £{ACCOUNT['balance']:.2f}\n"
+        f"  Şu an     : <b>£{bal:.2f}</b>\n"
+        f"  Net P&L   : <b>{'+'if pnl>=0 else ''}{pnl:.2f} ({pnl_pct:+.1f}%)</b>\n\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"🎖 <b>KALİTE DAĞILIMI</b>\n{q_lines}"
+        f"{best_lines}\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"🧠 <b>YAPAY ZEKA ÖĞRENMESİ</b>\n{learn_lines}\n\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"📈 Sharpe: {sharpe:.2f}  |  Sortino: {sortino:.2f}\n"
+        f"⚡ <b>TITAN PRIME ELITE</b>  —  <i>Sistem sürekli öğreniyor</i>"
+    )
+    def _send():
+        try:
+            requests.post(f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage",
+                json={"chat_id":TELEGRAM_CHAT_ID,"text":msg,"parse_mode":"HTML",
+                      "disable_web_page_preview":True},timeout=10)
+        except: pass
+    threading.Thread(target=_send,daemon=True).start()
+
+def performance_report_loop():
+    """Send daily report at 22:00 and weekly report on Sunday 22:00."""
+    global _last_daily_report, _last_weekly_report
+    while True:
+        try:
+            now=datetime.now()
+            today_key=now.strftime("%Y-%m-%d")
+            # Daily report at 22:00
+            if now.hour==22 and today_key!=str(_last_daily_report):
+                tg_performance_report("daily")
+                _last_daily_report=today_key
+            # Weekly report on Sunday
+            if now.weekday()==6 and now.hour==22:
+                week_key=now.strftime("%Y-W%W")
+                if week_key!=str(_last_weekly_report):
+                    tg_performance_report("weekly")
+                    _last_weekly_report=week_key
+        except: pass
+        time.sleep(60)
 
 def _importance(text):
     high_score = 0
@@ -2210,7 +2332,7 @@ def _check_open():
                 c.execute("UPDATE signals SET status=?,out_price=?,out_at=?,act_rr=? WHERE id=?",
                           (ns,cur,now,act_rr_val,r["id"]))
                 # Categorized Telegram outcome
-                try: tg_outcome_alert(sym,r["direction"],ns,ep,cur,act_rr_val)
+                try: tg_outcome_alert(sym,r["direction"],ns,ep,cur,act_rr_val,sig_id=r["id"])
                 except: pass
                 # Sync active_trades dict — remove closed entries
                 with lock:
@@ -3391,14 +3513,15 @@ def main():
         "[bold bright_yellow]TITAN FLOW[/bold bright_yellow] — Başlatılıyor...\n"
         "[dim]WebSocket (crypto) · yfinance (forex/metals/oil) · Finnhub (hisseler) · COT · Haberler · Journal[/dim]",
         border_style="bright_yellow"))
-    threading.Thread(target=ws_loop,        daemon=True).start()
-    threading.Thread(target=background_loop, daemon=True).start()
-    threading.Thread(target=cot_loop,        daemon=True).start()
-    threading.Thread(target=monitor_loop,    daemon=True).start()
-    threading.Thread(target=stats_loop,      daemon=True).start()
-    threading.Thread(target=key_listener,     daemon=True).start()
-    threading.Thread(target=auto_scroll_loop, daemon=True).start()
-    threading.Thread(target=portfolio_loop,   daemon=True).start()
+    threading.Thread(target=ws_loop,               daemon=True).start()
+    threading.Thread(target=background_loop,        daemon=True).start()
+    threading.Thread(target=cot_loop,               daemon=True).start()
+    threading.Thread(target=monitor_loop,           daemon=True).start()
+    threading.Thread(target=stats_loop,             daemon=True).start()
+    threading.Thread(target=key_listener,            daemon=True).start()
+    threading.Thread(target=auto_scroll_loop,        daemon=True).start()
+    threading.Thread(target=portfolio_loop,          daemon=True).start()
+    threading.Thread(target=performance_report_loop, daemon=True).start()
     # Açılışta mevcut sinyalleri hemen kontrol et
     try: _check_open()
     except: pass
