@@ -323,6 +323,9 @@ def tg_setup_alert(s):
     trap_line=("\n\n⚠️ <b>Tuzak Uyarısı:</b>\n"+"\n".join(f"  {t}" for t in traps)) if traps else ""
     sm=s.get("sm_notes",[])
     sm_line=("\n\n🧠 <b>Smart Money:</b>\n"+"\n".join(f"  • {n}" for n in sm[:2])) if sm else ""
+    duration=s.get("duration","Intraday")
+    cv=s.get("consensus_view",""); smv=s.get("sm_view","")
+    cv_line=f"\n\n🔍 <b>Görüş Karşılaştırması:</b>\n  {cv}\n  {smv}" if cv else ""
     msg=(
         f"🚨 <b>TRADE ALERT</b>  {grade_emoji}\n\n"
         f"Pair:      <b>{s['sym']}</b>\n"
@@ -334,12 +337,12 @@ def tg_setup_alert(s):
         f"Take Profit: <code>{fp(s['tp'])}</code>\n\n"
         f"Risk Reward: <b>1:{rr}</b>\n"
         f"Confidence:  {s.get('confidence',s['score']):.0f}/100\n"
-        f"Hold Time:   ~{s.get('hold_h',0):.1f} saat"
+        f"Hold Time:   ~{s.get('hold_h',0):.1f} saat  [{duration}]"
         f"{margin_line}\n\n"
         f"Contrarian Skoru: {c_score}/100 — {c_label}\n"
         f"News Risk: {s.get('news_risk','—')}\n"
         f"Portfolio Heat: {s.get('portfolio_heat',0):.1f}%"
-        f"{sm_line}{trap_line}\n\n"
+        f"{cv_line}{sm_line}{trap_line}\n\n"
         f"✅ <b>TITAN PRIME ELITE — EXECUTE</b>")
     def _send():
         try:
@@ -799,10 +802,10 @@ def enter_trade(key):
     return True
 
 def close_trade(key, reason="MANUAL"):
-    """Close an active trade."""
+    """Close an active trade and sync DB."""
     t=active_trades.get(key)
     if not t: return
-    now=datetime.now()
+    now=datetime.now(); now_iso=now.isoformat(timespec="seconds")
     sym=t["sym"]
     cur=market.get(sym)
     out_p=cur.price if cur else t["_trade_entry_price"]
@@ -810,9 +813,22 @@ def close_trade(key, reason="MANUAL"):
     risk=abs(ep-sl) if abs(ep-sl)>0 else 1
     if t["direction"]=="LONG": act_rr=round((out_p-ep)/risk,2)
     else: act_rr=round((ep-out_p)/risk,2)
+    db_status="TP" if act_rr>=t.get("rr",1.8) else "SL" if act_rr<=-0.8 else reason
     t.update({"_trade_status":reason,"_trade_closed":now,"_trade_out_price":out_p,"_trade_act_rr":act_rr})
-    _wl_triggered.insert(0,{**t,"_wl_status":"TRIGGERED","_wl_reason":f"Kapatıldı: {reason} @ {fp_plain(out_p)}"})
+    _wl_triggered.insert(0,{**t,"_wl_status":"TRIGGERED",
+        "_wl_reason":f"Kapatıldı: {reason} @ {fp_plain(out_p)} ({act_rr:+.2f}R)"})
+    _wl_triggered[:] = _wl_triggered[:_WL_MAX_HISTORY]
     active_trades.pop(key,None)
+    # Update DB signal
+    try:
+        with db() as c:
+            c.execute("UPDATE signals SET status=?,out_price=?,out_at=?,act_rr=? WHERE sym=? AND status='OPEN' AND entry=?",
+                      (db_status,out_p,now_iso,act_rr,sym,ep))
+            c.commit()
+    except: pass
+    # Telegram outcome
+    try: tg_outcome_alert(sym,t["direction"],db_status,ep,out_p,act_rr)
+    except: pass
 
 portfolio_state = {
     "heat": 0.0, "open_positions": {},
@@ -1605,11 +1621,23 @@ def score_setup(sym, candles, price, news_items=None):
     # Institutional risk score
     inst_rs=portfolio_state.get("inst_risk_score",100)
 
+    duration=("Scalp" if hold_h<=2 else "Intraday" if hold_h<=12 else "Swing")
+    # Consensus vs Smart Money view contrast
+    ema_bull=fl.get("f_ema",False) and direction=="LONG"
+    ema_bear=fl.get("f_ema",False) and direction=="SHORT"
+    consensus_bias="Yükseliş" if ema_bull else ("Düşüş" if ema_bear else "Nötr")
+    sm_conf=any([fl.get("f_ob"),fl.get("f_fvg"),fl.get("f_sweep")])
+    sm_bias=("Yükseliş" if direction=="LONG" else "Düşüş") if sm_conf else "Belirsiz"
+    contrast_txt="✅ Uyumlu" if consensus_bias==sm_bias else "⚡ Uyumsuz — dikkat"
+    consensus_view=f"Perakende görüş: {consensus_bias} (EMA+trend takipçileri)"
+    sm_view=f"Smart Money: {sm_bias} (OB/sweep/FVG) — {contrast_txt}"
+
     return {
         "sym":sym,"quality":quality,"direction":direction,"status":status,
         "price":price,"el":el,"eh":eh,"sl":sl,
         "tp":tp,"rr":rr,
-        "score":score_100,"confidence":confidence,"hold_h":hold_h,
+        "score":score_100,"confidence":confidence,"hold_h":hold_h,"duration":duration,
+        "consensus_view":consensus_view,"sm_view":sm_view,
         "reasons":reasons,"neg_factors":neg_factors,
         "flags":fl,"rsi":rv,"atr":av,"cot":cot,
         "news_score":news_score,"news_imp":n_imp,"news_risk":news_risk_label,
@@ -1932,6 +1960,16 @@ def monitor_loop():
 
 def _check_open():
     now=datetime.utcnow().isoformat(timespec="seconds")
+    # Auto-expire old active_trades entries (>7 days open)
+    with lock:
+        stale=[k for k,t in active_trades.items()
+               if (datetime.now()-t.get("_trade_entered",datetime.now())).days>=7]
+        for k in stale:
+            t=active_trades.pop(k,None)
+            if t:
+                _wl_triggered.insert(0,{**t,"_wl_status":"TRIGGERED",
+                    "_wl_reason":"7 gün sonra zaman aşımı — otomatik kapatıldı"})
+                _wl_triggered[:] = _wl_triggered[:_WL_MAX_HISTORY]
     with db() as c:
         rows=c.execute("SELECT * FROM signals WHERE status='OPEN'").fetchall()
         for r in rows:
@@ -1962,6 +2000,16 @@ def _check_open():
                 # Categorized Telegram outcome
                 try: tg_outcome_alert(sym,r["direction"],ns,ep,cur,act_rr_val)
                 except: pass
+                # Sync active_trades dict — remove closed entries
+                with lock:
+                    keys_to_rm=[k for k,t in active_trades.items()
+                                if t.get("sym")==sym and abs((t.get("_trade_entry_price") or 0)-ep)<1e-8]
+                    for k in keys_to_rm:
+                        t2=active_trades.pop(k,None)
+                        if t2:
+                            _wl_triggered.insert(0,{**t2,"_wl_status":"TRIGGERED",
+                                "_wl_reason":f"{ns} @ {fp_plain(cur)} ({act_rr_val:+.2f}R)"})
+                            _wl_triggered[:] = _wl_triggered[:_WL_MAX_HISTORY]
                 # Update shadow trade + balance
                 st_row=c.execute("SELECT * FROM shadow_trades WHERE signal_id=? AND status='OPEN'",
                                  (r["id"],)).fetchone()
@@ -2453,7 +2501,7 @@ def panel_details():
             f"[dim](direnç/destek öncesi)[/dim]\n"
             f"  [bold]Risk/Reward:[/bold] [bold]1:{rr}[/bold]\n"
             f"  [bold]Skor       :[/bold] [bold bright_yellow]{sc:.0f}/100[/bold bright_yellow]\n"
-            f"  [bold]Hold       :[/bold] ~{hold:.1f} saat\n\n"
+            f"  [bold]Hold       :[/bold] ~{hold:.1f} saat  [dim][{s.get('duration','Intraday')}][/dim]\n\n"
         )
         if sz:
             plan+=(
@@ -2472,7 +2520,13 @@ def panel_details():
         if neg_list:
             plan+="\n  [bold dim]━━  RİSKLER  ━━[/bold dim]\n"
             for r in neg_list: plan+=f"  [bright_red]✗[/bright_red] {r}\n"
-        # Smart money
+        # Consensus vs Smart Money view
+        cv=s.get("consensus_view",""); smv=s.get("sm_view","")
+        if cv:
+            plan+="\n  [bold dim]━━  GÖRÜŞ KARŞILAŞTIRMASI  ━━[/bold dim]\n"
+            plan+=f"  [dim]{cv}[/dim]\n"
+            plan+=f"  [bright_cyan]{smv}[/bright_cyan]\n"
+        # Smart money notes
         sm=s.get("sm_notes",[])[:2]; traps=s.get("trap_warnings",[])[:1]
         if sm:
             plan+="\n  [bold dim]━━  SMART MONEY  ━━[/bold dim]\n"
