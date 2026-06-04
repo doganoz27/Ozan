@@ -1238,6 +1238,32 @@ def db_init():
 
 db_init()
 
+def db_cleanup():
+    """
+    Purge stale DB entries at startup:
+    - OPEN signals older than 30 days → mark EXPIRED
+    - OPEN signals older than 7 days → mark EXPIRED
+    - Keep all TP/SL/EXPIRED signals for learning (no delete)
+    - Keep max 500 closed signals (prune oldest beyond that)
+    """
+    try:
+        with db() as c:
+            now_iso=datetime.utcnow().isoformat(timespec="seconds")
+            cutoff_7d=(datetime.utcnow()-__import__('datetime').timedelta(days=7)).isoformat(timespec="seconds")
+            cutoff_30d=(datetime.utcnow()-__import__('datetime').timedelta(days=30)).isoformat(timespec="seconds")
+            # Expire OPEN signals older than 7 days
+            c.execute("UPDATE signals SET status='EXPIRED',out_at=? WHERE status='OPEN' AND created<?",
+                      (now_iso,cutoff_7d))
+            expired_n=c.rowcount
+            # Prune TP/SL/EXPIRED beyond 500 (keep most recent for learning)
+            ids=c.execute("SELECT id FROM signals WHERE status!='OPEN' ORDER BY id DESC LIMIT -1 OFFSET 500").fetchall()
+            if ids:
+                c.execute(f"DELETE FROM signals WHERE id IN ({','.join(str(r['id']) for r in ids)})")
+            c.commit()
+    except: pass
+
+db_cleanup()
+
 # ═══════════════════════════════════════════════════════════════
 # PORTFOLIO ENGINE
 # ═══════════════════════════════════════════════════════════════
@@ -2918,32 +2944,126 @@ def panel_cot():
 def panel_journal():
     try:
         with db() as c:
-            open_n=c.execute("SELECT COUNT(*) FROM signals WHERE status='OPEN'").fetchone()[0]
-            recent=c.execute("SELECT sym,quality,direction,status,act_rr,rr_t,entry,created FROM signals ORDER BY id DESC LIMIT 12").fetchall()
-    except: open_n=0; recent=[]
-    t=Table(title=f"[bold bright_cyan]● TRADE JOURNAL  [dim](Açık: {open_n})[/dim][/bold bright_cyan]",
-            box=box.SIMPLE_HEAVY,border_style="bright_cyan",
-            header_style="bold bright_cyan",show_lines=True)
-    t.add_column("SAAT",   width=9, style="dim")
-    t.add_column("SEMBOL", width=14,style="bold white")
-    t.add_column("GR",     width=6, justify="center")
-    t.add_column("DIR",    width=9, justify="center")
-    t.add_column("GİRİŞ",  width=15,justify="right",style="dim")
-    t.add_column("DURUM",  width=10, justify="center")
-    t.add_column("GERÇEK R:R",width=12,justify="right")
-    t.add_column("HEDEF R:R", width=12,justify="right",style="dim")
-    if not recent:
-        t.add_row("—","—","—","—","—","[dim]Henüz sinyal yok[/dim]","—","—")
+            open_rows =c.execute(
+                "SELECT id,sym,quality,direction,entry,sl,tp,rr_t,score,created FROM signals WHERE status='OPEN' ORDER BY id DESC LIMIT 15"
+            ).fetchall()
+            tp_rows   =c.execute(
+                "SELECT id,sym,quality,direction,entry,out_price,act_rr,rr_t,created,out_at FROM signals WHERE status='TP' ORDER BY id DESC LIMIT 20"
+            ).fetchall()
+            sl_rows   =c.execute(
+                "SELECT id,sym,quality,direction,entry,out_price,act_rr,rr_t,created,out_at FROM signals WHERE status='SL' ORDER BY id DESC LIMIT 20"
+            ).fetchall()
+    except: open_rows=[]; tp_rows=[]; sl_rows=[]
+
+    with lock: at=dict(active_trades)
+    lines=[]
+
+    # ── helper: make a mini table string ────────────────────────
+    def col(text, w, align="left", style=""):
+        s=str(text)[:w]
+        s=s.ljust(w) if align=="left" else s.rjust(w)
+        return f"[{style}]{s}[/{style}]" if style else s
+
+    # ═══════════════════════════════════════════════════
+    # BÖLÜM 1 — AKTİF İŞLEMLER
+    # ═══════════════════════════════════════════════════
+    lines.append(f"[bold bright_green]━━━━━━━━━━━━━━━  ▶ AKTİF İŞLEMLER ({len(at)})  ━━━━━━━━━━━━━━━[/bold bright_green]")
+    lines.append(f"[bold dim]  {'ID':<6} {'SEMBOL':<10} {'YÖN':<7} {'GİRİŞ':>10} {'ŞU AN':>10} {'CANLI R':>8} {'CANLI £':>8} {'SL':>10} {'TP':>10}[/bold dim]")
+    lines.append("  " + "─"*88)
+    if not at:
+        lines.append("  [dim]Henüz aktif işlem yok[/dim]")
     else:
-        for r in recent:
-            arr=r["act_rr"]
-            arr_s=(f"[bright_green]1:{arr:.2f}[/bright_green]" if arr and arr>0
-                   else f"[bright_red]{arr:.2f}[/bright_red]" if arr and arr<0 else "[dim]—[/dim]")
-            ts=str(r["created"])[-8:-3] if r["created"] else "—"
-            t.add_row(ts,r["sym"],qc(r["quality"]),dc(r["direction"]),
-                     fp(r["entry"]),oc(r["status"]),arr_s,
-                     f"1:{r['rr_t']:.2f}" if r["rr_t"] else "—")
-    return Panel(t,border_style="bright_cyan",box=box.ROUNDED)
+        for k,t2 in at.items():
+            sym2=t2.get("sym","?"); ep=t2.get("_trade_entry_price") or t2.get("price",0)
+            sl2=t2.get("sl",0); tp2=t2.get("tp",0); dir2=t2.get("direction","")
+            cur_md=market.get(sym2); cp=cur_md.price if cur_md else ep
+            risk=abs(ep-sl2) if sl2 and ep else 1
+            pnl_pts=(cp-ep if dir2=="LONG" else ep-cp)
+            rr_live=round(pnl_pts/risk,2) if risk else 0
+            sz2=t2.get("sizing",{}); exp_loss=sz2.get("exp_loss",0)
+            pnl_gbp=round(rr_live*exp_loss,2) if exp_loss else 0
+            rc="bright_green" if rr_live>=0 else "bright_red"
+            dc2="[bright_green]LONG[/bright_green]" if dir2=="LONG" else "[bright_red]SHORT[/bright_red]"
+            sig_id=t2.get("db_id",0) or 0
+            lines.append(
+                f"  [dim]#{sig_id:<5}[/dim] [bold white]{sym2:<10}[/bold white] {dc2:<7} "
+                f"[dim]{fp(ep):>10}[/dim] [bright_white]{fp(cp):>10}[/bright_white] "
+                f"[{rc}]{rr_live:>+7.2f}R[/{rc}] [{rc}]{pnl_gbp:>+7.2f}£[/{rc}]  "
+                f"[bright_red]{fp(sl2):>10}[/bright_red] [bright_green]{fp(tp2):>10}[/bright_green]")
+
+    # Also show DB OPEN signals not yet in active_trades
+    db_open=[r for r in open_rows if r["sym"] not in {t2["sym"] for t2 in at.values()}]
+    if db_open:
+        lines.append(f"\n  [dim]DB'deki açık sinyaller (henüz girilmemiş):[/dim]")
+        lines.append(f"  [bold dim]  {'ID':<6} {'SEMBOL':<10} {'YÖN':<7} {'GİRİŞ':>10} {'SL':>10} {'TP':>10} {'SKOR':>6} {'TARİH':<16}[/bold dim]")
+        for r in db_open[:8]:
+            dt=str(r["created"] or "")[:16]
+            dir_s=("[bright_green]LONG[/bright_green]" if r["direction"]=="LONG"
+                   else "[bright_red]SHORT[/bright_red]")
+            lines.append(
+                f"  [dim]#{r['id']:<5}[/dim] [white]{r['sym']:<10}[/white] {dir_s:<7} "
+                f"[dim]{fp(r['entry']):>10}[/dim]  "
+                f"[bright_red]{fp(r['sl']):>10}[/bright_red] [bright_green]{fp(r['tp']):>10}[/bright_green] "
+                f"[yellow]{r['score']:>6}[/yellow] [dim]{dt}[/dim]")
+
+    lines.append("")
+
+    # ═══════════════════════════════════════════════════
+    # BÖLÜM 2 — TAKE PROFIT ✅
+    # ═══════════════════════════════════════════════════
+    lines.append(f"[bold bright_green]━━━━━━━━━━━━━━━  🎯 TAKE PROFIT ({len(tp_rows)})  ━━━━━━━━━━━━━━━[/bold bright_green]")
+    lines.append(f"[bold dim]  {'ID':<6} {'SEMBOL':<10} {'YÖN':<7} {'GİRİŞ':>10} {'ÇIKIŞ':>10} {'GERÇEK R':>9} {'HEDEF R':>8} {'TARİH':<16}[/bold dim]")
+    lines.append("  " + "─"*84)
+    if not tp_rows:
+        lines.append("  [dim]Henüz take profit yok[/dim]")
+    else:
+        for r in tp_rows:
+            arr=r["act_rr"] or 0
+            dt=str(r["out_at"] or r["created"] or "")[:16]
+            dir_s=("[bright_green]LONG[/bright_green]" if r["direction"]=="LONG"
+                   else "[bright_red]SHORT[/bright_red]")
+            lines.append(
+                f"  [dim]#{r['id']:<5}[/dim] [bold white]{r['sym']:<10}[/bold white] {dir_s:<7} "
+                f"[dim]{fp(r['entry']):>10}[/dim] [bright_white]{fp(r['out_price'] or 0):>10}[/bright_white] "
+                f"[bold bright_green]{arr:>+8.2f}R[/bold bright_green]  "
+                f"[dim]{r['rr_t']:>6.2f}R[/dim]  [dim]{dt}[/dim]")
+
+    lines.append("")
+
+    # ═══════════════════════════════════════════════════
+    # BÖLÜM 3 — STOP LOSS ❌
+    # ═══════════════════════════════════════════════════
+    lines.append(f"[bold bright_red]━━━━━━━━━━━━━━━  🛑 STOP LOSS ({len(sl_rows)})  ━━━━━━━━━━━━━━━[/bold bright_red]")
+    lines.append(f"[bold dim]  {'ID':<6} {'SEMBOL':<10} {'YÖN':<7} {'GİRİŞ':>10} {'ÇIKIŞ':>10} {'GERÇEK R':>9} {'HEDEF R':>8} {'TARİH':<16}[/bold dim]")
+    lines.append("  " + "─"*84)
+    if not sl_rows:
+        lines.append("  [dim]Henüz stop loss yok[/dim]")
+    else:
+        for r in sl_rows:
+            arr=r["act_rr"] or 0
+            dt=str(r["out_at"] or r["created"] or "")[:16]
+            dir_s=("[bright_green]LONG[/bright_green]" if r["direction"]=="LONG"
+                   else "[bright_red]SHORT[/bright_red]")
+            lines.append(
+                f"  [dim]#{r['id']:<5}[/dim] [bold white]{r['sym']:<10}[/bold white] {dir_s:<7} "
+                f"[dim]{fp(r['entry']):>10}[/dim] [bright_white]{fp(r['out_price'] or 0):>10}[/bright_white] "
+                f"[bold bright_red]{arr:>+8.2f}R[/bold bright_red]  "
+                f"[dim]{r['rr_t']:>6.2f}R[/dim]  [dim]{dt}[/dim]")
+
+    # ── summary footer ──
+    total_closed=len(tp_rows)+len(sl_rows)
+    wr=round(len(tp_rows)/total_closed*100,1) if total_closed else 0
+    wc="bright_green" if wr>=55 else ("yellow" if wr>=45 else "bright_red")
+    lines.append("")
+    lines.append(
+        f"[bold dim]  Toplam kapanmış: {total_closed}  |  "
+        f"Win Rate: [{wc}]{wr:.1f}%[/{wc}]  |  "
+        f"TP: [bright_green]{len(tp_rows)}[/bright_green]  SL: [bright_red]{len(sl_rows)}[/bright_red]  "
+        f"Aktif: [bright_yellow]{len(at)+len(open_rows)}[/bright_yellow][/bold dim]")
+
+    return Panel("\n".join(lines),
+                 title="[bold bright_cyan]● TRADE JOURNAL  —  Aktif / TP / SL[/bold bright_cyan]",
+                 border_style="bright_cyan",box=box.HEAVY)
 
 def panel_stats():
     with lock: st=dict(stats_cache)
