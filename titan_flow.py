@@ -340,17 +340,21 @@ def tg_setup_alert(s):
     # Score bar (10 blocks)
     filled=int(sc/10); bar="█"*filled+"░"*(10-filled)
 
-    # Sizing block
+    # Sizing block — front and center
     sz_block=""
     if sz:
+        margin=sz.get('margin',0); lev2=sz.get('leverage',1)
+        exp_loss=sz.get('exp_loss',0); exp_profit=sz.get('exp_profit',0)
+        notional=sz.get('notional',0); risk_pct2=sz.get('risk_pct',0)
         sz_block=(
-            f"\n💰 <b>POZİSYON BOYUTU</b>\n"
-            f"┌─────────────────────────┐\n"
-            f"│ Marj    : <b>£{sz.get('margin',0):.2f}</b>\n"
-            f"│ Kaldıraç: <b>{sz.get('leverage',1)}:1</b>  →  £{sz.get('notional',0):.0f} nominal\n"
-            f"│ Maks Kayıp : <b>£{sz.get('exp_loss',0):.2f}</b>\n"
-            f"│ Hedef Kâr  : <b>£{sz.get('exp_profit',0):.2f}</b>\n"
-            f"└─────────────────────────┘")
+            f"\n┌──────────────────────────────┐\n"
+            f"│  💷 HESABINDAN KAÇ POUND GİR?  │\n"
+            f"└──────────────────────────────┘\n"
+            f"🔑 Trade212'ye yatır  : <b>£{margin:.2f}</b> (marj)\n"
+            f"⚡ Kaldıraç            : <b>{lev2}:1</b>  →  £{notional:.0f} nominal pozisyon\n"
+            f"⚖️ Hesabının riski     : <b>%{risk_pct2:.2f}</b>\n"
+            f"❌ Maksimum kayıp      : <b>£{exp_loss:.2f}</b>  (SL'de)\n"
+            f"✅ Hedef kâr           : <b>£{exp_profit:.2f}</b>  (TP'de)\n")
 
     # Smart money block
     sm_block=""
@@ -573,47 +577,174 @@ def analyze_article(article):
     enriched["macro"]=_macro_analysis(enriched)
     return enriched
 
+def _turkce_aciklama(headline, summary, imp, bias_tr, hist_key):
+    """Generate Turkish explanation + 'ne anlamalıyız' for a news headline."""
+    text=(headline+" "+summary).lower()
+    # --- Haber ne diyor? (Türkçe özet) ---
+    ozet_parts=[]
+    if any(w in text for w in ["fed","federal reserve","fomc","powell"]): ozet_parts.append("ABD Merkez Bankası (Fed) politikasına ilişkin bir gelişme")
+    if any(w in text for w in ["rate hike","faiz artırım","interest rate hike"]): ozet_parts.append("faiz oranları artırılıyor")
+    if any(w in text for w in ["rate cut","faiz indirim","interest rate cut"]): ozet_parts.append("faiz oranları indiriliyor")
+    if any(w in text for w in ["inflation","cpi","enflasyon"]): ozet_parts.append("enflasyon verisi açıklandı")
+    if any(w in text for w in ["nfp","non-farm","jobs","employment","unemployment"]): ozet_parts.append("ABD istihdam/işsizlik verisi açıklandı")
+    if any(w in text for w in ["gdp","büyüme","büyüdü","growth"]): ozet_parts.append("ekonomik büyüme (GSYİH) verisi açıklandı")
+    if any(w in text for w in ["recession","durgunluk","recessionary"]): ozet_parts.append("resesyon (ekonomik durgunluk) endişeleri artıyor")
+    if any(w in text for w in ["war","savaş","military","strike","attack"]): ozet_parts.append("jeopolitik gerilim/askeri gelişme")
+    if any(w in text for w in ["opec","petrol","oil production","crude"]): ozet_parts.append("OPEC petrol üretim kararı")
+    if any(w in text for w in ["china","çin","beijing"]): ozet_parts.append("Çin ekonomisine ilişkin gelişme")
+    if any(w in text for w in ["russia","rusya","ukraine","ukrayna"]): ozet_parts.append("Rusya-Ukrayna jeopolitik gelişmesi")
+    if any(w in text for w in ["earnings","kar açıkladı","revenue","quarterly"]): ozet_parts.append("şirket kazanç/bilanço açıklaması")
+    if any(w in text for w in ["tariff","gümrük","trade war","ticaret savaşı"]): ozet_parts.append("ticaret savaşı/gümrük tarifeleri")
+    if any(w in text for w in ["bank","banka","banking crisis","svb","failure"]): ozet_parts.append("bankacılık sektörü gelişmesi")
+    ozet = "; ".join(ozet_parts) if ozet_parts else "önemli makroekonomik gelişme"
+
+    # --- Ne anlamalıyız? ---
+    anlam_parts=[]
+    if bias_tr=="Yükseliş":
+        anlam_parts.append("Bu haber piyasalar için olumlu — risk iştahı artabilir")
+        if imp>=80: anlam_parts.append("Etki büyük ihtimalle hızlı ve sert olacak, ani fiyat hareketleri beklenebilir")
+    elif bias_tr=="Düşüş":
+        anlam_parts.append("Bu haber piyasalar için olumsuz — yatırımcılar güvenli limanlara yönelebilir")
+        if imp>=80: anlam_parts.append("Sert satış dalgası, ani dolar ve altın talebi gelebilir")
+    else:
+        anlam_parts.append("Etki belirsiz — piyasalar bu haberi sindirmesi gerekiyor")
+
+    if hist_key:
+        anlam_parts.append(f"Geçmişte '{hist_key}' temalı haberler sonrası piyasalar önemli hareketler yaşadı")
+
+    if imp>=80: anlam_parts.append("🔴 ÖNEMLİ: Açık pozisyon varsa stop seviyelerini gözden geçir")
+    elif imp>=60: anlam_parts.append("🟡 Dikkat: Pozisyon boyutunu azaltmayı düşünebilirsin")
+
+    return ozet, " | ".join(anlam_parts)
+
+# Detailed per-asset Turkish impact explanation
+_ASSET_IMPACT = {
+    "XAUUSD": {
+        "↑": "Altın yükselir → jeopolitik/ekonomik belirsizlik güvenli liman talebini artırır. Dolar zayıflarsa altın ters korelasyon nedeniyle güçlenir.",
+        "↓": "Altın düşer → risk iştahı artar veya dolar güçlenir. Yüksek faiz beklentisi altının fırsat maliyetini artırır.",
+    },
+    "USOIL": {
+        "↑": "Petrol yükselir → arz kısıtlaması (OPEC), jeopolitik risk, ekonomik büyüme beklentisi talebi artırır.",
+        "↓": "Petrol düşer → talep endişesi (resesyon), OPEC üretim artışı, dolar güçlenmesi baskı yapar.",
+    },
+    "NAS100": {
+        "↑": "Nasdaq yükselir → düşük faiz beklentisi teknoloji hisselerini destekler, risk iştahı artar.",
+        "↓": "Nasdaq düşer → faiz artışı beklentisi büyüme hisselerini ezer, resesyon korkusu sermayeyi kaçırır.",
+    },
+    "SPX500": {
+        "↑": "S&P 500 yükselir → genel risk iştahı iyileşir, güçlü ekonomi hisse değerlemelerini destekler.",
+        "↓": "S&P 500 düşer → belirsizlik artar, kurumsal kârlar tehdit altına girer.",
+    },
+    "EURUSD": {
+        "↑": "EUR/USD yükselir → dolar zayıflar veya Avrupa ekonomisi beklenenden iyi → Euro güçlenir.",
+        "↓": "EUR/USD düşer → dolar güçlenir, Avrupa resesyon riski artar, ECB faiz beklentisi düşer.",
+    },
+    "GBPUSD": {
+        "↑": "GBP/USD yükselir → sterlin güçlenir, İngiltere ekonomisi olumlu sürpriz, BoE sıkılaşma beklentisi artar.",
+        "↓": "GBP/USD düşer → dolar güçlenir, İngiltere ekonomisi zayıf, Brexit/enflasyon endişeleri.",
+    },
+    "USDJPY": {
+        "↑": "USD/JPY yükselir → dolar güçlenir veya Japonya faizleri düşük kalır → yen zayıflar.",
+        "↓": "USD/JPY düşer → güvenli liman talebi yeni güçlenir, BoJ faiz artışı ya da dolar zayıflaması.",
+    },
+    "BTCUSD": {
+        "↑": "Bitcoin yükselir → risk iştahı artar, dolar zayıflar, kurumsal ilgi/ETF haberleri destekler.",
+        "↓": "Bitcoin düşer → risk kaçışı, regülasyon baskısı, likidite daralması, resesyon korkusu.",
+    },
+    "ETHUSD": {
+        "↑": "Ethereum yükselir → DeFi/geliştirici aktivitesi artar, Bitcoin rallisi sürükler.",
+        "↓": "Ethereum düşer → genel kripto satışı, regülasyon endişesi, ağ kullanımı düşer.",
+    },
+}
+
 def send_telegram(article):
     if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID: return
     h=article.get("headline","")
     if h in _tg_sent: return
     _tg_sent.add(h)
     imp=article["importance"]
+    rl=article.get("risk_level","NOISE")
     m=article.get("macro",{})
     bias_tr=m.get("bias_tr","Nötr")
     bull_pct=m.get("bull_pct",0); bear_pct=m.get("bear_pct",0); neut_pct=m.get("neut_pct",0)
     caution=m.get("caution","Normal İşlem")
     dur=m.get("dur","1h"); conf=m.get("conf",50)
     ad=m.get("asset_dirs",{})
-    assets_txt="\n".join(
-        f"  {'📈' if d=='↑' else '📉' if d=='↓' else '➡️'} {sym}: {d} ({s:.1f}%)"
-        for sym,(d,s) in ad.items() if d!="→"
-    )[:500]
     hist_key=m.get("hist_key"); hist_match=m.get("hist_match",{})
-    hist_txt=""
+    now_str=datetime.now().strftime("%d.%m.%Y %H:%M")
+
+    # Risk level header
+    if imp>=80:   risk_hdr="🔴 KRİTİK HABER"; risk_bar="█████████░"
+    elif imp>=60: risk_hdr="🟠 YÜKSEK ETKİLİ HABER"; risk_bar="███████░░░"
+    elif imp>=40: risk_hdr="🟡 ORTA ETKİLİ HABER"; risk_bar="█████░░░░░"
+    else:         risk_hdr="🔵 DÜŞÜK ETKİLİ HABER"; risk_bar="███░░░░░░░"
+
+    bias_emoji="📈" if bias_tr=="Yükseliş" else ("📉" if bias_tr=="Düşüş" else "➡️")
+
+    # Turkish summary + meaning
+    ozet, anlam = _turkce_aciklama(h, article.get("summary",""), imp, bias_tr, hist_key)
+
+    # Detailed per-asset impact
+    asset_lines=[]
+    for sym,(d,strength) in ad.items():
+        if d=="→": continue
+        dir_emoji="📈" if d=="↑" else "📉"
+        exp=_ASSET_IMPACT.get(sym,{}).get(d,"")
+        clean_sym=sym.replace("USD","").replace("500","") if len(sym)>6 else sym
+        strength_bar="█"*max(1,int(strength/20))+"░"*(5-max(1,int(strength/20)))
+        asset_lines.append(
+            f"{dir_emoji} <b>{clean_sym}</b>  {strength_bar} {strength:.1f}%\n"
+            f"   └ <i>{exp[:120]}</i>" if exp else
+            f"{dir_emoji} <b>{clean_sym}</b>  {strength_bar} {strength:.1f}%"
+        )
+
+    # Historical comparison
+    hist_block=""
     if hist_key and hist_match:
-        hist_txt="\n\n📜 <b>Geçmiş Benzer Olaylar ({}):</b>\n".format(hist_key)
-        hist_txt+="\n".join(f"  {sym}: {'+' if v>0 else ''}{v:.1f}% ort. hareket" for sym,v in list(hist_match.items())[:5])
+        hist_block=f"\n📜 <b>GEÇMİŞTE NELER OLDU? ({hist_key.upper()})</b>\n"
+        for asym,mv in list(hist_match.items())[:5]:
+            mv_emoji="📈" if mv>0 else "📉"
+            hist_block+=f"  {mv_emoji} {asym}: ortalama {'+' if mv>0 else ''}{mv:.1f}% hareket\n"
+        hist_block+="  <i>Geçmiş performans gelecek garantisi değildir.</i>"
+
+    # Timeframe impact
+    tf=m.get("tf15m","—"); tf1h=m.get("tf1h","—"); tf4h=m.get("tf4h","—"); tf24h=m.get("tf24h","—")
+
+    assets_block="\n".join(asset_lines) if asset_lines else "Belirgin varlık etkisi tespit edilmedi"
+
     msg=(
-        f"📰 <b>MAKRO HABER ANALİZİ</b>\n\n"
+        f"╔══════════════════════════╗\n"
+        f"║  📰 <b>MAKRO HABER ANALİZİ</b>  ║\n"
+        f"╚══════════════════════════╝\n\n"
+        f"<b>{risk_hdr}</b>  {risk_bar}\n"
+        f"Etki Skoru: <b>{imp}/100</b>  |  Risk: <b>{rl}</b>\n\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"📋 <b>HABER</b>\n"
         f"<b>{h}</b>\n\n"
-        f"<b>Etki Skoru:</b> {imp}/100  |  <b>Risk:</b> {article['risk_level']}\n"
-        f"<b>Yön Önyargısı:</b> {bias_tr}\n\n"
-        f"<b>Olasılıklar:</b>\n"
-        f"  📈 Yükseliş: %{bull_pct}\n"
-        f"  📉 Düşüş: %{bear_pct}\n"
-        f"  ➡️ Nötr: %{neut_pct}\n\n"
-        f"<b>Etkilenen Varlıklar:</b>\n{assets_txt}"
-        f"{hist_txt}\n\n"
-        f"<b>MARKET BEKLENTİSİ</b>\n"
-        f"  Yön: {bias_tr}\n"
-        f"  Güven: {conf}/100\n"
-        f"  Süre: {dur}\n"
-        f"  📊 {caution}"
+        f"🇹🇷 <b>TÜRKÇE ÖZET</b>\n"
+        f"<i>{ozet}</i>\n\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"💡 <b>NE ANLAMALIYIZ?</b>\n"
+        f"{anlam}\n\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"{bias_emoji} <b>PİYASA YÖNÜ</b>: <b>{bias_tr}</b>  (güven: {conf}/100)\n"
+        f"  📈 Yükseliş olasılığı : %{bull_pct}\n"
+        f"  📉 Düşüş olasılığı   : %{bear_pct}\n"
+        f"  ➡️ Nötr olasılığı    : %{neut_pct}\n\n"
+        f"⏱ <b>ZAMAN DİLİMİ ETKİSİ</b>\n"
+        f"  15 dak: {tf}  |  1 saat: {tf1h}  |  4 saat: {tf4h}  |  1 gün: {tf24h}\n\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"🎯 <b>ETKİLENECEK VARLIKLAR VE NEDEN?</b>\n\n"
+        f"{assets_block}"
+        f"{hist_block}\n\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"📊 <b>{caution}</b>  |  Süre tahmini: {dur}\n"
+        f"🕐 {now_str}  |  <i>Titan Prime Elite</i>"
     )
     try:
         requests.post(f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage",
-                      json={"chat_id":TELEGRAM_CHAT_ID,"text":msg,"parse_mode":"HTML"},timeout=5)
+                      json={"chat_id":TELEGRAM_CHAT_ID,"text":msg,"parse_mode":"HTML",
+                            "disable_web_page_preview":True},timeout=8)
     except: pass
 
 def news_risk_for_sym(sym, max_age_min=90):
