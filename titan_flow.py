@@ -308,42 +308,97 @@ def send_telegram(message: str):
     except: pass
 
 def tg_setup_alert(s):
-    """Send trade alert for A+/A/B+ setups."""
+    """VIP-grade trade signal alert."""
     key=f"{s['sym']}_{s['direction']}_{round(s['score'])}"
     if key in _tg_setup_sent: return
     _tg_setup_sent.add(key)
     sz=s.get("sizing",{}); rr=s["rr"]; q=s["quality"]
-    grade_emoji="🔥" if q=="A+" else "✅" if q=="A" else "🔔"
-    margin_line=(f"\nMarj: <b>£{sz['margin']:.2f}</b>  "
-                 f"(Risk: £{sz['exp_loss']:.2f} → Kâr: £{sz['exp_profit']:.2f})"
-                 if sz else "")
+    sc=s["score"]; regime=s.get("regime","Nötr")
+    direction=s["direction"]; sym=s["sym"]
     c_score=s.get("contrarian_score",0); c_label=s.get("contrarian_label","—")
-    regime=s.get("regime","Nötr")
-    traps=s.get("trap_warnings",[])
-    trap_line=("\n\n⚠️ <b>Tuzak Uyarısı:</b>\n"+"\n".join(f"  {t}" for t in traps)) if traps else ""
-    sm=s.get("sm_notes",[])
-    sm_line=("\n\n🧠 <b>Smart Money:</b>\n"+"\n".join(f"  • {n}" for n in sm[:2])) if sm else ""
     duration=s.get("duration","Intraday")
+    hold_h=s.get("hold_h",0)
+    sm=s.get("sm_notes",[])
+    traps=s.get("trap_warnings",[])
     cv=s.get("consensus_view",""); smv=s.get("sm_view","")
-    cv_line=f"\n\n🔍 <b>Görüş Karşılaştırması:</b>\n  {cv}\n  {smv}" if cv else ""
+    news_risk=s.get("news_risk","—")
+
+    # Grade styling
+    if q=="A+":
+        grade_hdr="🔥 A+ SETUPu — KURUMSAL ONAYLI 🔥"
+        grade_bar="★★★★★"
+    elif q=="A":
+        grade_hdr="✅ A SETUPu — YÜKSEK OLASILIK"
+        grade_bar="★★★★☆"
+    else:
+        grade_hdr="🔔 B+ SETUPu — GÜÇLÜ FIRSAT"
+        grade_bar="★★★☆☆"
+
+    dir_emoji="📈" if direction=="LONG" else "📉"
+    regime_emoji=("🟢" if regime=="Risk-On" else "🔴" if regime=="Risk-Off" else "🟡")
+
+    # Score bar (10 blocks)
+    filled=int(sc/10); bar="█"*filled+"░"*(10-filled)
+
+    # Sizing block
+    sz_block=""
+    if sz:
+        sz_block=(
+            f"\n💰 <b>POZİSYON BOYUTU</b>\n"
+            f"┌─────────────────────────┐\n"
+            f"│ Marj    : <b>£{sz.get('margin',0):.2f}</b>\n"
+            f"│ Kaldıraç: <b>{sz.get('leverage',1)}:1</b>  →  £{sz.get('notional',0):.0f} nominal\n"
+            f"│ Maks Kayıp : <b>£{sz.get('exp_loss',0):.2f}</b>\n"
+            f"│ Hedef Kâr  : <b>£{sz.get('exp_profit',0):.2f}</b>\n"
+            f"└─────────────────────────┘")
+
+    # Smart money block
+    sm_block=""
+    if sm:
+        sm_block="\n🧠 <b>SMART MONEY ANALİZİ</b>\n"
+        for n in sm[:3]: sm_block+=f"  ◈ {n}\n"
+
+    # Trap warning block
+    trap_block=""
+    if traps:
+        trap_block="\n⚠️ <b>TUZAK UYARISI</b>\n"
+        for t in traps[:2]: trap_block+=f"  {t}\n"
+
+    # Consensus block
+    cv_block=""
+    if cv:
+        cv_block=(f"\n🔍 <b>GÖRÜŞ KARŞILAŞTIRMASI</b>\n"
+                  f"  {cv}\n"
+                  f"  {smv}\n")
+
+    # Contrarian bar
+    c_bar="█"*int(c_score/10)+"░"*(10-int(c_score/10))
+    c_emoji="⚡" if c_score>=70 else "〰️" if c_score>=40 else "➡️"
+
+    now_str=datetime.now().strftime("%d.%m.%Y %H:%M")
+
     msg=(
-        f"🚨 <b>TRADE ALERT</b>  {grade_emoji}\n\n"
-        f"Pair:      <b>{s['sym']}</b>\n"
-        f"Direction: <b>{s['direction']}</b>\n"
-        f"Grade:     <b>{q}</b>  |  Score: {s['score']:.0f}/100\n"
-        f"Regime:    <b>{regime}</b>\n\n"
-        f"Entry:       <code>{fp(s['price'])}</code>  ({fp(s['el'])} – {fp(s['eh'])})\n"
-        f"Stop Loss:   <code>{fp(s['sl'])}</code>\n"
-        f"Take Profit: <code>{fp(s['tp'])}</code>\n\n"
-        f"Risk Reward: <b>1:{rr}</b>\n"
-        f"Confidence:  {s.get('confidence',s['score']):.0f}/100\n"
-        f"Hold Time:   ~{s.get('hold_h',0):.1f} saat  [{duration}]"
-        f"{margin_line}\n\n"
-        f"Contrarian Skoru: {c_score}/100 — {c_label}\n"
-        f"News Risk: {s.get('news_risk','—')}\n"
-        f"Portfolio Heat: {s.get('portfolio_heat',0):.1f}%"
-        f"{cv_line}{sm_line}{trap_line}\n\n"
-        f"✅ <b>TITAN PRIME ELITE — EXECUTE</b>")
+        f"╔══════════════════════════╗\n"
+        f"║  🏆 <b>TITAN PRIME ELITE</b>  🏆  ║\n"
+        f"╚══════════════════════════╝\n\n"
+        f"<b>{grade_hdr}</b>\n"
+        f"{grade_bar}  <b>{sc:.0f}/100</b>  {bar}\n\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"{dir_emoji} <b>{sym}</b>  —  <b>{direction}</b>\n"
+        f"{regime_emoji} Rejim: <b>{regime}</b>  |  Süre: <b>{duration}</b> (~{hold_h:.0f}s)\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+        f"📌 <b>GİRİŞ ZON</b>  <code>{fp(s['el'])} — {fp(s['eh'])}</code>\n"
+        f"🔴 <b>STOP LOSS</b>  <code>{fp(s['sl'])}</code>\n"
+        f"🟢 <b>TAKE PROFIT</b>  <code>{fp(s['tp'])}</code>\n\n"
+        f"⚖️ <b>Risk/Ödül : 1:{rr}</b>\n"
+        f"🎯 Güven    : <b>{s.get('confidence',sc):.0f}/100</b>\n"
+        f"📰 Haber    : <b>{news_risk}</b>\n\n"
+        f"{c_emoji} <b>Kontraryan Skoru</b>: {c_score}/100\n"
+        f"   {c_bar}  {c_label}\n"
+        f"{cv_block}{sm_block}{trap_block}{sz_block}\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"🕐 {now_str}  |  <i>Titan Prime Elite</i>\n"
+        f"⚡ <b>BU SİNYAL ÖZEL VE KİŞİSELDİR</b> ⚡")
     def _send():
         try:
             requests.post(f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage",
@@ -353,34 +408,44 @@ def tg_setup_alert(s):
     threading.Thread(target=_send,daemon=True).start()
 
 def tg_outcome_alert(sym, direction, status, entry, out_price, act_rr):
-    """Categorized TP / SL / Cancelled / Expired outcome notifications."""
+    """VIP-grade trade outcome notification."""
+    now_str=datetime.now().strftime("%d.%m.%Y %H:%M")
     if status=="TP":
-        emoji="🎯"; cat="✅ TAKE PROFIT HIT"
-        color="green"; pnl_txt=f"\nKâr: <b>+{act_rr:.2f}R</b>" if act_rr else ""
+        header="╔══════════════════════════╗\n║  🎯  TAKE PROFIT HIT  🎯  ║\n╚══════════════════════════╝"
+        result_line=f"✅ <b>BAŞARILI — +{act_rr:.2f}R KÂR</b>" if act_rr else "✅ <b>TAKE PROFIT HIT</b>"
+        pnl_emoji="💰"
     elif status=="SL":
-        emoji="❌"; cat="🛑 STOP LOSS HIT"
-        color="red"; pnl_txt=f"\nKayıp: <b>{act_rr:.2f}R</b>" if act_rr else ""
+        header="╔══════════════════════════╗\n║  ❌  STOP LOSS HIT  ❌  ║\n╚══════════════════════════╝"
+        result_line=f"🛑 <b>STOP — {act_rr:.2f}R KAYIP</b>" if act_rr else "🛑 <b>STOP LOSS HIT</b>"
+        pnl_emoji="🔻"
     elif status=="INVALIDATED":
-        emoji="🚫"; cat="⛔ İPTAL EDİLDİ"
-        color="orange"; pnl_txt=""
+        header="╔══════════════════════════╗\n║  🚫  SİNYAL İPTAL  🚫  ║\n╚══════════════════════════╝"
+        result_line="⛔ <b>SETUP GEÇERSİZ HALE GELDİ</b>"
+        pnl_emoji="⚠️"
     elif status=="EXPIRED":
-        emoji="⏰"; cat="📭 ZAMAN AŞIMI"
-        color="grey"; pnl_txt=""
+        header="╔══════════════════════════╗\n║  ⏰  ZAMAN AŞIMI  ⏰  ║\n╚══════════════════════════╝"
+        result_line="📭 <b>SİNYAL SÜRESİ DOLDU</b>"
+        pnl_emoji="🕐"
     else:
         return
-    move=""
-    if entry and out_price:
-        pct=round((out_price-entry)/entry*100,3) if direction=="LONG" else round((entry-out_price)/entry*100,3)
-        move=f"\nHareket: <b>{pct:+.3f}%</b>"
+    move=""; pct=0
+    if entry and out_price and entry>0:
+        pct=(round((out_price-entry)/entry*100,3) if direction=="LONG"
+             else round((entry-out_price)/entry*100,3))
+        move_emoji="📈" if pct>=0 else "📉"
+        move=f"\n{move_emoji} Hareket    : <b>{pct:+.3f}%</b>"
+    rr_bar=("█"*min(int(abs(act_rr)*2),10)+"░"*(10-min(int(abs(act_rr)*2),10))) if act_rr else "░"*10
     msg=(
-        f"{emoji} <b>{cat}</b>\n\n"
-        f"━━━━━━━━━━━━━━━━━━━\n"
-        f"Parite:  <b>{sym}</b>\n"
-        f"Yön:     <b>{direction}</b>\n\n"
-        f"Giriş:   <code>{fp(entry)}</code>\n"
-        f"Çıkış:   <code>{fp(out_price)}</code>"
-        f"{move}{pnl_txt}\n"
-        f"━━━━━━━━━━━━━━━━━━━")
+        f"{header}\n\n"
+        f"📊 <b>{sym}</b>  —  {direction}\n\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"📥 Giriş   : <code>{fp(entry)}</code>\n"
+        f"📤 Çıkış   : <code>{fp(out_price)}</code>"
+        f"{move}\n"
+        f"{pnl_emoji} Sonuç    : <b>{act_rr:+.2f}R</b>  {rr_bar}\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+        f"{result_line}\n\n"
+        f"🕐 {now_str}  |  <i>Titan Prime Elite</i>")
     def _send():
         try:
             requests.post(f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage",
@@ -391,28 +456,44 @@ def tg_outcome_alert(sym, direction, status, entry, out_price, act_rr):
 # ── Best-probability digest ───────────────────────────────────────────────────
 _tg_digest_sent: set = set()
 def _tg_best_picks(results):
-    """Send top-3 highest probability setups per analysis cycle (deduplicated)."""
+    """VIP digest — top-3 highest probability setups per analysis cycle."""
     if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID: return
     approved=[r for r in results if r.get("status")=="APPROVED" and r.get("quality") in ("A+","A","B+")]
     if not approved: return
-    # Pick top 3 by score
-    top=approved[:3]
-    # Deduplicate: only send if any pick is new
+    top=sorted(approved, key=lambda x:-x.get("score",0))[:3]
     keys=tuple(f"{s['sym']}_{s['direction']}_{round(s['score'])}" for s in top)
     if keys in _tg_digest_sent: return
     _tg_digest_sent.add(keys)
-    lines=["🔭 <b>TITAN PRIME — EN YÜKSEK OLASILIKLI SETUPLАР</b>\n"]
-    for i,s in enumerate(top,1):
+    now_str=datetime.now().strftime("%d.%m.%Y %H:%M")
+    lines=[
+        "╔══════════════════════════╗\n"
+        "║  🔭 EN YÜKSEK OLASILIKLI  ║\n"
+        "║    TITAN PRIME SINYALLER   ║\n"
+        "╚══════════════════════════╝\n"
+    ]
+    medals=["🥇","🥈","🥉"]
+    for i,s in enumerate(top):
         q=s["quality"]; rr=s["rr"]; sc=s["score"]
         grade_e="🔥" if q=="A+" else "✅" if q=="A" else "🔔"
         regime=s.get("regime","Nötr")
         c_score=s.get("contrarian_score",0)
+        duration=s.get("duration","Intraday")
+        dir_emoji="📈" if s["direction"]=="LONG" else "📉"
+        bar="█"*int(sc/10)+"░"*(10-int(sc/10))
         lines.append(
-            f"{grade_e} <b>#{i} {s['sym']} — {s['direction']}</b>  [{q}  {sc:.0f}/100]\n"
-            f"  Giriş: <code>{fp(s['el'])} – {fp(s['eh'])}</code>\n"
-            f"  SL: <code>{fp(s['sl'])}</code>  TP: <code>{fp(s['tp'])}</code>\n"
-            f"  R:R: <b>1:{rr}</b>  ·  Rejim: {regime}  ·  Kontraryan: {c_score}/100\n")
-    lines.append("━━━━━━━━━━━━━━━━━━━\n<i>Titan Prime Elite — Yalnızca en yüksek olasılıklı fırsatlar</i>")
+            f"{medals[i]} {grade_e} <b>{s['sym']}</b>  {dir_emoji} <b>{s['direction']}</b>  [{q}]\n"
+            f"   Skor: <b>{sc:.0f}/100</b>  {bar}\n"
+            f"   📌 Giriş : <code>{fp(s['el'])} — {fp(s['eh'])}</code>\n"
+            f"   🔴 SL    : <code>{fp(s['sl'])}</code>\n"
+            f"   🟢 TP    : <code>{fp(s['tp'])}</code>\n"
+            f"   ⚖️ R:R: <b>1:{rr}</b>  |  {regime}  |  {duration}\n"
+            f"   🧠 Kontraryan: {c_score}/100\n"
+        )
+    lines.append(
+        f"━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"🕐 {now_str}\n"
+        f"⚡ <b>TITAN PRIME ELITE</b> — <i>Sadece en güçlü sinyaller</i>"
+    )
     msg="\n".join(lines)
     def _send():
         try:
