@@ -2525,39 +2525,62 @@ def log_signal(s):
     now=time.time()
     if now-_last_logged.get(key,0)<DEDUP_SEC: return
     _last_logged[key]=now
-    fl=s["flags"]
-    sz=s.get("sizing",{})
+    fl=s.get("flags") or {}
+    sz=s.get("sizing",{}) or {}
     created=datetime.utcnow().isoformat(timespec="seconds")
     with db() as c:
-        cur=c.execute("""INSERT INTO signals(sym,quality,direction,entry,sl,tp,
-            rr_t,score,f_ema,f_rsi,f_macd,f_sweep,f_ob,f_fvg,f_struct,f_cot,f_news,
-            status,created)
-            VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,'OPEN',?)""",
-            (s["sym"],s["quality"],s["direction"],s["price"],s["sl"],
-             s["tp"],s["rr"],s["score"],
-             fl["f_ema"],fl["f_rsi"],fl["f_macd"],fl["f_sweep"],
-             fl["f_ob"],fl["f_fvg"],fl["f_struct"],fl["f_cot"],fl["f_news"],
-             created))
-        sig_id=cur.lastrowid
-        # Shadow trade
-        if sz:
-            c.execute("""INSERT INTO shadow_trades(signal_id,sym,direction,
-                entry,sl,tp,rr,capital,risk_amount,status,created)
-                VALUES(?,?,?,?,?,?,?,?,?,'OPEN',?)""",
-                (sig_id,s["sym"],s["direction"],s["price"],s["sl"],
-                 s["tp"],s["rr"],sz.get("margin",0),sz.get("risk_amt",0),created))
-            # Update shadow balance state
-            c.execute("INSERT OR REPLACE INTO account_state(key,value,updated) VALUES('shadow_balance',?,?)",
-                      (portfolio_state["shadow_balance"],created))
-            c.execute("INSERT OR IGNORE INTO account_state(key,value,updated) VALUES('daily_start',?,?)",
-                      (portfolio_state["shadow_balance"],created))
-        c.commit()
+        # Zaten açık bu sembol+yön var mı? Varsa tekrar yazma
+        existing=c.execute(
+            "SELECT id FROM signals WHERE sym=? AND direction=? AND status='OPEN' ORDER BY id DESC LIMIT 1",
+            (s["sym"],s["direction"])).fetchone()
+        if existing:
+            sig_id=existing["id"]
+            # Skoru güncelle (iyileştiyse)
+            c.execute("UPDATE signals SET score=?,quality=?,sl=?,tp=?,rr_t=? WHERE id=?",
+                      (s["score"],s["quality"],s["sl"],s["tp"],s["rr"],sig_id))
+            c.commit()
+        else:
+            cur=c.execute("""INSERT INTO signals(sym,quality,direction,entry,sl,tp,
+                rr_t,score,f_ema,f_rsi,f_macd,f_sweep,f_ob,f_fvg,f_struct,f_cot,f_news,
+                status,created)
+                VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,'OPEN',?)""",
+                (s["sym"],s["quality"],s["direction"],s["price"],s["sl"],
+                 s["tp"],s["rr"],s["score"],
+                 fl.get("f_ema",0),fl.get("f_rsi",0),fl.get("f_macd",0),fl.get("f_sweep",0),
+                 fl.get("f_ob",0),fl.get("f_fvg",0),fl.get("f_struct",0),fl.get("f_cot",0),fl.get("f_news",0),
+                 created))
+            sig_id=cur.lastrowid
+            # Shadow trade
+            if sz:
+                c.execute("""INSERT INTO shadow_trades(signal_id,sym,direction,
+                    entry,sl,tp,rr,capital,risk_amount,status,created)
+                    VALUES(?,?,?,?,?,?,?,?,?,'OPEN',?)""",
+                    (sig_id,s["sym"],s["direction"],s["price"],s["sl"],
+                     s["tp"],s["rr"],sz.get("margin",0),sz.get("risk_amt",0),created))
+                c.execute("INSERT OR REPLACE INTO account_state(key,value,updated) VALUES('shadow_balance',?,?)",
+                          (portfolio_state["shadow_balance"],created))
+                c.execute("INSERT OR IGNORE INTO account_state(key,value,updated) VALUES('daily_start',?,?)",
+                          (portfolio_state["shadow_balance"],created))
+            c.commit()
+
+        # active_trades dict'e ekle — web panelinde hemen görünsün
+        at_key=f"{s['sym']}_{s['direction']}"
+        with lock:
+            if at_key not in active_trades:
+                active_trades[at_key]={
+                    **s,
+                    "db_id": sig_id,
+                    "_trade_entered": datetime.now(),
+                    "_trade_status": "OPEN",
+                    "_trade_entry_price": s["price"],
+                }
+        _last_logged[key]=now
 
 def monitor_loop():
     while True:
         try: _check_open()
         except: pass
-        time.sleep(60)
+        time.sleep(15)  # 60→15sn: TP/SL daha hızlı yakalanır
 
 def _check_open():
     now=datetime.utcnow().isoformat(timespec="seconds")
@@ -2771,7 +2794,7 @@ def stats_loop():
     while True:
         try: compute_stats()
         except: pass
-        time.sleep(120)   # refresh every 2 min instead of 5
+        time.sleep(60)   # 1 dakikada bir istatistik + adaptif ağırlık güncelle
 
 # ═══════════════════════════════════════════════════════════════
 # ANALYSIS
