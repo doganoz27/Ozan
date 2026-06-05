@@ -488,6 +488,7 @@ app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], all
 @app.on_event("startup")
 def _startup():
     start_engine()
+    threading.Thread(target=_refresh_ws_cache, daemon=True).start()
 
 @app.get("/", response_class=HTMLResponse)
 def index():
@@ -569,12 +570,14 @@ class WSManager:
 
 manager = WSManager()
 
-@app.websocket("/ws")
-async def websocket_endpoint(ws: WebSocket):
-    import asyncio
-    await manager.connect(ws)
-    try:
-        while True:
+# Arka planda önbellek — WS gönderimi bloke etmez
+_ws_cache: dict = {}
+_ws_cache_lock = threading.Lock()
+
+def _refresh_ws_cache():
+    """Ayrı thread'de önbelleği günceller — WS loop'u bloke etmez."""
+    while True:
+        try:
             payload = {
                 "type": "tick",
                 "market": market_snapshot(),
@@ -590,11 +593,48 @@ async def websocket_endpoint(ws: WebSocket):
                     "db": True,
                 },
             }
-            await ws.send_text(json.dumps(payload, default=str))
+            with _ws_cache_lock:
+                _ws_cache["payload"] = json.dumps(payload, default=str)
+                _ws_cache["ts"] = time.time()
+        except Exception as e:
+            _log(f"WS önbellek hatası: {e}", "WARN")
+        time.sleep(3)
+
+@app.websocket("/ws")
+async def websocket_endpoint(ws: WebSocket):
+    import asyncio
+    await manager.connect(ws)
+    # İlk bağlantıda hemen veri gönder
+    try:
+        with _ws_cache_lock:
+            first = _ws_cache.get("payload")
+        if first:
+            await ws.send_text(first)
+    except Exception:
+        pass
+    try:
+        while True:
+            # Ping kontrolü: browser'dan mesaj gelirse oku (bağlantıyı canlı tut)
+            try:
+                await asyncio.wait_for(ws.receive_text(), timeout=0.05)
+            except asyncio.TimeoutError:
+                pass
+            except Exception:
+                break
+            # Önbellekten son paketi gönder
+            with _ws_cache_lock:
+                msg = _ws_cache.get("payload")
+            if msg:
+                try:
+                    await ws.send_text(msg)
+                except Exception:
+                    break
             await asyncio.sleep(3)
     except WebSocketDisconnect:
-        manager.disconnect(ws)
+        pass
     except Exception:
+        pass
+    finally:
         manager.disconnect(ws)
 
 # ══════════════════════════════════════════════════════════════════════════════
