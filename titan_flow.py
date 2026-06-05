@@ -2520,61 +2520,112 @@ def ticks_to_candles(ticks,sec=60):
 # ═══════════════════════════════════════════════════════════════
 # JOURNAL
 # ═══════════════════════════════════════════════════════════════
+def _load_open_to_active():
+    """Başlangıçta DB'deki OPEN sinyalleri active_trades'e yükle (restart sonrası kayıp yok)."""
+    try:
+        with db() as c:
+            rows = c.execute("SELECT * FROM signals WHERE status='OPEN' ORDER BY id ASC").fetchall()
+            for r in rows:
+                at_key = f"{r['sym']}_{r['direction']}"
+                # shadow_trades'den sizing verisi al
+                st = c.execute(
+                    "SELECT * FROM shadow_trades WHERE signal_id=? ORDER BY id DESC LIMIT 1",
+                    (r["id"],)).fetchone()
+                sizing = {}
+                if st:
+                    risk_amt = st["risk_amount"] or 0
+                    rr_val   = r["rr_t"] or 1
+                    sizing = {
+                        "margin":     st["capital"] or 0,
+                        "exp_loss":   risk_amt,
+                        "exp_profit": round(risk_amt * rr_val, 2),
+                        "leverage":   20,
+                        "risk_pct":   round(risk_amt / ACCOUNT["balance"] * 100, 2),
+                        "risk_amt":   risk_amt,
+                    }
+                with lock:
+                    if at_key not in active_trades:
+                        active_trades[at_key] = {
+                            "sym": r["sym"], "direction": r["direction"],
+                            "quality": r["quality"], "score": r["score"],
+                            "price": r["entry"], "el": r["entry"], "eh": r["entry"],
+                            "sl": r["sl"], "tp": r["tp"], "rr": r["rr_t"],
+                            "db_id": r["id"], "sizing": sizing,
+                            "_trade_entered": datetime.now(),
+                            "_trade_status": "OPEN",
+                            "_trade_entry_price": r["entry"],
+                        }
+    except Exception:
+        pass
+
 def log_signal(s):
-    key=f"{s['sym']}_{s['direction']}"
-    now=time.time()
-    if now-_last_logged.get(key,0)<DEDUP_SEC: return
-    _last_logged[key]=now
-    fl=s.get("flags") or {}
-    sz=s.get("sizing",{}) or {}
-    created=datetime.utcnow().isoformat(timespec="seconds")
+    key = f"{s['sym']}_{s['direction']}"
+    now = time.time()
+    fl  = s.get("flags") or {}
+    sz  = s.get("sizing", {}) or {}
+    created = datetime.utcnow().isoformat(timespec="seconds")
+
+    # Dedup kontrolü — ama active_trades her zaman güncellenir
+    skip_db = (now - _last_logged.get(key, 0) < DEDUP_SEC)
+
     with db() as c:
-        # Zaten açık bu sembol+yön var mı? Varsa tekrar yazma
-        existing=c.execute(
+        existing = c.execute(
             "SELECT id FROM signals WHERE sym=? AND direction=? AND status='OPEN' ORDER BY id DESC LIMIT 1",
-            (s["sym"],s["direction"])).fetchone()
+            (s["sym"], s["direction"])).fetchone()
+
         if existing:
-            sig_id=existing["id"]
-            # Skoru güncelle (iyileştiyse)
+            sig_id = existing["id"]
+            # Skor iyileştiyse güncelle
             c.execute("UPDATE signals SET score=?,quality=?,sl=?,tp=?,rr_t=? WHERE id=?",
-                      (s["score"],s["quality"],s["sl"],s["tp"],s["rr"],sig_id))
+                      (s["score"], s["quality"], s["sl"], s["tp"], s["rr"], sig_id))
             c.commit()
-        else:
-            cur=c.execute("""INSERT INTO signals(sym,quality,direction,entry,sl,tp,
+        elif not skip_db:
+            cur = c.execute("""INSERT INTO signals(sym,quality,direction,entry,sl,tp,
                 rr_t,score,f_ema,f_rsi,f_macd,f_sweep,f_ob,f_fvg,f_struct,f_cot,f_news,
-                status,created)
-                VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
-                (s["sym"],s["quality"],s["direction"],s["price"],s["sl"],
-                 s["tp"],s["rr"],s["score"],
-                 fl.get("f_ema",0),fl.get("f_rsi",0),fl.get("f_macd",0),fl.get("f_sweep",0),
-                 fl.get("f_ob",0),fl.get("f_fvg",0),fl.get("f_struct",0),fl.get("f_cot",0),fl.get("f_news",0),
-                 "OPEN", created))
-            sig_id=cur.lastrowid
-            # Shadow trade
+                status,created) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                (s["sym"], s["quality"], s["direction"], s["price"], s["sl"],
+                 s["tp"], s["rr"], s["score"],
+                 fl.get("f_ema",0), fl.get("f_rsi",0), fl.get("f_macd",0), fl.get("f_sweep",0),
+                 fl.get("f_ob",0),  fl.get("f_fvg",0),  fl.get("f_struct",0), fl.get("f_cot",0),
+                 fl.get("f_news",0), "OPEN", created))
+            sig_id = cur.lastrowid
+            _last_logged[key] = now
             if sz:
                 c.execute("""INSERT INTO shadow_trades(signal_id,sym,direction,
                     entry,sl,tp,rr,capital,risk_amount,status,created)
                     VALUES(?,?,?,?,?,?,?,?,?,'OPEN',?)""",
-                    (sig_id,s["sym"],s["direction"],s["price"],s["sl"],
-                     s["tp"],s["rr"],sz.get("margin",0),sz.get("risk_amt",0),created))
+                    (sig_id, s["sym"], s["direction"], s["price"], s["sl"],
+                     s["tp"], s["rr"], sz.get("margin",0), sz.get("risk_amt",0), created))
                 c.execute("INSERT OR REPLACE INTO account_state(key,value,updated) VALUES('shadow_balance',?,?)",
-                          (portfolio_state["shadow_balance"],created))
+                          (portfolio_state["shadow_balance"], created))
                 c.execute("INSERT OR IGNORE INTO account_state(key,value,updated) VALUES('daily_start',?,?)",
-                          (portfolio_state["shadow_balance"],created))
+                          (portfolio_state["shadow_balance"], created))
             c.commit()
+        else:
+            # DB yazılmayacak ama sig_id lazım
+            row = c.execute(
+                "SELECT id FROM signals WHERE sym=? AND direction=? ORDER BY id DESC LIMIT 1",
+                (s["sym"], s["direction"])).fetchone()
+            sig_id = row["id"] if row else 0
 
-        # active_trades dict'e ekle — web panelinde hemen görünsün
-        at_key=f"{s['sym']}_{s['direction']}"
-        with lock:
-            if at_key not in active_trades:
-                active_trades[at_key]={
-                    **s,
-                    "db_id": sig_id,
-                    "_trade_entered": datetime.now(),
-                    "_trade_status": "OPEN",
-                    "_trade_entry_price": s["price"],
-                }
-        _last_logged[key]=now
+    # Her durumda active_trades'e ekle (sinyal geldiği anda aktif pozisyona geçsin)
+    at_key = f"{s['sym']}_{s['direction']}"
+    with lock:
+        if at_key not in active_trades:
+            active_trades[at_key] = {
+                **s,
+                "db_id": sig_id,
+                "_trade_entered": datetime.now(),
+                "_trade_status": "OPEN",
+                "_trade_entry_price": s["price"],
+            }
+        else:
+            # Mevcut pozisyonu güncelle (skor, sl, tp)
+            active_trades[at_key].update({
+                "score": s["score"], "quality": s["quality"],
+                "sl": s["sl"], "tp": s["tp"], "rr": s["rr"],
+                "db_id": sig_id,
+            })
 
 def monitor_loop():
     while True:

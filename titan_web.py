@@ -86,6 +86,12 @@ def start_engine():
         ("analysis_loop",            _analysis_loop),
     ]:
         threading.Thread(target=fn, daemon=True, name=name).start()
+    # DB'deki mevcut OPEN sinyalleri active_trades'e yükle (restart sonrası kayıp yok)
+    try:
+        tf._load_open_to_active()
+        _log(f"Açık pozisyonlar yüklendi: {len(tf.active_trades)} işlem")
+    except Exception as e:
+        _log(f"Açık yükleme hatası: {e}", "WARN")
     try:
         tf._check_open()
     except Exception:
@@ -282,7 +288,8 @@ def active_trades_live():
     for k, t in at.items():
         sym = t.get("sym"); ep = t.get("_trade_entry_price") or t.get("price")
         sl = t.get("sl"); tp = t.get("tp"); direction = t.get("direction")
-        md = snap.get(sym); cp = md.price if md else ep
+        md = snap.get(sym); cp = (md.price if md and md.price else None) or ep
+        ep = ep or 0; sl = sl or 0; tp = tp or 0; cp = cp or ep
         risk = abs(ep - sl) if (ep and sl) else 1
         pnl_pts = (cp - ep) if direction == "LONG" else (ep - cp)
         rr_live = round(pnl_pts / risk, 2) if risk else 0
