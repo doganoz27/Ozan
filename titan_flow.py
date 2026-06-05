@@ -352,24 +352,87 @@ def signal_probability(s):
     sc = s.get("score") or 0; conf = s.get("confidence") or sc
     return min(99, max(1, round(sc*0.6 + conf*0.4)))
 
-def _tg_chart_png(sym):
-    """Opsiyonel mum grafiği üret (mplfinance kuruluysa)."""
+def _tg_chart_png(s):
+    """Kurumsal analiz grafiği — Giriş/SL/TP, EMA, zon ve S/R çizgileriyle.
+    s: sinyal sözlüğü (sym, direction, el, eh, sl, tp, score, quality)."""
     try:
         import mplfinance as mpf, matplotlib
         matplotlib.use("Agg")
         import io as _io
+        import pandas as _pd
+        sym = s["sym"] if isinstance(s, dict) else s
         tmap = {"EUR/USD":"EURUSD=X","GBP/USD":"GBPUSD=X","USD/JPY":"JPY=X",
                 "XAU/USD":"GC=F","XAG/USD":"SI=F","WTI":"CL=F","BRENT":"BZ=F"}
         ticker = tmap.get(sym, sym.replace("/","")+"=X")
         df = yf.Ticker(ticker).history(period="5d", interval="15m")
         if df.empty: return None
         if df.index.tzinfo: df.index = df.index.tz_localize(None)
-        mc = mpf.make_marketcolors(up="#00ff88", down="#ff3b5c", wick="inherit", edge="inherit", volume="#3b82f6")
+        df = df.tail(70).copy()
+
+        # EMA'lar (trend yapısı)
+        df["EMA9"]  = df["Close"].ewm(span=9,  adjust=False).mean()
+        df["EMA20"] = df["Close"].ewm(span=20, adjust=False).mean()
+        df["EMA50"] = df["Close"].ewm(span=50, adjust=False).mean()
+
+        # Swing High/Low → Destek/Direnç (yapı)
+        win = df.tail(50)
+        sup = float(win["Low"].min())
+        res = float(win["High"].max())
+
+        mc = mpf.make_marketcolors(up="#00ff88", down="#ff3b5c", wick="inherit",
+                                   edge="inherit", volume="#3b82f6")
         st = mpf.make_mpf_style(marketcolors=mc, facecolor="#0a0b0e", figcolor="#0a0b0e",
-                                gridcolor="#1e2028", rc={"axes.labelcolor":"#6b7280","xtick.color":"#6b7280","ytick.color":"#6b7280"})
+                                gridcolor="#1e2028", rc={"axes.labelcolor":"#6b7280",
+                                "xtick.color":"#6b7280","ytick.color":"#6b7280","font.size":9})
+
+        aps = [
+            mpf.make_addplot(df["EMA9"],  color="#3b82f6", width=0.9),
+            mpf.make_addplot(df["EMA20"], color="#f59e0b", width=0.9),
+            mpf.make_addplot(df["EMA50"], color="#a855f7", width=1.1),
+        ]
+
+        # Yatay seviyeler (Giriş/SL/TP/S/R)
+        hl_prices, hl_colors, hl_styles = [], [], []
+        d = s if isinstance(s, dict) else {}
+        def _add(p, col, sty="-"):
+            if p is None: return
+            try: hl_prices.append(float(p)); hl_colors.append(col); hl_styles.append(sty)
+            except: pass
+        entry = d.get("el") or d.get("price")
+        _add(entry,        "#e8eaf0", "-")   # Giriş
+        _add(d.get("eh"),  "#e8eaf0", ":")   # Giriş zon üst
+        _add(d.get("sl"),  "#ff3b5c", "--")  # Stop Loss
+        _add(d.get("tp"),  "#00ff88", "--")  # Take Profit
+        _add(sup,          "#6b7280", ":")   # Destek
+        _add(res,          "#6b7280", ":")   # Direnç
+
+        direction = d.get("direction","")
+        score = d.get("score",0); grade = d.get("quality","")
+        rr = d.get("rr",""); prob = signal_probability(d) if d else 0
+        arrow = "▲ LONG" if direction=="LONG" else "▼ SHORT" if direction=="SHORT" else ""
+        title = f"\n{sym}  {arrow}   {grade} {score:.0f}/100   1:{rr} R:R   Olasilik %{prob:.0f}"
+
+        kw = dict(type="candle", style=st, addplot=aps, volume=True,
+                  title=title, figratio=(16,9), figscale=1.1,
+                  savefig=dict(fname=None, dpi=120, bbox_inches="tight"))
+        if hl_prices:
+            kw["hlines"] = dict(hlines=hl_prices, colors=hl_colors,
+                                linestyle=hl_styles, linewidths=1.0)
         buf = _io.BytesIO()
-        mpf.plot(df.tail(60), type="candle", style=st, title=f" {sym}", volume=True,
-                 savefig=dict(fname=buf, dpi=110, bbox_inches="tight"))
+        kw["savefig"]["fname"] = buf
+        # Giriş↔TP ve Giriş↔SL bölgelerini renkli vurgula (kar/zarar alanları)
+        fill = []
+        try:
+            if entry and d.get("tp"):
+                fill.append(dict(y1=float(entry), y2=float(d["tp"]),
+                                 alpha=0.07, color="#00ff88"))
+            if entry and d.get("sl"):
+                fill.append(dict(y1=float(entry), y2=float(d["sl"]),
+                                 alpha=0.07, color="#ff3b5c"))
+            if fill: kw["fill_between"] = fill
+        except Exception:
+            pass
+        mpf.plot(df, **kw)
         buf.seek(0); return buf.read()
     except Exception:
         return None
@@ -492,7 +555,7 @@ def tg_setup_alert(s):
         f"⚡ <b>BU SİNYAL ÖZEL VE KİŞİSELDİR</b> ⚡")
     def _send():
         try:
-            png=_tg_chart_png(sym)
+            png=_tg_chart_png(s)
             if png:
                 # Grafik + açıklama (caption 1024 karakter sınırı için kısalt)
                 cap=msg if len(msg)<=1024 else msg[:1015]+"…"

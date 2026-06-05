@@ -464,31 +464,20 @@ def generate_chart_png(sym: str) -> bytes | None:
     if not _CHART_OK:
         return None
     try:
-        import yfinance as yf
-        import pandas as pd
-        ticker_map = {
-            "EUR/USD": "EURUSD=X", "GBP/USD": "GBPUSD=X", "USD/JPY": "JPY=X",
-            "XAU/USD": "GC=F", "XAG/USD": "SI=F", "WTI": "CL=F", "BRENT": "BZ=F",
-        }
-        ticker = ticker_map.get(sym, sym.replace("/", "") + "=X")
-        df = yf.Ticker(ticker).history(period="5d", interval="15m")
-        if df.empty:
-            return None
-        df.index = df.index.tz_localize(None) if df.index.tzinfo else df.index
-        mc = mpf.make_marketcolors(up="#00ff88", down="#ff3b5c", wick="inherit",
-                                    edge="inherit", volume="#3b82f6")
-        s = mpf.make_mpf_style(marketcolors=mc, facecolor="#0a0b0e", edgecolor="#1e2028",
-                                figcolor="#0a0b0e", gridcolor="#1e2028",
-                                rc={"axes.labelcolor": "#6b7280", "xtick.color": "#6b7280",
-                                    "ytick.color": "#6b7280"})
-        buf = io.BytesIO()
-        mpf.plot(df.tail(60), type="candle", style=s, title=f" {sym}",
-                 volume=True, savefig=dict(fname=buf, dpi=120, bbox_inches="tight"))
-        buf.seek(0)
-        return buf.read()
+        # Bu sembol için canlı sinyali bul → analizli grafik (Giriş/SL/TP/EMA/zon)
+        sig = None
+        with tf.lock:
+            for st in tf.setups:
+                if st.get("sym") == sym:
+                    sig = st
+                    break
+        payload = sig if sig else {"sym": sym}
+        png = tf._tg_chart_png(payload)
+        if png:
+            return png
     except Exception as e:
         _log(f"Chart hatası {sym}: {e}", "WARN")
-        return None
+    return None
 
 # ══════════════════════════════════════════════════════════════════════════════
 # FASTAPI
