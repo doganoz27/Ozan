@@ -1,0 +1,496 @@
+<!DOCTYPE html>
+<html lang="tr">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Titan Prime Elite — Trading Terminal</title>
+<script src="https://cdn.tailwindcss.com"></script>
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
+<script>
+tailwind.config = {
+  theme: { extend: { colors: {
+    bg: '#0a0b0e', card: '#111318', border2: '#1e2028',
+    grn: '#00ff88', red: '#ff3b5c', blu: '#3b82f6', ylw: '#f59e0b',
+    txt: '#e8eaf0', dim: '#6b7280'
+  }, fontFamily: { mono: ['ui-monospace','SFMono-Regular','Menlo','monospace'] } } }
+}
+</script>
+<style>
+  body { background:#0a0b0e; color:#e8eaf0; }
+  ::-webkit-scrollbar { width:8px; height:8px; }
+  ::-webkit-scrollbar-track { background:#0a0b0e; }
+  ::-webkit-scrollbar-thumb { background:#1e2028; border-radius:4px; }
+  .glow-grn { box-shadow:0 0 20px rgba(0,255,136,.15); }
+  .glow-red { box-shadow:0 0 20px rgba(255,59,92,.15); }
+  .fade { animation: fade .4s ease; }
+  @keyframes fade { from{opacity:0;transform:translateY(6px)} to{opacity:1;transform:none} }
+  .pulse-dot { animation: pulse 2s infinite; }
+  @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:.3} }
+  .nav-active { background:linear-gradient(90deg,rgba(59,130,246,.15),transparent); border-left:3px solid #3b82f6; }
+  table { border-collapse:collapse; }
+</style>
+</head>
+<body class="font-mono text-sm">
+
+<div class="flex min-h-screen">
+  <!-- SIDEBAR -->
+  <aside class="w-56 bg-card border-r border-border2 flex flex-col fixed h-full z-20">
+    <div class="p-5 border-b border-border2">
+      <div class="text-grn font-bold text-lg tracking-tight">⬡ TITAN PRIME</div>
+      <div class="text-dim text-xs mt-1">ELITE TERMINAL</div>
+    </div>
+    <nav class="flex-1 py-3" id="nav">
+      <a data-page="dashboard" class="nav-item nav-active flex items-center gap-3 px-5 py-3 cursor-pointer hover:bg-border2/40 transition">📊 <span>Dashboard</span></a>
+      <a data-page="signals"   class="nav-item flex items-center gap-3 px-5 py-3 cursor-pointer hover:bg-border2/40 transition">🎯 <span>Sinyaller</span></a>
+      <a data-page="trades"    class="nav-item flex items-center gap-3 px-5 py-3 cursor-pointer hover:bg-border2/40 transition">💼 <span>İşlemler</span></a>
+      <a data-page="journal"   class="nav-item flex items-center gap-3 px-5 py-3 cursor-pointer hover:bg-border2/40 transition">📓 <span>Journal</span></a>
+      <a data-page="analytics" class="nav-item flex items-center gap-3 px-5 py-3 cursor-pointer hover:bg-border2/40 transition">📈 <span>Analitik</span></a>
+      <a data-page="news"      class="nav-item flex items-center gap-3 px-5 py-3 cursor-pointer hover:bg-border2/40 transition">📰 <span>Haberler</span></a>
+      <a data-page="market"    class="nav-item flex items-center gap-3 px-5 py-3 cursor-pointer hover:bg-border2/40 transition">🌐 <span>Piyasa</span></a>
+    </nav>
+    <div class="p-4 border-t border-border2 text-xs text-dim">
+      <div class="flex items-center gap-2"><span id="ws-dot" class="w-2 h-2 rounded-full bg-red pulse-dot"></span><span id="ws-status">Bağlanıyor…</span></div>
+      <div class="mt-2" id="clock">--:--:--</div>
+    </div>
+  </aside>
+
+  <!-- MAIN -->
+  <main class="flex-1 ml-56">
+    <!-- TOP BAR -->
+    <header class="bg-card border-b border-border2 px-6 py-3 flex items-center justify-between sticky top-0 z-10">
+      <div class="flex items-center gap-6">
+        <div><div class="text-dim text-xs">Bakiye</div><div id="t-balance" class="text-grn font-bold text-base">£--</div></div>
+        <div><div class="text-dim text-xs">Net P&L</div><div id="t-pnl" class="font-bold text-base">£--</div></div>
+        <div><div class="text-dim text-xs">Win Rate</div><div id="t-wr" class="font-bold text-base">--%</div></div>
+        <div><div class="text-dim text-xs">Açık İşlem</div><div id="t-open" class="font-bold text-base">--</div></div>
+        <div><div class="text-dim text-xs">Toplam İşlem</div><div id="t-total" class="font-bold text-base">--</div></div>
+      </div>
+      <div class="flex items-center gap-3">
+        <span id="t-regime" class="px-3 py-1 rounded-full text-xs font-bold bg-border2">Rejim</span>
+        <span id="t-session" class="px-3 py-1 rounded-full text-xs bg-border2 text-dim">Seans</span>
+      </div>
+    </header>
+
+    <div class="p-6">
+      <!-- DASHBOARD -->
+      <section data-view="dashboard" class="view">
+        <div class="grid grid-cols-4 gap-4 mb-5" id="kpi-row"></div>
+        <div class="grid grid-cols-3 gap-4">
+          <div class="col-span-2 bg-card rounded-xl border border-border2 p-5">
+            <div class="flex items-center justify-between mb-3"><h3 class="font-bold">🎯 Canlı Sinyal Akışı</h3><span class="text-dim text-xs">Onaylanan setuplar</span></div>
+            <div id="dash-signals" class="space-y-2"></div>
+          </div>
+          <div class="bg-card rounded-xl border border-border2 p-5">
+            <h3 class="font-bold mb-3">💼 Aktif İşlemler</h3>
+            <div id="dash-trades" class="space-y-2"></div>
+          </div>
+        </div>
+        <div class="grid grid-cols-2 gap-4 mt-4">
+          <div class="bg-card rounded-xl border border-border2 p-5">
+            <h3 class="font-bold mb-3">📈 Sermaye Eğrisi</h3>
+            <canvas id="equityChart" height="120"></canvas>
+          </div>
+          <div class="bg-card rounded-xl border border-border2 p-5">
+            <h3 class="font-bold mb-3">🌐 Piyasa Özeti</h3>
+            <div id="dash-market" class="grid grid-cols-3 gap-2"></div>
+          </div>
+        </div>
+      </section>
+
+      <!-- SIGNALS -->
+      <section data-view="signals" class="view hidden">
+        <div class="flex gap-2 mb-4" id="sig-tabs">
+          <button data-f="ALL" class="sigtab px-4 py-2 rounded-lg bg-blu text-white text-xs font-bold">TÜMÜ</button>
+          <button data-f="APPROVED" class="sigtab px-4 py-2 rounded-lg bg-border2 text-xs">ONAYLI</button>
+          <button data-f="WATCHLIST" class="sigtab px-4 py-2 rounded-lg bg-border2 text-xs">İZLEME</button>
+        </div>
+        <div class="bg-card rounded-xl border border-border2 overflow-hidden">
+          <table class="w-full text-xs">
+            <thead class="bg-border2/40 text-dim"><tr>
+              <th class="text-left p-3">PARİTE</th><th class="text-left p-3">GRADE</th><th class="text-left p-3">YÖN</th>
+              <th class="text-right p-3">SKOR</th><th class="text-right p-3">GİRİŞ</th><th class="text-right p-3">SL</th>
+              <th class="text-right p-3">TP</th><th class="text-right p-3">R:R</th><th class="text-left p-3">REJİM</th><th class="text-left p-3">DURUM</th>
+            </tr></thead>
+            <tbody id="sig-tbody"></tbody>
+          </table>
+        </div>
+        <div id="sig-detail" class="mt-4"></div>
+      </section>
+
+      <!-- TRADES -->
+      <section data-view="trades" class="view hidden">
+        <div class="bg-card rounded-xl border border-border2 p-5">
+          <h3 class="font-bold mb-4">💼 Açık Pozisyonlar — Canlı P&L</h3>
+          <div id="trades-list" class="space-y-3"></div>
+        </div>
+      </section>
+
+      <!-- JOURNAL -->
+      <section data-view="journal" class="view hidden">
+        <div class="flex gap-2 mb-4">
+          <button data-j="open" class="jtab px-4 py-2 rounded-lg bg-blu text-white text-xs font-bold">AKTİF</button>
+          <button data-j="tp" class="jtab px-4 py-2 rounded-lg bg-border2 text-xs">🎯 TAKE PROFIT</button>
+          <button data-j="sl" class="jtab px-4 py-2 rounded-lg bg-border2 text-xs">🛑 STOP LOSS</button>
+        </div>
+        <div class="bg-card rounded-xl border border-border2 overflow-hidden">
+          <table class="w-full text-xs">
+            <thead class="bg-border2/40 text-dim"><tr id="j-head"></tr></thead>
+            <tbody id="j-tbody"></tbody>
+          </table>
+        </div>
+      </section>
+
+      <!-- ANALYTICS -->
+      <section data-view="analytics" class="view hidden">
+        <div class="grid grid-cols-4 gap-4 mb-4" id="an-kpi"></div>
+        <div class="grid grid-cols-2 gap-4">
+          <div class="bg-card rounded-xl border border-border2 p-5"><h3 class="font-bold mb-3">📈 Sermaye Eğrisi</h3><canvas id="anEquity" height="140"></canvas></div>
+          <div class="bg-card rounded-xl border border-border2 p-5"><h3 class="font-bold mb-3">🎖 Kaliteye Göre Win Rate</h3><canvas id="anQuality" height="140"></canvas></div>
+        </div>
+        <div class="grid grid-cols-2 gap-4 mt-4">
+          <div class="bg-card rounded-xl border border-border2 p-5"><h3 class="font-bold mb-3">🏆 En Başarılı Semboller</h3><div id="an-best"></div></div>
+          <div class="bg-card rounded-xl border border-border2 p-5"><h3 class="font-bold mb-3">🧠 Yapay Zeka Öğrenme Ağırlıkları</h3><canvas id="anWeights" height="140"></canvas></div>
+        </div>
+      </section>
+
+      <!-- NEWS -->
+      <section data-view="news" class="view hidden">
+        <div class="bg-card rounded-xl border border-border2 p-5">
+          <h3 class="font-bold mb-4">📰 Makro Haber Analizi</h3>
+          <div id="news-list" class="space-y-3"></div>
+        </div>
+      </section>
+
+      <!-- MARKET -->
+      <section data-view="market" class="view hidden">
+        <div class="bg-card rounded-xl border border-border2 overflow-hidden">
+          <table class="w-full text-xs">
+            <thead class="bg-border2/40 text-dim"><tr>
+              <th class="text-left p-3">SEMBOL</th><th class="text-right p-3">FİYAT</th><th class="text-right p-3">DEĞİŞİM</th>
+              <th class="text-right p-3">YÜKSEK</th><th class="text-right p-3">DÜŞÜK</th><th class="text-left p-3">GÜNCELLEME</th>
+            </tr></thead>
+            <tbody id="mkt-tbody"></tbody>
+          </table>
+        </div>
+      </section>
+    </div>
+  </main>
+</div>
+
+<script>
+const API = '';
+let WS = null, lastData = {}, equityChart, anEquity, anQuality, anWeights;
+let sigFilter = 'ALL', jTab = 'open';
+
+const fmt = (v,d=4) => v==null ? '—' : (typeof v==='number' ? v.toFixed(d) : v);
+const money = v => v==null ? '£—' : (v>=0?'£':'-£')+Math.abs(v).toFixed(2);
+const pct = v => (v>=0?'+':'')+(v||0).toFixed(2)+'%';
+const gradeColor = q => ({'A+':'text-grn','A':'text-grn','B+':'text-ylw','B':'text-blu','WATCH':'text-dim','WATCHLIST':'text-dim'}[q]||'text-dim');
+const dirBadge = d => d==='LONG'
+  ? '<span class="px-2 py-0.5 rounded bg-grn/15 text-grn text-xs font-bold">LONG</span>'
+  : '<span class="px-2 py-0.5 rounded bg-red/15 text-red text-xs font-bold">SHORT</span>';
+const statusBadge = s => {
+  const m={'APPROVED':['bg-grn/15','text-grn','ONAYLI'],'WATCHLIST':['bg-ylw/15','text-ylw','İZLEME'],
+           'OPEN':['bg-blu/15','text-blu','AÇIK'],'TP':['bg-grn/15','text-grn','TP'],'SL':['bg-red/15','text-red','SL']};
+  const x=m[s]||['bg-border2','text-dim',s||'—']; return `<span class="px-2 py-0.5 rounded ${x[0]} ${x[1]} text-xs font-bold">${x[2]}</span>`;
+};
+
+// ── Navigation ──
+document.querySelectorAll('.nav-item').forEach(el=>{
+  el.onclick=()=>{
+    document.querySelectorAll('.nav-item').forEach(n=>n.classList.remove('nav-active'));
+    el.classList.add('nav-active');
+    const page=el.dataset.page;
+    document.querySelectorAll('.view').forEach(v=>v.classList.add('hidden'));
+    document.querySelector(`[data-view="${page}"]`).classList.remove('hidden');
+    render();
+  };
+});
+document.querySelectorAll('.sigtab').forEach(b=>b.onclick=()=>{
+  sigFilter=b.dataset.f;
+  document.querySelectorAll('.sigtab').forEach(x=>{x.className='sigtab px-4 py-2 rounded-lg bg-border2 text-xs';});
+  b.className='sigtab px-4 py-2 rounded-lg bg-blu text-white text-xs font-bold';
+  renderSignals();
+});
+document.querySelectorAll('.jtab').forEach(b=>b.onclick=()=>{
+  jTab=b.dataset.j;
+  document.querySelectorAll('.jtab').forEach(x=>{x.className='jtab px-4 py-2 rounded-lg bg-border2 text-xs';});
+  b.className='jtab px-4 py-2 rounded-lg bg-blu text-white text-xs font-bold';
+  loadJournal();
+});
+
+// ── WebSocket ──
+function connectWS(){
+  const proto = location.protocol==='https:'?'wss':'ws';
+  WS = new WebSocket(`${proto}://${location.host}/ws`);
+  WS.onopen = ()=>{ document.getElementById('ws-dot').className='w-2 h-2 rounded-full bg-grn'; document.getElementById('ws-status').textContent='Canlı bağlı'; };
+  WS.onclose= ()=>{ document.getElementById('ws-dot').className='w-2 h-2 rounded-full bg-red pulse-dot'; document.getElementById('ws-status').textContent='Yeniden bağlanıyor…'; setTimeout(connectWS,2000); };
+  WS.onmessage = e=>{ lastData = JSON.parse(e.data); render(); };
+}
+
+// ── Render ──
+function render(){
+  if(!lastData.analytics) return;
+  const a=lastData.analytics, r=lastData.regime||{};
+  const pnl=a.balance-a.start_balance;
+  document.getElementById('t-balance').textContent=money(a.balance);
+  const pe=document.getElementById('t-pnl'); pe.textContent=money(pnl); pe.className='font-bold text-base '+(pnl>=0?'text-grn':'text-red');
+  const we=document.getElementById('t-wr'); we.textContent=(a.wr||0).toFixed(1)+'%'; we.className='font-bold text-base '+(a.wr>=55?'text-grn':a.wr>=45?'text-ylw':'text-red');
+  document.getElementById('t-open').textContent=(lastData.active_trades||[]).length;
+  document.getElementById('t-total').textContent=a.total||0;
+  const reg=document.getElementById('t-regime'); reg.textContent=r.regime||'Nötr';
+  reg.className='px-3 py-1 rounded-full text-xs font-bold '+(r.regime==='Risk-On'?'bg-grn/15 text-grn':r.regime==='Risk-Off'?'bg-red/15 text-red':'bg-ylw/15 text-ylw');
+  document.getElementById('t-session').textContent=r.session||'—';
+
+  const view=[...document.querySelectorAll('.view')].find(v=>!v.classList.contains('hidden'))?.dataset.view;
+  if(view==='dashboard') renderDashboard();
+  else if(view==='signals') renderSignals();
+  else if(view==='trades') renderTrades();
+  else if(view==='analytics') renderAnalytics();
+  else if(view==='market') renderMarket();
+}
+
+function kpi(label,val,sub,color){
+  return `<div class="bg-card rounded-xl border border-border2 p-4">
+    <div class="text-dim text-xs">${label}</div>
+    <div class="text-2xl font-bold ${color||''} mt-1">${val}</div>
+    <div class="text-dim text-xs mt-1">${sub||''}</div></div>`;
+}
+
+function renderDashboard(){
+  const a=lastData.analytics;
+  document.getElementById('kpi-row').innerHTML =
+    kpi('Win Rate',(a.wr||0).toFixed(1)+'%',`${a.wins||0}W / ${a.losses||0}L`, a.wr>=55?'text-grn':'text-ylw')+
+    kpi('Profit Factor',(a.pf||0).toFixed(2),'kar/zarar oranı', a.pf>=1.5?'text-grn':'text-ylw')+
+    kpi('Ort. R:R',(a.avg_rr>=0?'+':'')+(a.avg_rr||0).toFixed(2)+'R','işlem başına', a.avg_rr>=0?'text-grn':'text-red')+
+    kpi('Sharpe',(a.sharpe||0).toFixed(2),`Sortino ${(a.sortino||0).toFixed(2)}`,'text-blu');
+
+  // signals
+  const sigs=(lastData.signals||[]).filter(s=>s.status==='APPROVED').slice(0,6);
+  document.getElementById('dash-signals').innerHTML = sigs.length? sigs.map(s=>`
+    <div class="flex items-center justify-between p-3 rounded-lg bg-border2/30 hover:bg-border2/50 transition fade">
+      <div class="flex items-center gap-3">
+        <span class="font-bold ${gradeColor(s.quality)}">${s.quality}</span>
+        <span class="font-bold">${s.sym}</span>${dirBadge(s.direction)}
+      </div>
+      <div class="flex items-center gap-4 text-xs">
+        <span class="text-dim">Skor <span class="text-txt font-bold">${(s.score||0).toFixed(0)}</span></span>
+        <span class="text-dim">R:R <span class="text-grn font-bold">1:${s.rr}</span></span>
+        <span class="text-ylw">${money(s.exp_profit)}</span>
+      </div></div>`).join('') : '<div class="text-dim text-xs p-3">Onaylı sinyal bekleniyor…</div>';
+
+  // trades
+  const tr=lastData.active_trades||[];
+  document.getElementById('dash-trades').innerHTML = tr.length? tr.map(t=>`
+    <div class="p-3 rounded-lg bg-border2/30 fade">
+      <div class="flex justify-between"><span class="font-bold">${t.sym}</span>${dirBadge(t.direction)}</div>
+      <div class="flex justify-between mt-2 text-xs">
+        <span class="${t.pnl_gbp>=0?'text-grn':'text-red'} font-bold">${money(t.pnl_gbp)}</span>
+        <span class="${t.rr_live>=0?'text-grn':'text-red'}">${(t.rr_live>=0?'+':'')}${t.rr_live}R</span>
+      </div>
+      <div class="h-1.5 bg-border2 rounded mt-2 overflow-hidden"><div class="h-full ${t.pnl_gbp>=0?'bg-grn':'bg-red'}" style="width:${Math.abs(t.progress)}%"></div></div>
+    </div>`).join('') : '<div class="text-dim text-xs">Aktif işlem yok</div>';
+
+  // market mini
+  const mk=(lastData.market||[]).slice(0,12);
+  document.getElementById('dash-market').innerHTML = mk.map(m=>`
+    <div class="p-2 rounded bg-border2/30 text-center">
+      <div class="text-xs text-dim">${m.sym}</div>
+      <div class="font-bold text-xs">${fmt(m.price)}</div>
+      <div class="text-xs ${m.chg>=0?'text-grn':'text-red'}">${pct(m.chg)}</div>
+    </div>`).join('');
+
+  drawEquity('equityChart','equityChart_inst', a.equity_curve||[]);
+}
+
+function renderSignals(){
+  let sigs=lastData.signals||[];
+  if(sigFilter!=='ALL') sigs=sigs.filter(s=>s.status===sigFilter);
+  document.getElementById('sig-tbody').innerHTML = sigs.length? sigs.map((s,i)=>`
+    <tr class="border-t border-border2 hover:bg-border2/30 cursor-pointer" onclick="showDetail(${i})">
+      <td class="p-3 font-bold">${s.sym}</td>
+      <td class="p-3 font-bold ${gradeColor(s.quality)}">${s.quality}</td>
+      <td class="p-3">${dirBadge(s.direction)}</td>
+      <td class="p-3 text-right font-bold">${(s.score||0).toFixed(0)}</td>
+      <td class="p-3 text-right text-dim">${fmt(s.el)}–${fmt(s.eh)}</td>
+      <td class="p-3 text-right text-red">${fmt(s.sl)}</td>
+      <td class="p-3 text-right text-grn">${fmt(s.tp)}</td>
+      <td class="p-3 text-right font-bold">1:${s.rr}</td>
+      <td class="p-3 text-dim">${s.regime||'—'}</td>
+      <td class="p-3">${statusBadge(s.status)}</td>
+    </tr>`).join('') : '<tr><td colspan="10" class="p-6 text-center text-dim">Sinyal bekleniyor…</td></tr>';
+}
+window._sigCache=[];
+function showDetail(i){
+  let sigs=lastData.signals||[];
+  if(sigFilter!=='ALL') sigs=sigs.filter(s=>s.status===sigFilter);
+  const s=sigs[i]; if(!s) return;
+  document.getElementById('sig-detail').innerHTML=`
+  <div class="bg-card rounded-xl border border-border2 p-5 fade">
+    <div class="flex items-center justify-between mb-4">
+      <div class="flex items-center gap-3"><span class="font-bold text-lg ${gradeColor(s.quality)}">${s.quality}</span>
+      <span class="font-bold text-lg">${s.sym}</span>${dirBadge(s.direction)}
+      <span class="px-2 py-0.5 rounded bg-border2 text-xs">${s.duration||''}</span></div>
+      <span class="text-2xl font-bold">${(s.score||0).toFixed(0)}<span class="text-dim text-sm">/100</span></span>
+    </div>
+    <div class="grid grid-cols-4 gap-3 mb-4">
+      <div class="bg-border2/30 rounded p-3"><div class="text-dim text-xs">Giriş</div><div class="font-bold">${fmt(s.el)}–${fmt(s.eh)}</div></div>
+      <div class="bg-border2/30 rounded p-3"><div class="text-dim text-xs">Stop Loss</div><div class="font-bold text-red">${fmt(s.sl)}</div></div>
+      <div class="bg-border2/30 rounded p-3"><div class="text-dim text-xs">Take Profit</div><div class="font-bold text-grn">${fmt(s.tp)}</div></div>
+      <div class="bg-border2/30 rounded p-3"><div class="text-dim text-xs">Risk/Ödül</div><div class="font-bold">1:${s.rr}</div></div>
+    </div>
+    <div class="grid grid-cols-2 gap-4">
+      <div class="bg-blu/10 border border-blu/30 rounded-lg p-4">
+        <div class="text-blu font-bold text-xs mb-2">💷 NE KADAR POUND GİRMELİSİN?</div>
+        <div class="space-y-1 text-xs">
+          <div class="flex justify-between"><span class="text-dim">Trade212'ye yatır (marj)</span><span class="font-bold text-grn">${money(s.margin)}</span></div>
+          <div class="flex justify-between"><span class="text-dim">Kaldıraç</span><span class="font-bold">${s.leverage||'—'}:1</span></div>
+          <div class="flex justify-between"><span class="text-dim">Maksimum kayıp (SL)</span><span class="font-bold text-red">${money(s.exp_loss)}</span></div>
+          <div class="flex justify-between"><span class="text-dim">Hedef kâr (TP)</span><span class="font-bold text-grn">${money(s.exp_profit)}</span></div>
+          <div class="flex justify-between"><span class="text-dim">Hesap riski</span><span class="font-bold">%${(s.risk_pct||0).toFixed(2)}</span></div>
+        </div>
+      </div>
+      <div class="bg-border2/20 rounded-lg p-4">
+        <div class="font-bold text-xs mb-2">🧠 SMART MONEY</div>
+        ${(s.sm_notes||[]).map(n=>`<div class="text-xs text-dim mb-1">◈ ${n}</div>`).join('')||'<div class="text-dim text-xs">—</div>'}
+        ${(s.trap_warnings||[]).map(t=>`<div class="text-xs text-red mt-1">${t}</div>`).join('')}
+      </div>
+    </div>
+    <div class="mt-4 bg-border2/20 rounded-lg p-4">
+      <div class="font-bold text-xs mb-2">🔍 GÖRÜŞ KARŞILAŞTIRMASI</div>
+      <div class="text-xs text-dim">${s.consensus_view||''}</div>
+      <div class="text-xs text-blu mt-1">${s.sm_view||''}</div>
+    </div>
+    <div class="mt-4 text-xs text-dim leading-relaxed">${(s.narrative||'').slice(0,600)}</div>
+  </div>`;
+  document.getElementById('sig-detail').scrollIntoView({behavior:'smooth',block:'nearest'});
+}
+
+function renderTrades(){
+  const tr=lastData.active_trades||[];
+  document.getElementById('trades-list').innerHTML = tr.length? tr.map(t=>`
+    <div class="border border-border2 rounded-lg p-4 ${t.pnl_gbp>=0?'glow-grn':'glow-red'} fade">
+      <div class="flex items-center justify-between mb-3">
+        <div class="flex items-center gap-3"><span class="font-bold text-base">${t.sym}</span>${dirBadge(t.direction)}<span class="text-dim text-xs">#${t.id||'—'}</span></div>
+        <div class="text-right"><div class="font-bold text-lg ${t.pnl_gbp>=0?'text-grn':'text-red'}">${money(t.pnl_gbp)}</div>
+        <div class="text-xs ${t.rr_live>=0?'text-grn':'text-red'}">${(t.rr_live>=0?'+':'')}${t.rr_live}R</div></div>
+      </div>
+      <div class="grid grid-cols-4 gap-3 text-xs mb-3">
+        <div><div class="text-dim">Giriş</div><div class="font-bold">${fmt(t.entry)}</div></div>
+        <div><div class="text-dim">Şu an</div><div class="font-bold">${fmt(t.current)}</div></div>
+        <div><div class="text-dim">SL</div><div class="font-bold text-red">${fmt(t.sl)}</div></div>
+        <div><div class="text-dim">TP</div><div class="font-bold text-grn">${fmt(t.tp)}</div></div>
+      </div>
+      <div class="h-2 bg-border2 rounded overflow-hidden"><div class="h-full ${t.pnl_gbp>=0?'bg-grn':'bg-red'} transition-all" style="width:${Math.abs(t.progress)}%"></div></div>
+      <div class="text-xs text-dim mt-1">TP'ye ilerleme: ${t.progress}%</div>
+    </div>`).join('') : '<div class="text-dim text-sm">Aktif açık pozisyon yok.</div>';
+}
+
+async function loadJournal(){
+  const d=await (await fetch(API+'/api/journal')).json();
+  const rows=d[jTab]||[];
+  const head=document.getElementById('j-head');
+  if(jTab==='open'){
+    head.innerHTML=`<th class="text-left p-3">ID</th><th class="text-left p-3">SEMBOL</th><th class="text-left p-3">GR</th><th class="text-left p-3">YÖN</th><th class="text-right p-3">GİRİŞ</th><th class="text-right p-3">SL</th><th class="text-right p-3">TP</th><th class="text-right p-3">SKOR</th><th class="text-left p-3">TARİH</th>`;
+    document.getElementById('j-tbody').innerHTML=rows.map(r=>`<tr class="border-t border-border2">
+      <td class="p-3 text-dim">#${r.id}</td><td class="p-3 font-bold">${r.sym}</td><td class="p-3 ${gradeColor(r.quality)}">${r.quality}</td>
+      <td class="p-3">${dirBadge(r.direction)}</td><td class="p-3 text-right">${fmt(r.entry)}</td>
+      <td class="p-3 text-right text-red">${fmt(r.sl)}</td><td class="p-3 text-right text-grn">${fmt(r.tp)}</td>
+      <td class="p-3 text-right font-bold">${r.score}</td><td class="p-3 text-dim">${(r.created||'').slice(0,16)}</td></tr>`).join('')||emptyRow(9);
+  } else {
+    const isTP=jTab==='tp';
+    head.innerHTML=`<th class="text-left p-3">ID</th><th class="text-left p-3">SEMBOL</th><th class="text-left p-3">YÖN</th><th class="text-right p-3">GİRİŞ</th><th class="text-right p-3">ÇIKIŞ</th><th class="text-right p-3">GERÇEK R</th><th class="text-right p-3">HEDEF R</th><th class="text-left p-3">TARİH</th>`;
+    document.getElementById('j-tbody').innerHTML=rows.map(r=>`<tr class="border-t border-border2">
+      <td class="p-3 text-dim">#${r.id}</td><td class="p-3 font-bold">${r.sym}</td><td class="p-3">${dirBadge(r.direction)}</td>
+      <td class="p-3 text-right">${fmt(r.entry)}</td><td class="p-3 text-right">${fmt(r.out_price)}</td>
+      <td class="p-3 text-right font-bold ${isTP?'text-grn':'text-red'}">${(r.act_rr>=0?'+':'')}${(r.act_rr||0).toFixed(2)}R</td>
+      <td class="p-3 text-right text-dim">${(r.rr_t||0).toFixed(2)}R</td>
+      <td class="p-3 text-dim">${(r.out_at||r.created||'').slice(0,16)}</td></tr>`).join('')||emptyRow(8);
+  }
+}
+const emptyRow=n=>`<tr><td colspan="${n}" class="p-6 text-center text-dim">Kayıt yok</td></tr>`;
+
+function renderAnalytics(){
+  const a=lastData.analytics;
+  document.getElementById('an-kpi').innerHTML=
+    kpi('Toplam İşlem',a.total||0,`${a.wins||0}TP / ${a.losses||0}SL`)+
+    kpi('Win Rate',(a.wr||0).toFixed(1)+'%','başarı oranı',a.wr>=55?'text-grn':'text-ylw')+
+    kpi('Max Drawdown',(a.mdd||0).toFixed(1)+'%','en büyük düşüş','text-red')+
+    kpi('Kelly %',(a.kelly||0).toFixed(1)+'%','optimal risk','text-blu');
+  drawEquity('anEquity','anEquity_inst', a.equity_curve||[]);
+  // quality bar
+  const bq=a.by_quality||{}, ql=['A+','A','B+'];
+  drawBar('anQuality','anQuality_inst', ql, ql.map(q=>(bq[q]||{}).wr||0), '#00ff88', 'Win Rate %');
+  // weights
+  const w=a.weights||{}, wk=Object.keys(w);
+  drawBar('anWeights','anWeights_inst', wk.map(k=>k.replace('f_','')), wk.map(k=>w[k]), '#3b82f6', 'Ağırlık');
+  // best
+  document.getElementById('an-best').innerHTML=(a.best_syms||[]).map((b,i)=>`
+    <div class="flex items-center justify-between p-2 rounded bg-border2/30 mb-2">
+      <span class="font-bold">${['🥇','🥈','🥉','4️⃣','5️⃣'][i]||''} ${b.sym}</span>
+      <div class="flex gap-4 text-xs"><span class="text-grn">${b.wr}% WR</span><span class="text-dim">avg ${(b.avg_rr>=0?'+':'')}${b.avg_rr}R</span><span class="text-dim">${b.t} işlem</span></div>
+    </div>`).join('')||'<div class="text-dim text-xs">Yeterli veri yok</div>';
+}
+
+function renderMarket(){
+  const groups={};
+  (lastData.market||[]).forEach(m=>{ (groups[m.group]=groups[m.group]||[]).push(m); });
+  let html='';
+  for(const g in groups){
+    html+=`<tr class="bg-border2/20"><td colspan="6" class="p-2 text-dim text-xs font-bold">── ${g} ──</td></tr>`;
+    html+=groups[g].map(m=>`<tr class="border-t border-border2">
+      <td class="p-3 font-bold">${m.sym}</td><td class="p-3 text-right font-bold">${fmt(m.price)}</td>
+      <td class="p-3 text-right ${m.chg>=0?'text-grn':'text-red'}">${pct(m.chg)}</td>
+      <td class="p-3 text-right text-grn">${fmt(m.high)}</td><td class="p-3 text-right text-red">${fmt(m.low)}</td>
+      <td class="p-3 text-dim">${m.updated||'—'}</td></tr>`).join('');
+  }
+  document.getElementById('mkt-tbody').innerHTML=html||'<tr><td colspan="6" class="p-6 text-center text-dim">Piyasa verisi yükleniyor…</td></tr>';
+}
+
+async function loadNews(){
+  const d=await (await fetch(API+'/api/news')).json();
+  document.getElementById('news-list').innerHTML=d.length? d.map(n=>{
+    const ic=n.importance>=80?'border-red':n.importance>=60?'border-ylw':'border-blu';
+    const bc=n.bias==='Yükseliş'?'text-grn':n.bias==='Düşüş'?'text-red':'text-dim';
+    return `<div class="border-l-4 ${ic} bg-border2/20 rounded-r-lg p-4">
+      <div class="flex justify-between items-start mb-2"><div class="font-bold text-sm flex-1">${n.headline||''}</div>
+      <span class="text-xs px-2 py-0.5 rounded bg-border2 ml-3">${n.importance}/100</span></div>
+      <div class="flex gap-4 text-xs">
+        <span class="${bc} font-bold">${n.bias||'Nötr'}</span>
+        <span class="text-grn">↑%${n.bull_pct}</span><span class="text-red">↓%${n.bear_pct}</span>
+        <span class="text-dim">güven ${n.conf}/100</span><span class="text-dim">${n.dur||''}</span>
+        <span class="text-ylw">${n.caution||''}</span>
+      </div></div>`;
+  }).join('') : '<div class="text-dim text-sm">Haber bekleniyor…</div>';
+}
+
+// ── Charts ──
+function drawEquity(canvasId, instKey, data){
+  const ctx=document.getElementById(canvasId); if(!ctx) return;
+  if(window[instKey]) window[instKey].destroy();
+  window[instKey]=new Chart(ctx,{type:'line',data:{labels:data.map((_,i)=>i),
+    datasets:[{data:data,borderColor:'#00ff88',backgroundColor:'rgba(0,255,136,.08)',fill:true,tension:.3,pointRadius:0,borderWidth:2}]},
+    options:{plugins:{legend:{display:false}},scales:{x:{display:false},y:{grid:{color:'#1e2028'},ticks:{color:'#6b7280'}}},responsive:true,maintainAspectRatio:false}});
+}
+function drawBar(canvasId, instKey, labels, data, color, label){
+  const ctx=document.getElementById(canvasId); if(!ctx) return;
+  if(window[instKey]) window[instKey].destroy();
+  window[instKey]=new Chart(ctx,{type:'bar',data:{labels:labels,
+    datasets:[{label:label,data:data,backgroundColor:color+'66',borderColor:color,borderWidth:1.5}]},
+    options:{plugins:{legend:{display:false}},scales:{x:{grid:{display:false},ticks:{color:'#6b7280'}},y:{grid:{color:'#1e2028'},ticks:{color:'#6b7280'}}},responsive:true,maintainAspectRatio:false}});
+}
+
+// ── Clock ──
+setInterval(()=>{document.getElementById('clock').textContent=new Date().toLocaleTimeString('tr-TR');},1000);
+
+// ── Boot ──
+connectWS();
+// initial REST fetch for instant content
+fetch(API+'/api/snapshot').then(r=>r.json()).then(d=>{lastData={...d,signals:[],active_trades:d.active_trades};
+  fetch(API+'/api/signals').then(r=>r.json()).then(s=>{lastData.signals=s;render();});});
+loadJournal(); loadNews();
+setInterval(()=>{const v=[...document.querySelectorAll('.view')].find(x=>!x.classList.contains('hidden'))?.dataset.view;
+  if(v==='journal')loadJournal(); if(v==='news')loadNews();},8000);
+</script>
+</body>
+</html>
