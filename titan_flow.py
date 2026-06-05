@@ -413,29 +413,100 @@ def _tg_chart_png(s):
         title = f"\n{sym}  {arrow}   {grade} {score:.0f}/100   1:{rr} R:R   Olasilik %{prob:.0f}"
 
         kw = dict(type="candle", style=st, addplot=aps, volume=True,
-                  title=title, figratio=(16,9), figscale=1.1,
-                  savefig=dict(fname=None, dpi=120, bbox_inches="tight"))
+                  title=title, figratio=(16,9), figscale=1.2, returnfig=True)
         if hl_prices:
             kw["hlines"] = dict(hlines=hl_prices, colors=hl_colors,
-                                linestyle=hl_styles, linewidths=1.0)
-        buf = _io.BytesIO()
-        kw["savefig"]["fname"] = buf
+                                linestyle=hl_styles, linewidths=1.1)
         # Giriş↔TP ve Giriş↔SL bölgelerini renkli vurgula (kar/zarar alanları)
         fill = []
         try:
             if entry and d.get("tp"):
-                fill.append(dict(y1=float(entry), y2=float(d["tp"]),
-                                 alpha=0.07, color="#00ff88"))
+                fill.append(dict(y1=float(entry), y2=float(d["tp"]), alpha=0.06, color="#00ff88"))
             if entry and d.get("sl"):
-                fill.append(dict(y1=float(entry), y2=float(d["sl"]),
-                                 alpha=0.07, color="#ff3b5c"))
+                fill.append(dict(y1=float(entry), y2=float(d["sl"]), alpha=0.06, color="#ff3b5c"))
             if fill: kw["fill_between"] = fill
         except Exception:
             pass
-        mpf.plot(df, **kw)
+
+        fig, axl = mpf.plot(df, **kw)
+        ax = axl[0]   # fiyat paneli
+        n = len(df)
+        xr = n - 1
+        hi = float(df["High"].max()); lo = float(df["Low"].min())
+        rng = (hi - lo) or 1
+
+        # ── İnsan tipi etiketler (sağ kenarda kutu içinde) ───────────────
+        def _tag(price, text, color):
+            if price is None: return
+            try: price = float(price)
+            except: return
+            ax.annotate(text, xy=(xr, price), xytext=(6, 0),
+                        textcoords="offset points", va="center", ha="left",
+                        fontsize=8.5, fontweight="bold", color="#0a0b0e",
+                        bbox=dict(boxstyle="round,pad=0.3", fc=color, ec="none", alpha=0.95))
+        _tag(entry,       f"GİRİŞ {fp_plain(entry)}",   "#e8eaf0")
+        _tag(d.get("sl"), f"SL {fp_plain(d.get('sl'))}", "#ff3b5c")
+        _tag(d.get("tp"), f"TP {fp_plain(d.get('tp'))}", "#00ff88")
+
+        # ── Yön oku (giriş bölgesine işaret eden ok) ─────────────────────
+        if entry:
+            up = direction == "LONG"
+            ay = float(entry) + (rng*0.16)*(-1 if up else 1)
+            ax.annotate("AL  ▲" if up else "SAT  ▼",
+                        xy=(xr-2, float(entry)), xytext=(xr-12, ay),
+                        fontsize=11, fontweight="bold",
+                        color="#00ff88" if up else "#ff3b5c",
+                        arrowprops=dict(arrowstyle="-|>", lw=2.2,
+                                        color="#00ff88" if up else "#ff3b5c"))
+
+        # ── Yapı kırılımı (BOS/CHOCH) — son swing'i işaretle ─────────────
+        try:
+            sh_idx = int(df["High"].tail(40).values.argmax()) + (n-40 if n>40 else 0)
+            sl_idx = int(df["Low"].tail(40).values.argmin())  + (n-40 if n>40 else 0)
+            ax.annotate("Direnç / likidite", xy=(sh_idx, res), xytext=(sh_idx-8, res+rng*0.05),
+                        fontsize=7.5, color="#6b7280",
+                        arrowprops=dict(arrowstyle="->", lw=1, color="#6b7280"))
+            ax.annotate("Destek / talep", xy=(sl_idx, sup), xytext=(sl_idx-8, sup-rng*0.06),
+                        fontsize=7.5, color="#6b7280",
+                        arrowprops=dict(arrowstyle="->", lw=1, color="#6b7280"))
+        except Exception:
+            pass
+
+        # ── Analiz kutusu (sol üst — okunabilir gerekçe) ─────────────────
+        bias = "Yükseliş yapısı" if direction=="LONG" else "Düşüş yapısı"
+        reasons = (d.get("reasons") or [])[:3]
+        lines = [f"{sym}   |   {bias}",
+                 f"EMA 9/20/50 {'pozitif dizilim' if direction=='LONG' else 'negatif dizilim'}",
+                 f"R:R 1:{rr}  ·  Olasılık %{prob:.0f}  ·  {grade}"]
+        for rsn in reasons:
+            lines.append(f"• {str(rsn)[:46]}")
+        txt = "\n".join(lines)
+        ax.text(0.012, 0.975, txt, transform=ax.transAxes, va="top", ha="left",
+                fontsize=8, color="#e8eaf0", linespacing=1.5,
+                bbox=dict(boxstyle="round,pad=0.5", fc="#111318", ec="#1e2028", alpha=0.92))
+
+        # ── Watermark (profesyonel görünüm) ──────────────────────────────
+        ax.text(0.99, 0.02, "TITAN PRIME", transform=ax.transAxes,
+                va="bottom", ha="right", fontsize=9, fontweight="bold",
+                color="#1e2028", alpha=0.8)
+
+        buf = _io.BytesIO()
+        fig.savefig(buf, dpi=130, bbox_inches="tight", facecolor="#0a0b0e")
+        import matplotlib.pyplot as _plt; _plt.close(fig)
         buf.seek(0); return buf.read()
     except Exception:
         return None
+
+def fp_plain(v):
+    """Grafik etiketleri için sade fiyat formatı (rich markup yok)."""
+    if v is None: return "—"
+    try: v=float(v)
+    except: return str(v)
+    a=abs(v)
+    if a>10000: return f"{v:,.1f}"
+    if a>100:   return f"{v:,.3f}"
+    if a>1:     return f"{v:.4f}"
+    return f"{v:.5f}"
 
 def tg_setup_alert(s):
     """VIP-grade trade signal alert."""
@@ -2579,16 +2650,28 @@ def compute_stats():
         # Feature win-rate → adaptive weights (lower threshold to 5 trades for faster learning)
         feats=["f_ema","f_rsi","f_macd","f_sweep","f_ob","f_fvg","f_struct","f_cot","f_news"]
         fstats={}; new_w={}
+        # Recency-weighted öğrenme: son işlemler 2x ağırlıklı (closed eskiden->yeniye)
+        n_closed=len(closed)
         for f in feats:
             fr=[r for r in closed if r[f]==1]
             fw=[r for r in fr if r["status"]=="TP"]
+            # Düz win-rate
             fwr=round(len(fw)/len(fr)*100,1) if fr else None
-            fstats[f]={"n":len(fr),"w":len(fw),"wr":fwr}
-            if len(fr)>=5 and fwr is not None:
-                # Stronger weighting: high win-rate features get boosted more
-                new_w[f]=round(max(0.4,min(1.8,0.4+fwr/55)),3)
+            # Recency-ağırlıklı win-rate (son işlemler daha çok sayılır)
+            wnum=wden=0.0
+            for r in fr:
+                try: pos=closed.index(r)
+                except ValueError: pos=0
+                rw=1.0+(pos/max(1,n_closed-1))   # eski=1.0 → yeni=2.0
+                wden+=rw
+                if r["status"]=="TP": wnum+=rw
+            rwr=round(wnum/wden*100,1) if wden else fwr
+            fstats[f]={"n":len(fr),"w":len(fw),"wr":fwr,"rwr":rwr}
+            # Hızlı öğrenme: min 3 örnek yeterli, recency-WR kullanılır, daha geniş aralık
+            if len(fr)>=3 and rwr is not None:
+                new_w[f]=round(max(0.3,min(2.0,0.35+rwr/50)),3)
                 c.execute("UPDATE weights SET mult=?,win_rate=?,n=?,updated=? WHERE feature=?",
-                          (new_w[f],fwr,len(fr),datetime.utcnow().isoformat(timespec="seconds"),f))
+                          (new_w[f],rwr,len(fr),datetime.utcnow().isoformat(timespec="seconds"),f))
             else: new_w[f]=adap_weights.get(f,1.0)  # keep existing weight
         c.commit()
 
@@ -2668,8 +2751,8 @@ def compute_stats():
                 "best_syms":best_syms,"equity_curve":equity[-50:],
                 "streak":streak,"streak_type":streak_type,
             }
-        # Adaptive learning: lower threshold to 5 trades
-        if total>=5:
+        # Adaptive learning: hızlandırıldı — sadece 3 işlemden sonra öğrenmeye başlar
+        if total>=3:
             adap_weights.update(new_w)
 
 def stats_loop():
@@ -2699,10 +2782,11 @@ def run_analysis():
             r=score_setup(sym,candles,md.price,sn.get(sym,[]))
             if r:
                 results.append(r)
-                try: log_signal(r)
-                except: pass
-                # Telegram alert for A+/A/B+ setups
+                # Sadece GERÇEKTEN onaylı A+/A/B+ sinyaller DB'ye yazılır ve
+                # izlenen işleme dönüşür — böylece "onaylı görünüp kaybolma" biter.
                 if r.get("quality") in ("A+","A","B+") and r.get("status")=="APPROVED":
+                    try: log_signal(r)
+                    except: pass
                     try: tg_setup_alert(r)
                     except: pass
         except: pass
