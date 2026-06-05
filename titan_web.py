@@ -75,17 +75,17 @@ def start_engine():
     if _engine_started:
         return
     _engine_started = True
-    threads = [
-        tf.background_loop,
-        tf.cot_loop,
-        tf.monitor_loop,
-        tf.stats_loop,
-        tf.portfolio_loop,
-        tf.performance_report_loop,
-        _analysis_loop,
-    ]
-    for fn in threads:
-        threading.Thread(target=fn, daemon=True).start()
+    # Hepsi watchdog tarafından izlenecek — ilk başlatma burada
+    for name, fn in [
+        ("background_loop",          tf.background_loop),
+        ("cot_loop",                 tf.cot_loop),
+        ("monitor_loop",             tf.monitor_loop),
+        ("stats_loop",               tf.stats_loop),
+        ("portfolio_loop",           tf.portfolio_loop),
+        ("performance_report_loop",  tf.performance_report_loop),
+        ("analysis_loop",            _analysis_loop),
+    ]:
+        threading.Thread(target=fn, daemon=True, name=name).start()
     try:
         tf._check_open()
     except Exception:
@@ -638,15 +638,62 @@ async def websocket_endpoint(ws: WebSocket):
         manager.disconnect(ws)
 
 # ══════════════════════════════════════════════════════════════════════════════
+# WATCHDOG + WINDOWS UYKU ENGELİ
+# ══════════════════════════════════════════════════════════════════════════════
+def _keep_awake():
+    """Windows'un uyku moduna girmesini engeller + thread'leri izler."""
+    # Windows SetThreadExecutionState — ES_SYSTEM_REQUIRED | ES_CONTINUOUS
+    try:
+        import ctypes
+        ES_CONTINUOUS      = 0x80000000
+        ES_SYSTEM_REQUIRED = 0x00000001
+        ES_DISPLAY_REQUIRED= 0x00000002
+        ctypes.windll.kernel32.SetThreadExecutionState(
+            ES_CONTINUOUS | ES_SYSTEM_REQUIRED | ES_DISPLAY_REQUIRED)
+        _log("Windows uyku modu engellendi (SetThreadExecutionState)")
+    except Exception:
+        pass  # Linux/Mac'te sessizce geç
+
+    critical_threads = [
+        ("background_loop",          tf.background_loop),
+        ("monitor_loop",             tf.monitor_loop),
+        ("stats_loop",               tf.stats_loop),
+        ("analysis_loop",            _analysis_loop),
+        ("ws_cache",                 _refresh_ws_cache),
+    ]
+    running: dict = {}
+
+    while True:
+        for name, fn in critical_threads:
+            t = running.get(name)
+            if t is None or not t.is_alive():
+                _log(f"Thread yeniden başlatılıyor: {name}", "WARN")
+                nt = threading.Thread(target=fn, daemon=True, name=name)
+                nt.start()
+                running[name] = nt
+        # Windows uyku engelini 55 dakikada bir tazele
+        try:
+            import ctypes
+            ctypes.windll.kernel32.SetThreadExecutionState(
+                0x80000000 | 0x00000001 | 0x00000002)
+        except Exception:
+            pass
+        time.sleep(60)
+
+# ══════════════════════════════════════════════════════════════════════════════
 def main():
     start_engine()
+    # Watchdog + uyku engeli thread'i başlat
+    threading.Thread(target=_keep_awake, daemon=True, name="watchdog").start()
     print("\n" + "=" * 60)
     print("  TITAN PRIME ELITE — Institutional Trading Terminal")
     print("=" * 60)
-    print("  Tarayicida ac:  http://localhost:8000")
-    print("  Health check:   http://localhost:8000/health")
-    print(f"  Chart engine:   {'✓ mplfinance' if _CHART_OK else '✗ pip install mplfinance'}")
-    print("  Kapatmak icin:  CTRL + C")
+    print("  Tarayicida ac:   http://localhost:8000")
+    print("  Health check:    http://localhost:8000/health")
+    print(f"  Chart engine:    {'✓ mplfinance' if _CHART_OK else '✗ pip install mplfinance'}")
+    print("  Uyku modu:       ENGELLENDI (otomatik)")
+    print("  Watchdog:        AKTIF (thread crash koruması)")
+    print("  Kapatmak icin:   CTRL + C")
     print("=" * 60 + "\n")
     uvicorn.run(app, host="0.0.0.0", port=8000, log_level="warning")
 
