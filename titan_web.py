@@ -211,7 +211,10 @@ def heatmap_data():
 
 def _signal_to_dict(s):
     sz = s.get("sizing", {}) or {}
-    ai = _derive_ai_scores(s)
+    try:
+        ai = tf.ai_decision_scores(s)
+    except Exception:
+        ai = _derive_ai_scores(s)
     # session from signal time or now
     st_time = s.get("time", "")
     try:

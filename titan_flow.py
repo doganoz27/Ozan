@@ -307,6 +307,73 @@ def send_telegram(message: str):
             timeout=8)
     except: pass
 
+# ── AI Karar Motoru — bireysel skorlar ───────────────────────────────────────
+def ai_decision_scores(s):
+    """Sinyalden 8 bireysel AI skoru türet (0-100)."""
+    reasons  = " ".join(s.get("reasons", []) or []).upper()
+    sm_notes = " ".join(s.get("sm_notes", []) or []).upper()
+    neg      = " ".join(s.get("neg_factors", []) or []).upper()
+    base     = (s.get("score") or 50) / 100
+    def kw(*words): return any(w in reasons or w in sm_notes for w in words)
+    clamp = lambda v: int(min(100, max(0, round(v))))
+    return {
+        "Trend":    clamp(50 + (base-0.5)*80 + (15 if kw("EMA","TREND","YÜKSEL","DÜŞÜŞ") else 0) + (-10 if "KARŞI" in neg else 0)),
+        "Yapı":     clamp(45 + (base-0.5)*60 + (20 if kw("BOS","CHOCH","KIRILIM","YAPI") else 0) + (10 if kw("DESTEK","DİRENÇ") else 0)),
+        "Likidite": clamp(40 + (base-0.5)*70 + (20 if kw("LİKİDİTE","SWEEP","OB","BLOK","FVG") else 0)),
+        "Hacim":    clamp(50 + (base-0.5)*50 + (15 if kw("HACİM","VOLUME") else 0)),
+        "Momentum": clamp(45 + (base-0.5)*70 + (15 if kw("RSI","MACD","MOMENTUM") else 0) + (-10 if ("AŞIRI ALIM" in neg or "AŞIRI SATIM" in neg) else 0)),
+        "Seans":    {"LONDRA+NY":85,"NEW YORK":80,"LONDRA":75,"ASYA":55}.get(signal_session(), 65),
+        "Haber":    clamp(50 + (1-(_news_risk_num(s)))*50),
+        "Risk":     clamp(100 - (s.get("contrarian_score") or 50)*0.6),
+    }
+
+def _news_risk_num(s):
+    nr = s.get("news_risk")
+    if isinstance(nr, (int, float)): return float(nr)
+    m = {"Düşük":0.2, "Orta":0.5, "Yüksek":0.8}
+    return m.get(str(nr), 0.5)
+
+def signal_session():
+    h = datetime.utcnow().hour
+    if h < 7:  return "ASYA"
+    if h < 12: return "LONDRA"
+    if h < 16: return "LONDRA+NY"
+    if h < 21: return "NEW YORK"
+    return "ASYA"
+
+def signal_strategy(s):
+    txt = " ".join(s.get("reasons", []) or []).upper()
+    if any(w in txt for w in ("ICT","OB","FVG","SMART")): return "ICT / SMC"
+    if "TREND" in txt and "EMA" in txt:                   return "Trend Takip"
+    if "KONTRAR" in txt or (s.get("contrarian_score",0) or 0) > 70: return "Kontraryan"
+    return "Yapı Kırılımı"
+
+def signal_probability(s):
+    sc = s.get("score") or 0; conf = s.get("confidence") or sc
+    return min(99, max(1, round(sc*0.6 + conf*0.4)))
+
+def _tg_chart_png(sym):
+    """Opsiyonel mum grafiği üret (mplfinance kuruluysa)."""
+    try:
+        import mplfinance as mpf, matplotlib
+        matplotlib.use("Agg")
+        import io as _io
+        tmap = {"EUR/USD":"EURUSD=X","GBP/USD":"GBPUSD=X","USD/JPY":"JPY=X",
+                "XAU/USD":"GC=F","XAG/USD":"SI=F","WTI":"CL=F","BRENT":"BZ=F"}
+        ticker = tmap.get(sym, sym.replace("/","")+"=X")
+        df = yf.Ticker(ticker).history(period="5d", interval="15m")
+        if df.empty: return None
+        if df.index.tzinfo: df.index = df.index.tz_localize(None)
+        mc = mpf.make_marketcolors(up="#00ff88", down="#ff3b5c", wick="inherit", edge="inherit", volume="#3b82f6")
+        st = mpf.make_mpf_style(marketcolors=mc, facecolor="#0a0b0e", figcolor="#0a0b0e",
+                                gridcolor="#1e2028", rc={"axes.labelcolor":"#6b7280","xtick.color":"#6b7280","ytick.color":"#6b7280"})
+        buf = _io.BytesIO()
+        mpf.plot(df.tail(60), type="candle", style=st, title=f" {sym}", volume=True,
+                 savefig=dict(fname=buf, dpi=110, bbox_inches="tight"))
+        buf.seek(0); return buf.read()
+    except Exception:
+        return None
+
 def tg_setup_alert(s):
     """VIP-grade trade signal alert."""
     key=f"{s['sym']}_{s['direction']}_{round(s['score'])}"
@@ -382,6 +449,21 @@ def tg_setup_alert(s):
     c_bar="█"*int(c_score/10)+"░"*(10-int(c_score/10))
     c_emoji="⚡" if c_score>=70 else "〰️" if c_score>=40 else "➡️"
 
+    # AI Karar Motoru bireysel skorları
+    ai=ai_decision_scores(s)
+    def _mini(v):
+        f=int(v/20); return "▰"*f+"▱"*(5-f)
+    ai_block=("\n🤖 <b>AI KARAR MOTORU</b>\n"
+        f"  Trend     {_mini(ai['Trend'])} {ai['Trend']}\n"
+        f"  Yapı      {_mini(ai['Yapı'])} {ai['Yapı']}\n"
+        f"  Likidite  {_mini(ai['Likidite'])} {ai['Likidite']}\n"
+        f"  Hacim     {_mini(ai['Hacim'])} {ai['Hacim']}\n"
+        f"  Momentum  {_mini(ai['Momentum'])} {ai['Momentum']}\n"
+        f"  Risk      {_mini(ai['Risk'])} {ai['Risk']}\n")
+    prob=signal_probability(s); sess=signal_session(); strat=signal_strategy(s)
+    meta_block=(f"🎲 Olasılık : <b>%{prob:.0f}</b>  |  🕑 Seans: <b>{sess}</b>\n"
+                f"🧩 Strateji : <b>{strat}</b>\n")
+
     now_str=datetime.now().strftime("%d.%m.%Y %H:%M")
 
     msg=(
@@ -399,19 +481,32 @@ def tg_setup_alert(s):
         f"🟢 <b>TAKE PROFIT</b>  <code>{fp(s['tp'])}</code>\n\n"
         f"⚖️ <b>Risk/Ödül : 1:{rr}</b>\n"
         f"🎯 Güven    : <b>{s.get('confidence',sc):.0f}/100</b>\n"
-        f"📰 Haber    : <b>{news_risk}</b>\n\n"
+        f"📰 Haber    : <b>{news_risk}</b>\n"
+        f"{meta_block}\n"
         f"{c_emoji} <b>Kontraryan Skoru</b>: {c_score}/100\n"
         f"   {c_bar}  {c_label}\n"
-        f"{cv_block}{sm_block}{trap_block}{sz_block}\n"
+        f"{ai_block}{cv_block}{sm_block}{trap_block}{sz_block}\n"
         f"━━━━━━━━━━━━━━━━━━━━━━━━━\n"
         f"🕐 {now_str}\n"
         f"🔖 Sinyal ID: <code>#{s.get('_tg_signal_id',0):05d}</code>\n"
         f"⚡ <b>BU SİNYAL ÖZEL VE KİŞİSELDİR</b> ⚡")
     def _send():
         try:
-            requests.post(f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage",
-                json={"chat_id":TELEGRAM_CHAT_ID,"text":msg,"parse_mode":"HTML",
-                      "disable_web_page_preview":True},timeout=8)
+            png=_tg_chart_png(sym)
+            if png:
+                # Grafik + açıklama (caption 1024 karakter sınırı için kısalt)
+                cap=msg if len(msg)<=1024 else msg[:1015]+"…"
+                requests.post(f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendPhoto",
+                    data={"chat_id":TELEGRAM_CHAT_ID,"caption":cap,"parse_mode":"HTML"},
+                    files={"photo":("chart.png",png,"image/png")},timeout=20)
+                if len(msg)>1024:
+                    requests.post(f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage",
+                        json={"chat_id":TELEGRAM_CHAT_ID,"text":msg,"parse_mode":"HTML",
+                              "disable_web_page_preview":True},timeout=8)
+            else:
+                requests.post(f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage",
+                    json={"chat_id":TELEGRAM_CHAT_ID,"text":msg,"parse_mode":"HTML",
+                          "disable_web_page_preview":True},timeout=8)
         except: pass
     threading.Thread(target=_send,daemon=True).start()
 
