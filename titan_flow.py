@@ -403,8 +403,6 @@ def _tg_chart_png(s):
         _add(d.get("eh"),  "#e8eaf0", ":")   # Giriş zon üst
         _add(d.get("sl"),  "#ff3b5c", "--")  # Stop Loss
         _add(d.get("tp"),  "#00ff88", "--")  # Take Profit
-        _add(sup,          "#6b7280", ":")   # Destek
-        _add(res,          "#6b7280", ":")   # Direnç
 
         direction = d.get("direction","")
         score = d.get("score",0); grade = d.get("quality","")
@@ -435,6 +433,33 @@ def _tg_chart_png(s):
         hi = float(df["High"].max()); lo = float(df["Low"].min())
         rng = (hi - lo) or 1
 
+        # ── Diyagonal trend çizgileri / kanal (gerçek trader gibi) ───────
+        highs = df["High"].values; lows = df["Low"].values
+        def _pivots(arr, kind, lw=3, rw=3):
+            out=[]
+            for i in range(lw, len(arr)-rw):
+                w=arr[i-lw:i+rw+1]
+                if kind=="high" and arr[i]==max(w): out.append(i)
+                if kind=="low"  and arr[i]==min(w): out.append(i)
+            return out
+        def _trendline(idxs, vals, color, label):
+            # ilk ve son önemli pivotu birleştirip tüm grafiği kateden çizgi
+            if len(idxs)<2: return
+            i1,i2=idxs[0],idxs[-1]
+            if i2==i1: return
+            y1,y2=vals[i1],vals[i2]
+            slope=(y2-y1)/(i2-i1)
+            x0=0; y0=y1+slope*(x0-i1)
+            x_end=xr; y_end=y1+slope*(x_end-i1)
+            ax.plot([x0,x_end],[y0,y_end], color=color, lw=1.5, alpha=0.9,
+                    linestyle="-", solid_capstyle="round")
+            ax.annotate(label, xy=(x_end, y_end), xytext=(-2,4),
+                        textcoords="offset points", fontsize=7.5,
+                        color=color, ha="right", alpha=0.95)
+        ph=_pivots(highs,"high"); pl=_pivots(lows,"low")
+        _trendline(ph, highs, "#9aa3b7", "trend hattı")
+        _trendline(pl, lows,  "#9aa3b7", "trend hattı")
+
         # ── İnsan tipi etiketler (sağ kenarda kutu içinde) ───────────────
         def _tag(price, text, color):
             if price is None: return
@@ -458,19 +483,6 @@ def _tg_chart_png(s):
                         color="#00ff88" if up else "#ff3b5c",
                         arrowprops=dict(arrowstyle="-|>", lw=2.2,
                                         color="#00ff88" if up else "#ff3b5c"))
-
-        # ── Yapı kırılımı (BOS/CHOCH) — son swing'i işaretle ─────────────
-        try:
-            sh_idx = int(df["High"].tail(40).values.argmax()) + (n-40 if n>40 else 0)
-            sl_idx = int(df["Low"].tail(40).values.argmin())  + (n-40 if n>40 else 0)
-            ax.annotate("Direnç / likidite", xy=(sh_idx, res), xytext=(sh_idx-8, res+rng*0.05),
-                        fontsize=7.5, color="#6b7280",
-                        arrowprops=dict(arrowstyle="->", lw=1, color="#6b7280"))
-            ax.annotate("Destek / talep", xy=(sl_idx, sup), xytext=(sl_idx-8, sup-rng*0.06),
-                        fontsize=7.5, color="#6b7280",
-                        arrowprops=dict(arrowstyle="->", lw=1, color="#6b7280"))
-        except Exception:
-            pass
 
         # ── Analiz kutusu (sol üst — okunabilir gerekçe) ─────────────────
         bias = "Yükseliş yapısı" if direction=="LONG" else "Düşüş yapısı"
