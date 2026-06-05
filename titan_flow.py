@@ -2543,12 +2543,12 @@ def log_signal(s):
             cur=c.execute("""INSERT INTO signals(sym,quality,direction,entry,sl,tp,
                 rr_t,score,f_ema,f_rsi,f_macd,f_sweep,f_ob,f_fvg,f_struct,f_cot,f_news,
                 status,created)
-                VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,'OPEN',?)""",
+                VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                 (s["sym"],s["quality"],s["direction"],s["price"],s["sl"],
                  s["tp"],s["rr"],s["score"],
                  fl.get("f_ema",0),fl.get("f_rsi",0),fl.get("f_macd",0),fl.get("f_sweep",0),
                  fl.get("f_ob",0),fl.get("f_fvg",0),fl.get("f_struct",0),fl.get("f_cot",0),fl.get("f_news",0),
-                 created))
+                 "OPEN", created))
             sig_id=cur.lastrowid
             # Shadow trade
             if sz:
