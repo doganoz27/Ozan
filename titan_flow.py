@@ -353,21 +353,42 @@ def signal_probability(s):
     return min(99, max(1, round(sc*0.6 + conf*0.4)))
 
 def _tg_chart_png(s):
-    """Kurumsal analiz grafiği — Giriş/SL/TP, EMA, zon ve S/R çizgileriyle.
-    s: sinyal sözlüğü (sym, direction, el, eh, sl, tp, score, quality)."""
+    """Kurumsal analiz grafiği — Giriş/SL/TP, EMA, trend kanalı ve etiketlerle.
+    Sinyalin HESAPLANDIĞI mum verisini kullanır (tutarlılık için)."""
     try:
         import mplfinance as mpf, matplotlib
         matplotlib.use("Agg")
         import io as _io
         import pandas as _pd
         sym = s["sym"] if isinstance(s, dict) else s
-        tmap = {"EUR/USD":"EURUSD=X","GBP/USD":"GBPUSD=X","USD/JPY":"JPY=X",
-                "XAU/USD":"GC=F","XAG/USD":"SI=F","WTI":"CL=F","BRENT":"BZ=F"}
-        ticker = tmap.get(sym, sym.replace("/","")+"=X")
-        df = yf.Ticker(ticker).history(period="5d", interval="15m")
-        if df.empty: return None
-        if df.index.tzinfo: df.index = df.index.tz_localize(None)
-        df = df.tail(70).copy()
+
+        # ── 1) Önce sistemin kendi mum verisini kullan (sinyalle BİREBİR tutarlı) ──
+        df = None
+        try:
+            with lock:
+                md = market.get(sym)
+                raw = list(md.candles) if (md and md.candles) else []
+            if len(raw) >= 30:
+                rows = []
+                for cdl in raw:
+                    # (t, o, h, l, c, v)
+                    t, o, h, l, cl, v = cdl[0], cdl[1], cdl[2], cdl[3], cdl[4], cdl[5]
+                    rows.append((datetime.utcfromtimestamp(t) if t else None, o, h, l, cl, v))
+                df = _pd.DataFrame(rows, columns=["dt","Open","High","Low","Close","Volume"])
+                df = df.dropna(subset=["dt"]).set_index("dt")
+                df = df.tail(80).copy()
+        except Exception:
+            df = None
+
+        # ── 2) Yedek: yfinance (sistem verisi yoksa) ──
+        if df is None or len(df) < 30:
+            tmap = {"EUR/USD":"EURUSD=X","GBP/USD":"GBPUSD=X","USD/JPY":"JPY=X",
+                    "XAU/USD":"GC=F","XAG/USD":"SI=F","WTI":"CL=F","BRENT":"BZ=F"}
+            ticker = tmap.get(sym, sym.replace("/","")+"=X")
+            df = yf.Ticker(ticker).history(period="7d", interval="1h")
+            if df is None or df.empty: return None
+            if df.index.tzinfo: df.index = df.index.tz_localize(None)
+            df = df.tail(80).copy()
 
         # EMA'lar (trend yapısı)
         df["EMA9"]  = df["Close"].ewm(span=9,  adjust=False).mean()
@@ -435,30 +456,43 @@ def _tg_chart_png(s):
 
         # ── Diyagonal trend çizgileri / kanal (gerçek trader gibi) ───────
         highs = df["High"].values; lows = df["Low"].values
-        def _pivots(arr, kind, lw=3, rw=3):
+        def _pivots(arr, kind, lw=2, rw=2):
             out=[]
             for i in range(lw, len(arr)-rw):
                 w=arr[i-lw:i+rw+1]
                 if kind=="high" and arr[i]==max(w): out.append(i)
                 if kind=="low"  and arr[i]==min(w): out.append(i)
             return out
-        def _trendline(idxs, vals, color, label):
-            # ilk ve son önemli pivotu birleştirip tüm grafiği kateden çizgi
-            if len(idxs)<2: return
-            i1,i2=idxs[0],idxs[-1]
-            if i2==i1: return
+        def _trendline(idxs, vals, kind, color):
+            # En belirgin İKİ swing'i seç → gerçek trend hattı
+            if len(idxs)<2: return None
+            half=len(idxs)//2
+            left, right = idxs[:half] or idxs[:1], idxs[half:] or idxs[-1:]
+            if kind=="low":   # destek: sol bölgenin en düşüğü + sağ bölgenin en düşüğü
+                i1=min(left, key=lambda i: vals[i]); i2=min(right, key=lambda i: vals[i])
+            else:             # direnç: sol en yüksek + sağ en yüksek
+                i1=max(left, key=lambda i: vals[i]); i2=max(right, key=lambda i: vals[i])
+            if i2==i1: return None
             y1,y2=vals[i1],vals[i2]
             slope=(y2-y1)/(i2-i1)
-            x0=0; y0=y1+slope*(x0-i1)
+            x0=max(0,i1-2); y0=y1+slope*(x0-i1)
             x_end=xr; y_end=y1+slope*(x_end-i1)
-            ax.plot([x0,x_end],[y0,y_end], color=color, lw=1.5, alpha=0.9,
+            ax.plot([x0,x_end],[y0,y_end], color=color, lw=1.6, alpha=0.85,
                     linestyle="-", solid_capstyle="round")
-            ax.annotate(label, xy=(x_end, y_end), xytext=(-2,4),
-                        textcoords="offset points", fontsize=7.5,
-                        color=color, ha="right", alpha=0.95)
+            return slope
         ph=_pivots(highs,"high"); pl=_pivots(lows,"low")
-        _trendline(ph, highs, "#9aa3b7", "trend hattı")
-        _trendline(pl, lows,  "#9aa3b7", "trend hattı")
+        sl_slope=_trendline(pl, lows,  "low",  "#5b9bd5")   # destek (mavi)
+        sr_slope=_trendline(ph, highs, "high", "#e06666")   # direnç (kırmızımsı)
+        # Kanal tipi etiketi
+        ch_label=""
+        if sl_slope is not None and sr_slope is not None:
+            if sl_slope>0 and sr_slope>0:   ch_label="↗ YÜKSELEN KANAL"
+            elif sl_slope<0 and sr_slope<0: ch_label="↘ DÜŞEN KANAL"
+            elif sl_slope>0 and sr_slope<0: ch_label="◁▷ DARALAN (ÜÇGEN)"
+            else: ch_label="▭ YATAY KANAL"
+        if ch_label:
+            ax.text(0.5, 0.965, ch_label, transform=ax.transAxes, ha="center", va="top",
+                    fontsize=9, fontweight="bold", color="#9aa3b7", alpha=0.9)
 
         # ── İnsan tipi etiketler (sağ kenarda kutu içinde) ───────────────
         def _tag(price, text, color):
@@ -770,7 +804,7 @@ def tg_performance_report(period="daily"):
     if not sc.get("total"): return
     total=sc.get("total",0); wins=sc.get("wins",0); losses=sc.get("losses",0)
     wr=sc.get("wr",0); avg_rr=sc.get("avg_rr",0); pf=sc.get("pf",0)
-    sharpe=sc.get("sharpe"); sortino=sc.get("sortino")
+    sharpe=sc.get("sharpe") or 0; sortino=sc.get("sortino") or 0
     streak=sc.get("streak",0); streak_type=sc.get("streak_type","")
     best_syms=sc.get("best_syms",[])
     by_q=sc.get("by_q",{})
@@ -810,6 +844,32 @@ def tg_performance_report(period="daily"):
     learn_lines="  En güçlü: "+", ".join(f"{f}={w:.2f}x" for f,w in top_feat)
     learn_lines+="\n  En zayıf: "+", ".join(f"{f}={w:.2f}x" for f,w in bot_feat)
 
+    # ── Bugünün / bu haftanın işlem listesi (tek tek TP/SL) ──────────────
+    trades_lines=""
+    try:
+        if period=="daily":
+            since=datetime.utcnow().strftime("%Y-%m-%d")
+            title_t="📋 <b>BUGÜNÜN İŞLEMLERİ</b>\n"
+        else:
+            since=(datetime.utcnow()-__import__('datetime').timedelta(days=7)).strftime("%Y-%m-%d")
+            title_t="📋 <b>BU HAFTANIN İŞLEMLERİ</b>\n"
+        with db() as c:
+            day_trades=c.execute(
+                "SELECT sym,direction,status,act_rr,entry,out_price FROM signals "
+                "WHERE status IN ('TP','SL') AND (out_at>=? OR created>=?) "
+                "ORDER BY id DESC LIMIT 15", (since, since)).fetchall()
+        if day_trades:
+            day_pnl=0.0
+            trades_lines=title_t
+            for t in day_trades:
+                ic="🟢" if t["status"]=="TP" else "🔴"
+                de="📈" if t["direction"]=="LONG" else "📉"
+                rr=t["act_rr"] or 0; day_pnl+=rr
+                trades_lines+=f"  {ic} {de} <b>{t['sym']}</b>  {t['status']}  <b>{rr:+.2f}R</b>\n"
+            trades_lines+=f"  ─────────────\n  Toplam: <b>{day_pnl:+.2f}R</b>\n\n"
+    except Exception:
+        pass
+
     period_hdr="📅 GÜNLÜK PERFORMANS RAPORU" if period=="daily" else "📆 HAFTALIK PERFORMANS RAPORU"
 
     msg=(
@@ -832,6 +892,8 @@ def tg_performance_report(period="daily"):
         f"  Başlangıç : £{ACCOUNT['balance']:.2f}\n"
         f"  Şu an     : <b>£{bal:.2f}</b>\n"
         f"  Net P&L   : <b>{'+'if pnl>=0 else ''}{pnl:.2f} ({pnl_pct:+.1f}%)</b>\n\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"{trades_lines}"
         f"━━━━━━━━━━━━━━━━━━━━━━━━━\n"
         f"🎖 <b>KALİTE DAĞILIMI</b>\n{q_lines}"
         f"{best_lines}\n"
