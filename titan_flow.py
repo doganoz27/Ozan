@@ -1484,6 +1484,14 @@ ws_ok        = False
 last_analysis= 0
 last_stats   = 0
 _last_logged : dict[str,float] = {}
+# Tracks recently closed trades — prevents run_analysis from re-adding them to active_trades
+_recently_closed : dict[str,float] = {}   # key: sym_direction  val: close_timestamp
+RECENTLY_CLOSED_TTL = 7200  # 2 hours — matches DEDUP_SEC
+
+# ── £50 Budget Manager ────────────────────────────────────────────────────────
+TRADE_BUDGET      = 50.0    # Total budget to split across trades
+MAX_CONCURRENT    = 3       # Max simultaneous open trades
+_budget_lock      = threading.Lock()
 
 # ═══════════════════════════════════════════════════════════════
 # DATABASE
@@ -1573,6 +1581,7 @@ db_cleanup()
 def calc_sizing(setup):
     """
     Calculate position sizing for a setup using Trade212 CFD rules.
+    £50 budget is split evenly across MAX_CONCURRENT slots.
     Returns dict with capital, risk_amount, expected_loss/profit, margin.
     """
     sym=setup["sym"]; entry=setup["price"]; sl=setup["sl"]
@@ -1581,18 +1590,22 @@ def calc_sizing(setup):
     with lock:
         bal=portfolio_state["shadow_balance"]
         heat=portfolio_state["heat"]
-    # Reduce risk if heat is elevated
+        open_count=len(active_trades)
+    # Per-trade budget = total_balance / MAX_CONCURRENT slots
+    per_slot = round(bal / MAX_CONCURRENT, 2)
+    remaining_slots = max(1, MAX_CONCURRENT - open_count)
+    # Risk 2% of the per-slot allocation
     risk_pct=ACCOUNT["risk_pct"]
     if heat>10: risk_pct=risk_pct*0.5
     risk_pct=min(risk_pct,ACCOUNT["max_risk_pct"])
-    risk_amt=round(bal*risk_pct,2)
+    risk_amt=round(per_slot*risk_pct,2)
     sl_dist_pct=abs(entry-sl)/entry if entry else 0.01
     if sl_dist_pct==0: return None
     # Notional size required to risk exactly risk_amt at SL
     notional=risk_amt/sl_dist_pct
     margin=round(notional/lev,2)
-    # Cap margin at 40% of balance
-    margin=min(margin,round(bal*0.4,2))
+    # Cap margin at 40% of per-slot allocation (not full balance)
+    margin=min(margin,round(per_slot*0.4,2))
     # Recalculate actual risk at capped margin
     actual_notional=margin*lev
     actual_risk=round(actual_notional*sl_dist_pct,2)
@@ -2525,7 +2538,7 @@ def background_loop():
         except: pass
         try: load_news()
         except: pass
-        time.sleep(30 if first else 60); first=False
+        time.sleep(30); first=False
 
 def cot_loop():
     while True:
@@ -2664,30 +2677,42 @@ def log_signal(s):
                           (portfolio_state["shadow_balance"], created))
             c.commit()
         else:
-            # DB yazılmayacak ama sig_id lazım
+            # DB yazılmayacak ama sig_id lazım — sadece OPEN kayıt geçerli
             row = c.execute(
-                "SELECT id FROM signals WHERE sym=? AND direction=? ORDER BY id DESC LIMIT 1",
+                "SELECT id FROM signals WHERE sym=? AND direction=? AND status='OPEN' ORDER BY id DESC LIMIT 1",
                 (s["sym"], s["direction"])).fetchone()
             sig_id = row["id"] if row else 0
 
-    # Her durumda active_trades'e ekle (sinyal geldiği anda aktif pozisyona geçsin)
+    # active_trades'e ekle — yakın zamanda kapanmış veya bütçe dolu ise ekleme
     at_key = f"{s['sym']}_{s['direction']}"
+    now_ts = time.time()
+    # Temizle: süresi dolmuş recently_closed girişlerini sil
+    with _budget_lock:
+        expired_rc = [k for k, t in _recently_closed.items() if now_ts - t > RECENTLY_CLOSED_TTL]
+        for k in expired_rc:
+            _recently_closed.pop(k, None)
+        just_closed = at_key in _recently_closed
+
     with lock:
-        if at_key not in active_trades:
-            active_trades[at_key] = {
-                **s,
-                "db_id": sig_id,
-                "_trade_entered": datetime.now(),
-                "_trade_status": "OPEN",
-                "_trade_entry_price": s["price"],
-            }
+        if just_closed:
+            pass  # Bu sinyal az önce TP/SL oldu — run_analysis tekrar ekleyemez
+        elif at_key in active_trades:
+            if active_trades[at_key].get("_trade_status") == "OPEN":
+                active_trades[at_key].update({
+                    "score": s["score"], "quality": s["quality"],
+                    "sl": s["sl"], "tp": s["tp"], "rr": s["rr"],
+                    "db_id": sig_id,
+                })
         else:
-            # Mevcut pozisyonu güncelle (skor, sl, tp)
-            active_trades[at_key].update({
-                "score": s["score"], "quality": s["quality"],
-                "sl": s["sl"], "tp": s["tp"], "rr": s["rr"],
-                "db_id": sig_id,
-            })
+            open_count = len(active_trades)
+            if open_count < MAX_CONCURRENT and sig_id and sig_id > 0:
+                active_trades[at_key] = {
+                    **s,
+                    "db_id": sig_id,
+                    "_trade_entered": datetime.now(),
+                    "_trade_status": "OPEN",
+                    "_trade_entry_price": s["price"],
+                }
 
 def monitor_loop():
     while True:
@@ -2704,49 +2729,56 @@ def _check_open():
         for k in stale:
             t=active_trades.pop(k,None)
             if t:
+                rc_key = f"{t.get('sym','')}_{t.get('direction','')}"
+                with _budget_lock: _recently_closed[rc_key] = time.time()
                 _wl_triggered.insert(0,{**t,"_wl_status":"TRIGGERED",
                     "_wl_reason":"7 gün sonra zaman aşımı — otomatik kapatıldı"})
                 _wl_triggered[:] = _wl_triggered[:_WL_MAX_HISTORY]
     with db() as c:
         rows=c.execute("SELECT * FROM signals WHERE status='OPEN'").fetchall()
         for r in rows:
-            sym=r["sym"]; ep=r["entry"]; sl=r["sl"]; tp=r["tp"]
+            sym=r["sym"]; ep=r["entry"]; sl=r["sl"]; tp=r["tp"]; direction=r["direction"]
             with lock: md=market.get(sym); cur=md.price if md else None
             if cur is None: continue
             risk=abs(ep-sl)
             if risk==0: continue
-            ns=None; arr=None
-            if r["direction"]=="LONG":
-                if cur<=sl:    ns="SL";  arr=round(-risk/ep*100,3) if ep else -1.0; arr_r=-1.0
-                elif cur>=tp:  ns="TP";  arr_r=round(r["rr_t"],2); arr=round((cur-ep)/ep*100,3) if ep else arr_r
+            ns=None; arr=None; arr_r=None
+            if direction=="LONG":
+                if cur<=sl:    ns="SL";  arr_r=-1.0; arr=round(-risk/ep*100,3) if ep else -1.0
+                elif cur>=tp:  ns="TP";  arr_r=round(r["rr_t"] or 1.0,2); arr=round((cur-ep)/ep*100,3) if ep else arr_r
             else:
-                if cur>=sl:    ns="SL";  arr=round(-risk/ep*100,3) if ep else -1.0; arr_r=-1.0
-                elif cur<=tp:  ns="TP";  arr_r=round(r["rr_t"],2); arr=round((ep-cur)/ep*100,3) if ep else arr_r
+                if cur>=sl:    ns="SL";  arr_r=-1.0; arr=round(-risk/ep*100,3) if ep else -1.0
+                elif cur<=tp:  ns="TP";  arr_r=round(r["rr_t"] or 1.0,2); arr=round((ep-cur)/ep*100,3) if ep else arr_r
             # Auto-expire after 7 days
             try:
                 age=(datetime.utcnow()-datetime.fromisoformat(r["created"])).days
                 if age>=7 and ns is None:
                     ns="EXPIRED"
-                    arr_r=round((cur-ep)/risk,2) if r["direction"]=="LONG" else round((ep-cur)/risk,2)
+                    arr_r=round((cur-ep)/risk,2) if direction=="LONG" else round((ep-cur)/risk,2)
                     arr=arr_r
             except: pass
             if ns:
-                act_rr_val=arr_r if 'arr_r' in dir() else arr
+                act_rr_val = arr_r if arr_r is not None else (arr or 0)
                 c.execute("UPDATE signals SET status=?,out_price=?,out_at=?,act_rr=? WHERE id=?",
                           (ns,cur,now,act_rr_val,r["id"]))
-                # Categorized Telegram outcome
-                try: tg_outcome_alert(sym,r["direction"],ns,ep,cur,act_rr_val,sig_id=r["id"])
-                except: pass
+                # Grab the at_key for active_trades removal — use sym+direction (most reliable)
+                at_key = f"{sym}_{direction}"
+                # Mark as recently closed FIRST — prevents run_analysis re-adding it
+                with _budget_lock:
+                    _recently_closed[at_key] = time.time()
                 # Sync active_trades dict — remove closed entries
                 with lock:
-                    keys_to_rm=[k for k,t in active_trades.items()
-                                if t.get("sym")==sym and abs((t.get("_trade_entry_price") or 0)-ep)<1e-8]
-                    for k in keys_to_rm:
-                        t2=active_trades.pop(k,None)
-                        if t2:
-                            _wl_triggered.insert(0,{**t2,"_wl_status":"TRIGGERED",
-                                "_wl_reason":f"{ns} @ {fp_plain(cur)} ({act_rr_val:+.2f}R)"})
-                            _wl_triggered[:] = _wl_triggered[:_WL_MAX_HISTORY]
+                    t2 = active_trades.pop(at_key, None)
+                    if t2:
+                        _wl_triggered.insert(0,{**t2,"_wl_status":"TRIGGERED",
+                            "_wl_reason":f"{ns} @ {fp_plain(cur)} ({act_rr_val:+.2f}R)"})
+                        _wl_triggered[:] = _wl_triggered[:_WL_MAX_HISTORY]
+                # Telegram outcome alert
+                try: tg_outcome_alert(sym,direction,ns,ep,cur,act_rr_val,sig_id=r["id"])
+                except: pass
+                # Post-trade self-analysis (async)
+                try: _post_trade_analysis(sym,direction,ns,ep,cur,act_rr_val,r)
+                except: pass
                 # Update shadow trade + balance
                 st_row=c.execute("SELECT * FROM shadow_trades WHERE signal_id=? AND status='OPEN'",
                                  (r["id"],)).fetchone()
@@ -2769,6 +2801,92 @@ def _check_open():
                 try: compute_stats()
                 except: pass
         c.commit()
+
+def _post_trade_analysis(sym, direction, status, entry, out_price, act_rr, db_row):
+    """Detaylı trade sonrası kendini analiz et + Telegram'a gönder."""
+    def _run():
+        try:
+            # Hangi AI faktörleri vardı?
+            f_ema    = db_row["f_ema"]    if "f_ema"    in db_row.keys() else 0
+            f_rsi    = db_row["f_rsi"]    if "f_rsi"    in db_row.keys() else 0
+            f_macd   = db_row["f_macd"]   if "f_macd"   in db_row.keys() else 0
+            f_sweep  = db_row["f_sweep"]  if "f_sweep"  in db_row.keys() else 0
+            f_ob     = db_row["f_ob"]     if "f_ob"     in db_row.keys() else 0
+            f_fvg    = db_row["f_fvg"]    if "f_fvg"    in db_row.keys() else 0
+            f_struct = db_row["f_struct"] if "f_struct" in db_row.keys() else 0
+            f_cot    = db_row["f_cot"]    if "f_cot"    in db_row.keys() else 0
+            f_news   = db_row["f_news"]   if "f_news"   in db_row.keys() else 0
+            score    = db_row["score"]    or 0
+            quality  = db_row["quality"]  or "?"
+            rr_t     = db_row["rr_t"]     or 0
+            created  = db_row["created"]  or ""
+
+            # Kaç saat tutuldu
+            try:
+                held_h = round((datetime.utcnow()-datetime.fromisoformat(created)).total_seconds()/3600,1)
+            except:
+                held_h = "?"
+
+            # Neyin doğru/yanlış gittiği
+            won = (status == "TP")
+            factors_right = []
+            factors_wrong = []
+
+            if won:
+                if f_ema:    factors_right.append("EMA trendi tuttu")
+                if f_rsi:    factors_right.append("RSI aşırı bölgeden döndü")
+                if f_macd:   factors_right.append("MACD momentum destekledi")
+                if f_struct: factors_right.append("Yapı kırılımı gerçekleşti")
+                if f_ob:     factors_right.append("Order Block tepki verdi")
+                if f_fvg:    factors_right.append("FVG dolduruldu")
+                if f_sweep:  factors_right.append("Likidite süpürmesi doğrulandı")
+                if f_cot:    factors_right.append("COT pozisyonlanma uydu")
+                if f_news:   factors_right.append("Haber akışı yönü destekledi")
+            else:
+                if not f_ema:    factors_wrong.append("EMA trendi yoktu / zayıftı")
+                if not f_struct: factors_wrong.append("Yapı kırılımı teyit edilmemişti")
+                if not f_sweep:  factors_wrong.append("Likidite temizlenmemişti")
+                if not f_ob:     factors_wrong.append("Order Block yoktu / zayıftı")
+                # Piyasaya karşı giren faktörler
+                if f_rsi == 0:   factors_wrong.append("RSI nötr bölgedeydi")
+                if f_news == 0:  factors_wrong.append("Haber desteği yoktu")
+
+            result_emoji = "✅ KÂR" if won else "❌ ZARAR"
+            color_emoji  = "🟢" if won else "🔴"
+
+            right_txt = "\n".join(f"   ✓ {x}" for x in factors_right) if factors_right else "   — (hiçbiri)"
+            wrong_txt = "\n".join(f"   ✗ {x}" for x in factors_wrong) if factors_wrong else "   — (hiçbiri)"
+
+            # Öğrenme notu
+            if won and act_rr and act_rr >= 1.5:
+                learn_note = "💡 Yüksek RR trade — bu setup tipini önceliklendir"
+            elif won:
+                learn_note = "💡 TP geldi ama RR düşük — TP hedefi genişletilebilir"
+            elif act_rr and act_rr < -0.5:
+                learn_note = "💡 Erken stop — SL biraz daha geniş ayarlanabilirdi"
+            else:
+                learn_note = "💡 Setup koşulları yetersizdi — eşik yükseltiliyor"
+
+            msg = (
+                f"🧠 <b>KENDİ-ANALİZ RAPORU</b>\n"
+                f"━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+                f"{color_emoji} <b>{sym}</b>  {direction}  →  {result_emoji}\n"
+                f"📊 Skor: <b>{score}/100</b>  Kalite: <b>{quality}</b>\n"
+                f"⏱ Süre: <b>{held_h} saat</b>   RR: <b>{act_rr:+.2f}R</b>\n"
+                f"━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+                f"<b>Doğru çalışan faktörler:</b>\n{right_txt}\n\n"
+                f"<b>Eksik/hatalı faktörler:</b>\n{wrong_txt}\n\n"
+                f"━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+                f"{learn_note}\n"
+                f"<i>Sistem ağırlıkları bu sonuca göre güncellendi.</i>"
+            )
+            requests.post(
+                f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage",
+                json={"chat_id":TELEGRAM_CHAT_ID,"text":msg,"parse_mode":"HTML"},
+                timeout=8)
+        except Exception:
+            pass
+    threading.Thread(target=_run, daemon=True).start()
 
 def compute_stats():
     global stats_cache, adap_weights
@@ -2933,10 +3051,17 @@ def run_analysis():
                 # Sadece GERÇEKTEN onaylı A+/A/B+ sinyaller DB'ye yazılır ve
                 # izlenen işleme dönüşür — böylece "onaylı görünüp kaybolma" biter.
                 if r.get("quality") in ("A+","A","B+") and r.get("status")=="APPROVED":
-                    try: log_signal(r)
-                    except: pass
-                    try: tg_setup_alert(r)
-                    except: pass
+                    at_key = f"{r['sym']}_{r['direction']}"
+                    with lock: open_count = len(active_trades)
+                    with _budget_lock: just_closed = at_key in _recently_closed
+                    # Bütçe bitmişse ve bu zaten açık bir pozisyon değilse yeni sinyal ekleme
+                    budget_full = (open_count >= MAX_CONCURRENT)
+                    with lock: already_open = at_key in active_trades
+                    if (not budget_full or already_open) and not just_closed:
+                        try: log_signal(r)
+                        except: pass
+                        try: tg_setup_alert(r)
+                        except: pass
         except: pass
     results.sort(key=lambda x:({"A+":0,"A":1,"B+":2}.get(x["quality"],9),-x["score"]))
     setups=results
