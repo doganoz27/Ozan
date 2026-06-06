@@ -295,15 +295,15 @@ _tg_setup_sent:set   = set()
 # ─────────────────────────────────────────────────────────────────────────────
 # TELEGRAM MODULE
 # ─────────────────────────────────────────────────────────────────────────────
-def send_telegram(message: str):
-    """Send a message via Telegram Bot API."""
+def tg_send_raw(message: str, disable_preview: bool = True):
+    """Low-level Telegram sendMessage — HTML parse mode."""
     if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID:
         return
     try:
         requests.post(
             f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage",
             json={"chat_id": TELEGRAM_CHAT_ID, "text": message,
-                  "parse_mode": "HTML", "disable_web_page_preview": True},
+                  "parse_mode": "HTML", "disable_web_page_preview": disable_preview},
             timeout=8)
     except: pass
 
@@ -1082,6 +1082,150 @@ _ASSET_IMPACT = {
     },
 }
 
+def _deep_research(article) -> dict:
+    """
+    Gerçek çok-kaynak araştırma: aynı konuyu başka kaynaklardan çapraz doğrular.
+    Corroborating source sayısı ve güncellenen etki skoru döner.
+    """
+    h = article.get("headline","")
+    summary = article.get("summary","")
+    base_imp = article.get("importance",0)
+    keywords = []
+    text = (h+" "+summary).lower()
+    # Anahtar kişi/kurum/konu çıkar
+    for kw in ["trump","powell","lagarde","fed","ecb","boe","opec","fomc","cpi","nfp",
+               "ukraine","russia","china","iran","tariff","recession","inflation",
+               "nvidia","apple","tesla","microsoft","amazon"]:
+        if kw in text: keywords.append(kw)
+    if not keywords:
+        keywords = [w for w in h.lower().split() if len(w)>5][:3]
+
+    sources_found = []
+    corr_score = 0  # how many sources corroborate
+
+    # 1) Finnhub'dan farklı kategorilerde ara
+    for cat in ["general","forex","crypto","merger"]:
+        try:
+            r = requests.get(f"{BASE_URL}/news",
+                             params={"category":cat,"token":API_KEY},timeout=4)
+            arts = r.json()
+            if not isinstance(arts,list): continue
+            for a in arts[:15]:
+                ah = (a.get("headline","")+" "+a.get("summary","")).lower()
+                if any(k in ah for k in keywords) and a.get("headline","") != h:
+                    sources_found.append({
+                        "source": a.get("source",""),
+                        "headline": a.get("headline","")[:120],
+                        "url": a.get("url",""),
+                        "imp": _importance(ah),
+                    })
+                    corr_score += 1
+        except: pass
+
+    # 2) yfinance haberleri — ilgili sembolleri tara
+    related_tickers = []
+    if any(k in text for k in ["nvidia","nvda"]): related_tickers.append("NVDA")
+    if any(k in text for k in ["apple","aapl"]): related_tickers.append("AAPL")
+    if any(k in text for k in ["tesla","tsla"]): related_tickers.append("TSLA")
+    if any(k in text for k in ["s&p","spx","spy","market","stocks"]): related_tickers.append("SPY")
+    if any(k in text for k in ["gold","xau","bullion"]): related_tickers.append("GC=F")
+    if any(k in text for k in ["oil","crude","opec","wti"]): related_tickers.append("CL=F")
+    if any(k in text for k in ["euro","eur","ecb"]): related_tickers.append("EURUSD=X")
+    if not related_tickers: related_tickers = ["^GSPC"]  # S&P fallback
+
+    for ticker in related_tickers[:2]:
+        try:
+            yt = yf.Ticker(ticker)
+            ynews = yt.news or []
+            for yn in ynews[:8]:
+                yt_h = (yn.get("title","")+" "+yn.get("summary","")).lower()
+                if any(k in yt_h for k in keywords):
+                    pub = yn.get("publisher","")
+                    link = yn.get("link","")
+                    sources_found.append({
+                        "source": pub,
+                        "headline": yn.get("title","")[:120],
+                        "url": link,
+                        "imp": _importance(yt_h),
+                    })
+                    corr_score += 1
+        except: pass
+
+    # Deduplicate sources by headline similarity
+    seen_h = set()
+    unique_sources = []
+    for s in sources_found:
+        key = s["headline"][:50].lower()
+        if key not in seen_h:
+            seen_h.add(key)
+            unique_sources.append(s)
+
+    # Etki büyüklüğü = temel skor + corroboration bonus (her kaynak +3, max +20)
+    boosted_imp = min(100, base_imp + min(corr_score * 3, 20))
+
+    return {
+        "sources": unique_sources[:8],
+        "corr_count": len(unique_sources),
+        "boosted_imp": boosted_imp,
+        "keywords": keywords,
+    }
+
+
+def _send_deep_research_tg(article, research: dict):
+    """Detaylı çok-kaynak araştırma sonucunu Telegram'a gönder."""
+    h = article.get("headline","")
+    url = article.get("url","")
+    source = article.get("source","")
+    imp = research["boosted_imp"]
+    corr = research["corr_count"]
+    keywords = research.get("keywords",[])
+    sources = research.get("sources",[])
+    now_str = datetime.now().strftime("%d.%m.%Y %H:%M")
+
+    if imp>=80:   risk_hdr="🔴 KRİTİK"; conf_bar="█████████░"
+    elif imp>=60: risk_hdr="🟠 YÜKSEK ETKİ"; conf_bar="███████░░░"
+    elif imp>=40: risk_hdr="🟡 ORTA ETKİ"; conf_bar="█████░░░░░"
+    else:         risk_hdr="🔵 DÜŞÜK ETKİ"; conf_bar="███░░░░░░░"
+
+    kw_txt = " · ".join(f"#{k}" for k in keywords[:6]) if keywords else "—"
+
+    # Corroborating sources listesi
+    src_lines = ""
+    for i,s in enumerate(sources[:5],1):
+        sl = s.get("url","")
+        sn = s.get("source","") or "Kaynak"
+        sh = s.get("headline","")[:90]
+        if sl:
+            src_lines += f"  {i}. <a href='{sl}'>{sn}</a>: <i>{sh}</i>\n"
+        else:
+            src_lines += f"  {i}. <b>{sn}</b>: <i>{sh}</i>\n"
+    if not src_lines:
+        src_lines = "  Ek kaynak bulunamadı\n"
+
+    # Ana kaynak linki
+    ana_link = f"\n\n🔗 <b>HABERİN TAMAMI</b>\n<a href='{url}'>{source or 'Kaynakta Oku'}</a>" if url else ""
+
+    msg = (
+        f"🔬 <b>DERİN HABER ANALİZİ</b>  {conf_bar}\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"{risk_hdr}  |  Etki: <b>{imp}/100</b>  |  {corr} kaynak doğruladı\n\n"
+        f"📰 <b>{h}</b>\n"
+        f"📡 {source or '—'}  |  🕐 {now_str}\n\n"
+        f"🔑 Konu: {kw_txt}\n\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"🌐 <b>DOĞRULAYAN KAYNAKLAR ({corr}):</b>\n"
+        f"{src_lines}"
+        f"{ana_link}\n\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"<i>Titan Prime Elite — çok-kaynak haber motoru</i>"
+    )
+    try:
+        requests.post(f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage",
+                      json={"chat_id":TELEGRAM_CHAT_ID,"text":msg,"parse_mode":"HTML",
+                            "disable_web_page_preview":False},timeout=10)
+    except: pass
+
+
 def send_telegram(article):
     if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID: return
     h=article.get("headline","")
@@ -1166,11 +1310,23 @@ def send_telegram(article):
         f"📊 <b>{caution}</b>  |  Süre tahmini: {dur}\n"
         f"🕐 {now_str}  |  <i>Titan Prime Elite</i>"
     )
+    # Kaynak URL ekle (her zaman)
+    art_url = article.get("url","")
+    art_src = article.get("source","Kaynak")
+    if art_url:
+        msg += f"\n\n🔗 <b>HABERİN TAMAMI →</b> <a href='{art_url}'>{art_src}</a>"
     try:
         requests.post(f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage",
                       json={"chat_id":TELEGRAM_CHAT_ID,"text":msg,"parse_mode":"HTML",
-                            "disable_web_page_preview":True},timeout=8)
+                            "disable_web_page_preview":False},timeout=8)
     except: pass
+    # Yüksek önemli haberler için derin araştırma (ayrı mesaj olarak)
+    if imp >= 65:
+        def _deep():
+            research = _deep_research(article)
+            if research["corr_count"] >= 1:
+                _send_deep_research_tg(article, research)
+        threading.Thread(target=_deep, daemon=True).start()
 
 def news_risk_for_sym(sym, max_age_min=90):
     """Returns (importance, risk_level, caution_flag) for a symbol from recent news.

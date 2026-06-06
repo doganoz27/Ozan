@@ -408,15 +408,32 @@ def news_data():
         m = a.get("macro", {}) or {}
         impacts = a.get("asset_impacts", {}) or {}
         ne_anlamaliyiz = a.get("ne_anlamaliyiz", "") or ""
+        # Zaman damgası → okunabilir
+        ts = a.get("datetime", 0)
+        try:
+            age_min = int((time.time() - ts) / 60) if ts else 0
+            if age_min < 60:   age_str = f"{age_min}dk önce"
+            elif age_min < 1440: age_str = f"{age_min//60}sa önce"
+            else:              age_str = f"{age_min//1440}g önce"
+        except: age_str = ""
         out.append({
-            "headline": a.get("headline"), "importance": a.get("importance", 0),
-            "risk_level": a.get("risk_level"), "bias": m.get("bias_tr"),
-            "bull_pct": m.get("bull_pct", 0), "bear_pct": m.get("bear_pct", 0),
-            "neut_pct": m.get("neut_pct", 0), "conf": m.get("conf", 0),
-            "dur": m.get("dur"), "caution": m.get("caution"),
-            "datetime": a.get("datetime", 0),
-            "impacts": impacts,
-            "ne_anlamaliyiz": ne_anlamaliyiz,
+            "headline":      a.get("headline"),
+            "importance":    a.get("importance", 0),
+            "risk_level":    a.get("risk_level"),
+            "bias":          m.get("bias_tr"),
+            "bull_pct":      m.get("bull_pct", 0),
+            "bear_pct":      m.get("bear_pct", 0),
+            "neut_pct":      m.get("neut_pct", 0),
+            "conf":          m.get("conf", 0),
+            "dur":           m.get("dur"),
+            "caution":       m.get("caution"),
+            "datetime":      ts,
+            "age_str":       age_str,
+            "impacts":       impacts,
+            "ne_anlamaliyiz":ne_anlamaliyiz,
+            "url":           a.get("url",""),
+            "source":        a.get("source",""),
+            "summary":       (a.get("summary","") or "")[:300],
         })
     out.sort(key=lambda x: -x.get("importance", 0))
     return out

@@ -622,16 +622,30 @@ async function loadNews(){
   document.getElementById('news-list').innerHTML=d.length? d.map(n=>{
     const ic=n.importance>=80?'border-red':n.importance>=60?'border-ylw':'border-blu';
     const bc=n.bias==='Yükseliş'?'text-grn':n.bias==='Düşüş'?'text-red':'text-dim';
+    const rlBadge=n.importance>=80?'bg-red/20 text-red':n.importance>=60?'bg-ylw/20 text-ylw':'bg-blu/20 text-blu';
     const impacts=n.impacts||{};
     const impHtml=Object.keys(impacts).length? `<div class="mt-3 pt-3 border-t border-border2">
       <div class="text-xs text-dim font-bold mb-1">📉 ETKİLENECEK VARLIKLAR</div>
       ${Object.entries(impacts).map(([k,v])=>`<div class="text-xs mb-1"><span class="font-bold text-blu">${k}:</span> <span class="text-dim">${v}</span></div>`).join('')}</div>`:'';
     const ne=n.ne_anlamaliyiz? `<div class="mt-2 bg-blu/10 border border-blu/20 rounded p-2">
       <span class="text-xs text-blu font-bold">💡 NE ANLAMALIYIZ:</span> <span class="text-xs text-dim">${n.ne_anlamaliyiz}</span></div>`:'';
+    const summary=n.summary? `<div class="text-xs text-dim mt-2 leading-relaxed">${n.summary}</div>`:'';
+    const headlineEl=n.url
+      ? `<a href="${n.url}" target="_blank" rel="noopener" class="font-bold text-sm flex-1 hover:text-blu transition cursor-pointer underline-offset-2 hover:underline">${n.headline||''}</a>`
+      : `<div class="font-bold text-sm flex-1">${n.headline||''}</div>`;
+    const sourceBar=`<div class="flex items-center gap-2 mt-1 text-xs text-dim">
+      ${n.source?`<span class="font-semibold text-dim">${n.source}</span><span>·</span>`:''}
+      <span>${n.age_str||''}</span>
+      ${n.url?`<a href="${n.url}" target="_blank" rel="noopener" class="text-blu hover:underline ml-auto">🔗 Haberi Oku</a>`:''}
+    </div>`;
     return `<div class="border-l-4 ${ic} bg-border2/20 rounded-r-lg p-4">
-      <div class="flex justify-between items-start mb-2"><div class="font-bold text-sm flex-1">${n.headline||''}</div>
-      <span class="text-xs px-2 py-0.5 rounded bg-border2 ml-3">${n.importance}/100</span></div>
-      <div class="flex gap-4 text-xs flex-wrap">
+      <div class="flex justify-between items-start mb-1">
+        ${headlineEl}
+        <span class="text-xs px-2 py-0.5 rounded ${rlBadge} ml-3 whitespace-nowrap font-bold">${n.importance}/100</span>
+      </div>
+      ${sourceBar}
+      ${summary}
+      <div class="flex gap-4 text-xs flex-wrap mt-2">
         <span class="${bc} font-bold">${n.bias||'Nötr'}</span>
         <span class="text-grn">↑%${n.bull_pct}</span><span class="text-red">↓%${n.bear_pct}</span>
         <span class="text-dim">güven ${n.conf}/100</span><span class="text-dim">${n.dur||''}</span>
