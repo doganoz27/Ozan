@@ -473,6 +473,61 @@ def _find_liquidity(highs, lows, tolerance=0.0008):
     return pools
 
 
+def _detect_formation(highs, lows, closes):
+    """Klasik grafik formasyonu tespiti. (etiket, kısa açıklama) döner."""
+    n = len(closes)
+    if n < 20:
+        return ("—", "Yeterli veri yok")
+
+    # Son 60 mumun swing pivotlarını çıkar
+    win = min(n, 60)
+    h = highs[-win:]; l = lows[-win:]; c = closes[-win:]
+    def piv(arr, kind, k=3):
+        out = []
+        for i in range(k, len(arr)-k):
+            w = arr[i-k:i+k+1]
+            if kind == "h" and arr[i] == max(w): out.append((i, arr[i]))
+            if kind == "l" and arr[i] == min(w): out.append((i, arr[i]))
+        return out
+    ph = piv(h, "h"); pl = piv(l, "l")
+
+    def slope(pts):
+        if len(pts) < 2: return 0.0
+        x1, y1 = pts[0]; x2, y2 = pts[-1]
+        return (y2 - y1) / (x2 - x1) if x2 != x1 else 0.0
+    sh = slope(ph); sl = slope(pl)
+    rng = (max(h) - min(l)) or 1
+    # Normalize eğim (mum başına % aralık)
+    sh_n = sh / rng * win; sl_n = sl / rng * win
+
+    # Çift tepe / çift dip
+    if len(ph) >= 2:
+        tops = sorted(ph, key=lambda p: -p[1])[:2]
+        if abs(tops[0][1]-tops[1][1])/rng < 0.04 and abs(tops[0][0]-tops[1][0]) > 5:
+            return ("Çift Tepe (M)", "İki eşit zirve — düşüş dönüşü olabilir, boyun çizgisi kırılırsa SAT.")
+    if len(pl) >= 2:
+        bots = sorted(pl, key=lambda p: p[1])[:2]
+        if abs(bots[0][1]-bots[1][1])/rng < 0.04 and abs(bots[0][0]-bots[1][0]) > 5:
+            return ("Çift Dip (W)", "İki eşit dip — yükseliş dönüşü olabilir, boyun çizgisi kırılırsa AL.")
+
+    # Üçgenler / kanallar (eğim işaretlerine göre)
+    if sh_n < -0.04 and sl_n > 0.04:
+        return ("Daralan Üçgen", "Sıkışma — alıcı/satıcı dengeleniyor, kırılım yönünde sert hareket beklenir.")
+    if abs(sh_n) < 0.04 and sl_n > 0.05:
+        return ("Yükselen Üçgen", "Yatay direnç + yükselen dipler — genelde YUKARI kırılım eğilimli.")
+    if sh_n < -0.05 and abs(sl_n) < 0.04:
+        return ("Alçalan Üçgen", "Yatay destek + alçalan tepeler — genelde AŞAĞI kırılım eğilimli.")
+    if sh_n > 0.05 and sl_n > 0.05:
+        return ("Yükselen Kanal", "Paralel yükseliş — trend yukarı, dip alımları çalışır.")
+    if sh_n < -0.05 and sl_n < -0.05:
+        return ("Düşen Kanal", "Paralel düşüş — trend aşağı, tepe satışları çalışır.")
+    if abs(sh_n) < 0.04 and abs(sl_n) < 0.04:
+        return ("Yatay Range", "Yön belirsiz — bant alt/üstünden işlem, kırılımı bekle.")
+    if sh_n > 0.04 and sl_n < -0.04:
+        return ("Genişleyen Formasyon", "Artan oynaklık — riskli, kırılım teyidi şart.")
+    return ("Trend Devam", "Mevcut trend sürüyor — momentum yönünde işlem.")
+
+
 def _build_chart_df(s):
     """Sinyalin kullandığı veriyi DataFrame olarak döner (tutarlılık için)."""
     import pandas as _pd
@@ -637,17 +692,34 @@ def _tg_chart1(s, df, tf_label):
                     "Talep Bölgesi" if is_bull else "Arz Bölgesi",
                     fontsize=7, color=col, fontweight="bold", alpha=0.85)
 
-        # ── Giriş/SL/TP etiketleri (sağ kenar, kutu içinde) ────────────────
-        def _tag(price, text, color, txtcol="#0d1017"):
+        # ── Formasyon tespiti ──────────────────────────────────────────────
+        form_name, form_desc = _detect_formation(highs, lows, closes)
+
+        # ── TP / SL bölgelerini bantla net göster (sağ blokta) ─────────────
+        # TP bandı (yeşil) ve SL bandı (kırmızı) sağ kenarda dolu kutu
+        def _zone(price, color, label, sub):
             if price is None: return
             try: price = float(price)
             except: return
-            ax.annotate(text, xy=(n+0.5, price), va="center", ha="left",
-                        fontsize=9, fontweight="bold", color=txtcol,
-                        bbox=dict(boxstyle="round,pad=0.35", fc=color, ec="none", alpha=0.96))
-        _tag(entry,       f"GİRİŞ {fp_plain(entry)}",      "#d1d4dc")
-        _tag(d.get("sl"), f"SL  {fp_plain(d.get('sl'))}",  "#ef5350", "#ffffff")
-        _tag(d.get("tp"), f"TP  {fp_plain(d.get('tp'))}",  "#26a69a", "#ffffff")
+            ax.annotate(f"{label} {fp_plain(price)}", xy=(n+0.6, price),
+                        va="center", ha="left", fontsize=9.5, fontweight="bold",
+                        color="#ffffff",
+                        bbox=dict(boxstyle="round,pad=0.4", fc=color, ec="none", alpha=0.97))
+            ax.annotate(sub, xy=(n+0.6, price), xytext=(0, -11),
+                        textcoords="offset points", va="center", ha="left",
+                        fontsize=6.8, color=color, alpha=0.9)
+        # Hesaplanmış mesafeler (pip/puan + %)
+        sl_p = d.get("sl"); tp_p = d.get("tp")
+        def _dist(a, b):
+            try: return abs(float(a)-float(b))/float(a)*100
+            except: return 0
+        tp_pct = _dist(entry, tp_p) if (entry and tp_p) else 0
+        sl_pct = _dist(entry, sl_p) if (entry and sl_p) else 0
+        _zone(tp_p,  "#26a69a", "🎯 TP", f"+%{tp_pct:.2f} kâr hedefi")
+        ax.annotate(f"◉ GİRİŞ {fp_plain(entry)}", xy=(n+0.6, float(entry)) if entry else (n+0.6, lo),
+                    va="center", ha="left", fontsize=9.5, fontweight="bold", color="#0d1017",
+                    bbox=dict(boxstyle="round,pad=0.4", fc="#d1d4dc", ec="none", alpha=0.97))
+        _zone(sl_p,  "#ef5350", "🛑 SL", f"-%{sl_pct:.2f} risk")
 
         # ── Yön oku (giriş bölgesine işaret) ───────────────────────────────
         if entry:
@@ -660,25 +732,37 @@ def _tg_chart1(s, df, tf_label):
                         arrowprops=dict(arrowstyle="-|>", lw=2.4,
                                         color="#26a69a" if up else "#ef5350"))
 
-        # ── Analiz kutusu (sol üst — net, sade gerekçe) ────────────────────
-        reasons = (d.get("reasons") or [])[:3]
+        # ── Analiz kutusu (sol üst — formasyon + gerekçe) ──────────────────
+        reasons = (d.get("reasons") or [])[:2]
         bias = "Yükseliş yapısı" if direction == "LONG" else "Düşüş yapısı"
         lines = [f"{sym}   ·   {bias}",
-                 f"EMA 9/20/50  ·  {ch_label or 'Trend Analizi'}",
+                 f"📐 Formasyon: {form_name}",
                  f"R:R 1:{rr}   ·   Olasılık %{prob:.0f}   ·   Kalite {grade}"]
         for rsn in reasons:
-            lines.append(f"• {str(rsn)[:50]}")
+            lines.append(f"• {str(rsn)[:48]}")
         ax.text(0.010, 0.975, "\n".join(lines), transform=ax.transAxes,
                 va="top", ha="left", fontsize=8.5, color="#d1d4dc", linespacing=1.6,
-                bbox=dict(boxstyle="round,pad=0.6", fc="#131722", ec="#2a2e39", alpha=0.94))
+                bbox=dict(boxstyle="round,pad=0.6", fc="#131722", ec="#2a2e39", alpha=0.95))
 
-        # ── Timeframe rozeti (sağ üst) ─────────────────────────────────────
+        # ── Formasyon açıklaması (sol alt — küçük açıklama kutusu) ──────────
+        ax.text(0.010, 0.045,
+                f"📐 {form_name}: {form_desc}",
+                transform=ax.transAxes, va="bottom", ha="left",
+                fontsize=7.8, color="#b2b5be", linespacing=1.4, wrap=True,
+                bbox=dict(boxstyle="round,pad=0.5", fc="#131722", ec="#ff980055", alpha=0.92))
+
+        # ── Renk/Öğe Lejantı (sağ üst, timeframe altında) ──────────────────
         ax.text(0.985, 0.975, tf_label, transform=ax.transAxes,
                 va="top", ha="right", fontsize=9.5, fontweight="bold",
                 color="#ff9800", alpha=0.95,
                 bbox=dict(boxstyle="round,pad=0.35", fc="#131722", ec="#ff980055", alpha=0.92))
+        legend = ("━ EMA9 (mavi)   ━ EMA20 (turuncu)   ━ EMA50 (mor)\n"
+                  "▦ Talep/Arz Bölgesi   ┈ Destek/Direnç   ╱ Trend Kanalı")
+        ax.text(0.985, 0.895, legend, transform=ax.transAxes,
+                va="top", ha="right", fontsize=6.6, color="#787b86", linespacing=1.5,
+                bbox=dict(boxstyle="round,pad=0.4", fc="#131722", ec="#2a2e39", alpha=0.88))
 
-        # ── Watermark ──────────────────────────────────────────────────────
+        # ── Watermark (merkez, çok soluk) ──────────────────────────────────
         ax.text(0.5, 0.5, "TITAN PRIME", transform=ax.transAxes,
                 va="center", ha="center", fontsize=34, fontweight="bold",
                 color="#ffffff", alpha=0.03, zorder=0)
