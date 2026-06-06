@@ -561,13 +561,13 @@ def _build_chart_df(s):
 
 
 def _tg_chart1(s, df, tf_label):
-    """Tek kurumsal analiz grafiği — geniş, temiz, göze hitap eden.
-    EMA, trend kanalı, kilit destek/direnç, en yakın OB zonu, Giriş/SL/TP."""
+    """Kurumsal analiz grafiği — EMA, RSI paneli, VWAP, formasyon, TP/SL, sinyal faktörleri."""
     try:
         import mplfinance as mpf, matplotlib
         matplotlib.use("Agg")
         import matplotlib.pyplot as _plt
         import matplotlib.patches as mpatches
+        import numpy as _np
         import io as _io
 
         d = s if isinstance(s, dict) else {}
@@ -578,10 +578,23 @@ def _tg_chart1(s, df, tf_label):
         entry = d.get("el") or d.get("price")
         arrow = "▲ LONG" if direction == "LONG" else "▼ SHORT" if direction == "SHORT" else ""
 
-        # EMA
+        # ── EMA & VWAP ──────────────────────────────────────────────────────
         df["EMA9"]  = df["Close"].ewm(span=9,  adjust=False).mean()
         df["EMA20"] = df["Close"].ewm(span=20, adjust=False).mean()
         df["EMA50"] = df["Close"].ewm(span=50, adjust=False).mean()
+        try:
+            tp_vwap = (df["Close"] + df["High"] + df["Low"]) / 3
+            vol = df["Volume"].replace(0, 1)
+            df["VWAP"] = (tp_vwap * vol).cumsum() / vol.cumsum()
+        except: df["VWAP"] = df["Close"]
+
+        # ── RSI (14) ────────────────────────────────────────────────────────
+        import pandas as _pd
+        delta = df["Close"].diff()
+        gain = delta.clip(lower=0).ewm(span=14, adjust=False).mean()
+        loss = (-delta.clip(upper=0)).ewm(span=14, adjust=False).mean()
+        rs = gain / loss.replace(0, float("nan"))
+        df["RSI"] = (100 - 100 / (1 + rs)).fillna(50)
 
         mc = mpf.make_marketcolors(up="#26a69a", down="#ef5350", wick="inherit",
                                    edge="inherit", volume="#2a2e39")
@@ -589,10 +602,14 @@ def _tg_chart1(s, df, tf_label):
                                 gridcolor="#181b24", gridstyle="-",
                                 rc={"axes.labelcolor":"#787b86", "axes.edgecolor":"#181b24",
                                     "xtick.color":"#787b86","ytick.color":"#787b86","font.size":9})
+
         aps = [
             mpf.make_addplot(df["EMA9"],  color="#2962ff", width=1.0),
             mpf.make_addplot(df["EMA20"], color="#ff9800", width=1.0),
             mpf.make_addplot(df["EMA50"], color="#ab47bc", width=1.3),
+            mpf.make_addplot(df["VWAP"],  color="#e040fb", width=1.1, linestyle="--"),
+            mpf.make_addplot(df["RSI"],   color="#29b6f6", width=1.1, panel=2,
+                             ylabel="RSI", ylim=(0, 100)),
         ]
 
         hl_prices, hl_colors, hl_styles = [], [], []
@@ -605,36 +622,62 @@ def _tg_chart1(s, df, tf_label):
         _add(d.get("tp"),  "#26a69a", "--")
 
         title = f"\n{sym}   {arrow}   ·   {grade} {score:.0f}/100   ·   1:{rr} R:R   ·   Olasılık %{prob:.0f}"
-        # Daha geniş ve ferah görünüm: 20:9 oran, büyük ölçek
         kw = dict(type="candle", style=st, addplot=aps, volume=True,
-                  title=title, figratio=(20,9), figscale=1.5, returnfig=True,
-                  tight_layout=True, scale_padding={"left":0.4,"right":1.4,"top":1.0,"bottom":0.6})
+                  title=title, figratio=(22,11), figscale=1.4, returnfig=True,
+                  tight_layout=True, panel_ratios=(6, 1.5, 2),
+                  scale_padding={"left":0.4,"right":1.6,"top":1.0,"bottom":0.6})
         if hl_prices:
             kw["hlines"] = dict(hlines=hl_prices, colors=hl_colors,
                                 linestyle=hl_styles, linewidths=1.2)
-        # Kar/zarar bölgeleri — hafif gölge
         fill = []
         try:
             if entry and d.get("tp"):
-                fill.append(dict(y1=float(entry), y2=float(d["tp"]), alpha=0.05, color="#26a69a"))
+                fill.append(dict(y1=float(entry), y2=float(d["tp"]), alpha=0.06, color="#26a69a"))
             if entry and d.get("sl"):
-                fill.append(dict(y1=float(entry), y2=float(d["sl"]), alpha=0.05, color="#ef5350"))
+                fill.append(dict(y1=float(entry), y2=float(d["sl"]), alpha=0.06, color="#ef5350"))
             if fill: kw["fill_between"] = fill
         except: pass
 
         fig, axl = mpf.plot(df, **kw)
         ax = axl[0]
+        ax_rsi = axl[3] if len(axl) > 3 else (axl[2] if len(axl) > 2 else None)
+
         n = len(df)
         xr = n - 1
-        hi = float(df["High"].max()); lo = float(df["Low"].min())
-        rng = (hi - lo) or 1
         highs = df["High"].values; lows = df["Low"].values
         opens = df["Open"].values; closes = df["Close"].values
+        hi_data = float(df["High"].max()); lo_data = float(df["Low"].min())
 
-        # Sağ tarafta etiketler için boşluk (ferah görünüm)
-        ax.set_xlim(-1, n + 9)
+        # ── Expand y-axis so TP/SL labels are ALWAYS visible ──────────────
+        prices_to_include = [hi_data, lo_data]
+        for pv in [entry, d.get("sl"), d.get("tp")]:
+            try: prices_to_include.append(float(pv))
+            except: pass
+        y_lo = min(prices_to_include); y_hi = max(prices_to_include)
+        pad = (y_hi - y_lo) * 0.12 or y_hi * 0.005
+        ax.set_ylim(y_lo - pad, y_hi + pad)
+        rng = (y_hi - y_lo) or 1
 
-        # ── Trend kanalı (sade, iki belirgin swing) ────────────────────────
+        # Sağ tarafta etiketler için boşluk
+        ax.set_xlim(-1, n + 12)
+
+        # ── RSI panel — overbought/oversold lines ──────────────────────────
+        if ax_rsi is not None:
+            ax_rsi.axhline(70, color="#ef5350", lw=0.8, linestyle="--", alpha=0.6)
+            ax_rsi.axhline(30, color="#26a69a", lw=0.8, linestyle="--", alpha=0.6)
+            ax_rsi.axhline(50, color="#787b86", lw=0.5, linestyle=":",  alpha=0.4)
+            ax_rsi.fill_between(range(n), df["RSI"].values, 70,
+                                where=(df["RSI"].values >= 70), alpha=0.15, color="#ef5350")
+            ax_rsi.fill_between(range(n), df["RSI"].values, 30,
+                                where=(df["RSI"].values <= 30), alpha=0.15, color="#26a69a")
+            cur_rsi = float(df["RSI"].iloc[-1])
+            rsi_col = "#ef5350" if cur_rsi >= 70 else "#26a69a" if cur_rsi <= 30 else "#29b6f6"
+            ax_rsi.text(0.01, 0.82, f"RSI {cur_rsi:.1f}", transform=ax_rsi.transAxes,
+                        fontsize=8, color=rsi_col, fontweight="bold",
+                        bbox=dict(boxstyle="round,pad=0.3", fc="#131722", ec="none", alpha=0.9))
+            ax_rsi.set_xlim(-1, n + 12)
+
+        # ── Trend kanalı ───────────────────────────────────────────────────
         def _pivots(arr, kind, lw=3, rw=3):
             out = []
             for i in range(lw, len(arr) - rw):
@@ -664,10 +707,10 @@ def _tg_chart1(s, df, tf_label):
         if sl_slope is not None and sr_slope is not None:
             if sl_slope > 0 and sr_slope > 0:   ch_label = "↗ Yükselen Kanal"
             elif sl_slope < 0 and sr_slope < 0: ch_label = "↘ Düşen Kanal"
-            elif sl_slope > 0 and sr_slope < 0: ch_label = "◁▷ Daralan (Üçgen)"
+            elif sl_slope > 0 and sr_slope < 0: ch_label = "◁▷ Daralan Üçgen"
             else: ch_label = "▭ Yatay Kanal"
 
-        # ── Kilit Destek/Direnç (en güçlü swing seviyeleri) ────────────────
+        # ── Kilit Destek/Direnç ────────────────────────────────────────────
         swing_hi = float(df["High"].tail(min(n, 100)).max())
         swing_lo = float(df["Low"].tail(min(n, 100)).min())
         ax.axhline(y=swing_hi, color="#787b86", lw=0.8, linestyle=":", alpha=0.45)
@@ -677,10 +720,10 @@ def _tg_chart1(s, df, tf_label):
         ax.text(0.5, swing_lo, "  Destek", fontsize=7.5, color="#787b86",
                 va="top", ha="left", alpha=0.7)
 
-        # ── Sadece EN YAKIN tek Order Block zonu (gürültüsüz) ──────────────
+        # ── Order Block zonu ───────────────────────────────────────────────
         obs = _find_obs(highs, lows, opens, closes, direction)
         if obs:
-            ob = obs[-1]  # en yakın/en güncel
+            ob = obs[-1]
             idx = ob["idx"]; top = ob["top"]; bot = ob["bot"]
             w = xr - idx + 1
             is_bull = ob["type"] == "bull_ob"
@@ -695,36 +738,52 @@ def _tg_chart1(s, df, tf_label):
         # ── Formasyon tespiti ──────────────────────────────────────────────
         form_name, form_desc = _detect_formation(highs, lows, closes)
 
-        # ── TP / SL bölgelerini bantla net göster (sağ blokta) ─────────────
-        # TP bandı (yeşil) ve SL bandı (kırmızı) sağ kenarda dolu kutu
-        def _zone(price, color, label, sub):
-            if price is None: return
-            try: price = float(price)
-            except: return
-            ax.annotate(f"{label} {fp_plain(price)}", xy=(n+0.6, price),
-                        va="center", ha="left", fontsize=9.5, fontweight="bold",
-                        color="#ffffff",
-                        bbox=dict(boxstyle="round,pad=0.4", fc=color, ec="none", alpha=0.97))
-            ax.annotate(sub, xy=(n+0.6, price), xytext=(0, -11),
-                        textcoords="offset points", va="center", ha="left",
-                        fontsize=6.8, color=color, alpha=0.9)
-        # Hesaplanmış mesafeler (pip/puan + %)
+        # ── TP / SL / Giriş etiketleri — AXES-FRACTION X, DATA Y ──────────
+        # xycoords=('axes fraction','data') → x sabit sağ kenar, y fiyat bazlı
+        # Bu sayede y-limit dışına çıksa bile asla kliplenmiyor
         sl_p = d.get("sl"); tp_p = d.get("tp")
         def _dist(a, b):
             try: return abs(float(a)-float(b))/float(a)*100
             except: return 0
         tp_pct = _dist(entry, tp_p) if (entry and tp_p) else 0
         sl_pct = _dist(entry, sl_p) if (entry and sl_p) else 0
-        _zone(tp_p,  "#26a69a", "🎯 TP", f"+%{tp_pct:.2f} kâr hedefi")
-        ax.annotate(f"◉ GİRİŞ {fp_plain(entry)}", xy=(n+0.6, float(entry)) if entry else (n+0.6, lo),
-                    va="center", ha="left", fontsize=9.5, fontweight="bold", color="#0d1017",
-                    bbox=dict(boxstyle="round,pad=0.4", fc="#d1d4dc", ec="none", alpha=0.97))
-        _zone(sl_p,  "#ef5350", "🛑 SL", f"-%{sl_pct:.2f} risk")
 
-        # ── Yön oku (giriş bölgesine işaret) ───────────────────────────────
+        def _zone_label(price, color, main_txt, sub_txt):
+            if price is None: return
+            try: price = float(price)
+            except: return
+            # Fiyat veri aralığında mı?
+            cur_ylim = ax.get_ylim()
+            y_frac = (price - cur_ylim[0]) / (cur_ylim[1] - cur_ylim[0])
+            y_frac = max(0.02, min(0.98, y_frac))  # ekran içinde tut
+            ax.annotate(main_txt,
+                        xy=(1.0, y_frac), xycoords=("axes fraction", "axes fraction"),
+                        xytext=(4, 0), textcoords="offset points",
+                        va="center", ha="left", fontsize=9.0, fontweight="bold",
+                        color="#ffffff",
+                        bbox=dict(boxstyle="round,pad=0.4", fc=color, ec="none", alpha=0.97),
+                        annotation_clip=False)
+            ax.annotate(sub_txt,
+                        xy=(1.0, y_frac), xycoords=("axes fraction", "axes fraction"),
+                        xytext=(4, -12), textcoords="offset points",
+                        va="center", ha="left", fontsize=6.5, color=color, alpha=0.9,
+                        annotation_clip=False)
+            # Fiyata yatay bağlantı çizgisi
+            ax.axhline(y=price, color=color, lw=0.6, linestyle=":", alpha=0.35)
+
+        _zone_label(tp_p, "#26a69a",
+                    f"🎯 TP  {fp_plain(tp_p)}",
+                    f"+%{tp_pct:.2f}  kâr hedefi")
+        _zone_label(entry, "#d1d4dc",
+                    f"◉ GİRİŞ  {fp_plain(entry)}", "")
+        _zone_label(sl_p, "#ef5350",
+                    f"🛑 SL  {fp_plain(sl_p)}",
+                    f"-%{sl_pct:.2f}  risk")
+
+        # ── Yön oku ────────────────────────────────────────────────────────
         if entry:
             up = direction == "LONG"
-            ay = float(entry) + (rng*0.18)*(-1 if up else 1)
+            ay = float(entry) + (rng*0.16)*(-1 if up else 1)
             ax.annotate("AL  ▲" if up else "SAT  ▼",
                         xy=(xr-1, float(entry)), xytext=(xr-14, ay),
                         fontsize=12, fontweight="bold",
@@ -732,37 +791,62 @@ def _tg_chart1(s, df, tf_label):
                         arrowprops=dict(arrowstyle="-|>", lw=2.4,
                                         color="#26a69a" if up else "#ef5350"))
 
-        # ── Analiz kutusu (sol üst — formasyon + gerekçe) ──────────────────
-        reasons = (d.get("reasons") or [])[:2]
-        bias = "Yükseliş yapısı" if direction == "LONG" else "Düşüş yapısı"
-        lines = [f"{sym}   ·   {bias}",
-                 f"📐 Formasyon: {form_name}",
-                 f"R:R 1:{rr}   ·   Olasılık %{prob:.0f}   ·   Kalite {grade}"]
-        for rsn in reasons:
-            lines.append(f"• {str(rsn)[:48]}")
-        ax.text(0.010, 0.975, "\n".join(lines), transform=ax.transAxes,
-                va="top", ha="left", fontsize=8.5, color="#d1d4dc", linespacing=1.6,
-                bbox=dict(boxstyle="round,pad=0.6", fc="#131722", ec="#2a2e39", alpha=0.95))
+        # ── Sinyal faktörleri kutusu (sol üst) ─────────────────────────────
+        flags = d.get("flags") or {}
+        factor_map = [
+            ("f_ema",    "EMA Yığın",    flags.get("f_ema",0)),
+            ("f_rsi",    "RSI Aşırı",    flags.get("f_rsi",0)),
+            ("f_macd",   "MACD Kesişim", flags.get("f_macd",0)),
+            ("f_ob",     "Order Block",  flags.get("f_ob",0)),
+            ("f_struct", "Yapı Kırılım", flags.get("f_struct",0)),
+            ("f_sweep",  "Likidite",     flags.get("f_sweep",0)),
+            ("f_news",   "Haber Desteği",flags.get("f_news",0)),
+        ]
+        factor_lines = []
+        for _k, label, val in factor_map:
+            dot = "✅" if val else "○"
+            factor_lines.append(f"{dot} {label}")
 
-        # ── Formasyon açıklaması (sol alt — küçük açıklama kutusu) ──────────
-        ax.text(0.010, 0.045,
+        bias = "Yükseliş yapısı" if direction == "LONG" else "Düşüş yapısı"
+        reasons = (d.get("reasons") or [])[:2]
+        info_lines = [
+            f"╔ {sym}  {arrow}  {bias}",
+            f"║ Skor: {score:.0f}/100   Kalite: {grade}   R:R 1:{rr}   Olasılık: %{prob:.0f}",
+            f"║ Formasyon: {form_name}" + (f"  {ch_label}" if ch_label else ""),
+        ]
+        for rsn in reasons:
+            info_lines.append(f"║ • {str(rsn)[:52]}")
+        info_lines.append("╠ Aktif Faktörler:")
+        # 2 sütun: ilk 4 sol, son 3 sağ
+        for i in range(0, len(factor_lines), 2):
+            left = factor_lines[i]
+            right = factor_lines[i+1] if i+1 < len(factor_lines) else ""
+            info_lines.append(f"║  {left:<26}{right}")
+
+        ax.text(0.010, 0.978, "\n".join(info_lines), transform=ax.transAxes,
+                va="top", ha="left", fontsize=8.2, color="#d1d4dc", linespacing=1.55,
+                fontfamily="monospace",
+                bbox=dict(boxstyle="round,pad=0.6", fc="#131722", ec="#2a2e39", alpha=0.96))
+
+        # ── Formasyon açıklaması (sol alt) ────────────────────────────────
+        ax.text(0.010, 0.038,
                 f"📐 {form_name}: {form_desc}",
                 transform=ax.transAxes, va="bottom", ha="left",
-                fontsize=7.8, color="#b2b5be", linespacing=1.4, wrap=True,
+                fontsize=7.6, color="#b2b5be", linespacing=1.4,
                 bbox=dict(boxstyle="round,pad=0.5", fc="#131722", ec="#ff980055", alpha=0.92))
 
-        # ── Renk/Öğe Lejantı (sağ üst, timeframe altında) ──────────────────
-        ax.text(0.985, 0.975, tf_label, transform=ax.transAxes,
+        # ── Timeframe + Legend (sağ üst) ───────────────────────────────────
+        ax.text(0.985, 0.978, tf_label, transform=ax.transAxes,
                 va="top", ha="right", fontsize=9.5, fontweight="bold",
                 color="#ff9800", alpha=0.95,
                 bbox=dict(boxstyle="round,pad=0.35", fc="#131722", ec="#ff980055", alpha=0.92))
-        legend = ("━ EMA9 (mavi)   ━ EMA20 (turuncu)   ━ EMA50 (mor)\n"
+        legend = ("━ EMA9 (mavi)  ━ EMA20 (turuncu)  ━ EMA50 (mor)  ┅ VWAP (pembe)\n"
                   "▦ Talep/Arz Bölgesi   ┈ Destek/Direnç   ╱ Trend Kanalı")
         ax.text(0.985, 0.895, legend, transform=ax.transAxes,
-                va="top", ha="right", fontsize=6.6, color="#787b86", linespacing=1.5,
+                va="top", ha="right", fontsize=6.4, color="#787b86", linespacing=1.5,
                 bbox=dict(boxstyle="round,pad=0.4", fc="#131722", ec="#2a2e39", alpha=0.88))
 
-        # ── Watermark (merkez, çok soluk) ──────────────────────────────────
+        # ── Watermark ──────────────────────────────────────────────────────
         ax.text(0.5, 0.5, "TITAN PRIME", transform=ax.transAxes,
                 va="center", ha="center", fontsize=34, fontweight="bold",
                 color="#ffffff", alpha=0.03, zorder=0)
