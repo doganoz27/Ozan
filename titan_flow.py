@@ -486,7 +486,7 @@ def _build_chart_df(s):
             rows = [(datetime.utcfromtimestamp(c[0]) if c[0] else None,
                      c[1], c[2], c[3], c[4], c[5]) for c in raw]
             df = _pd.DataFrame(rows, columns=["dt","Open","High","Low","Close","Volume"])
-            df = df.dropna(subset=["dt"]).set_index("dt").tail(80).copy()
+            df = df.dropna(subset=["dt"]).set_index("dt").tail(130).copy()
     except: df = None
     if df is None or len(df) < 30:
         try:
@@ -497,16 +497,17 @@ def _build_chart_df(s):
                     "GBP/CHF":"GBPCHF=X","XAU/USD":"GC=F","XAG/USD":"SI=F",
                     "WTI":"CL=F","BRENT":"BZ=F"}
             ticker = tmap.get(sym, sym.replace("/","")+"=X")
-            df = yf.Ticker(ticker).history(period="7d", interval="1h")
+            df = yf.Ticker(ticker).history(period="14d", interval="1h")
             if df is None or df.empty: return None
             if df.index.tzinfo: df.index = df.index.tz_localize(None)
-            df = df.tail(80).copy()
+            df = df.tail(130).copy()
         except: return None
     return df
 
 
 def _tg_chart1(s, df, tf_label):
-    """Grafik 1/2 — Yapı & Giriş: EMA, trend kanalı, OB, FVG, giriş/SL/TP."""
+    """Tek kurumsal analiz grafiği — geniş, temiz, göze hitap eden.
+    EMA, trend kanalı, kilit destek/direnç, en yakın OB zonu, Giriş/SL/TP."""
     try:
         import mplfinance as mpf, matplotlib
         matplotlib.use("Agg")
@@ -527,15 +528,16 @@ def _tg_chart1(s, df, tf_label):
         df["EMA20"] = df["Close"].ewm(span=20, adjust=False).mean()
         df["EMA50"] = df["Close"].ewm(span=50, adjust=False).mean()
 
-        mc = mpf.make_marketcolors(up="#00ff88", down="#ff3b5c", wick="inherit",
-                                   edge="inherit", volume="#3b82f6")
-        st = mpf.make_mpf_style(marketcolors=mc, facecolor="#0a0b0e", figcolor="#0a0b0e",
-                                gridcolor="#1e2028", rc={"axes.labelcolor":"#6b7280",
-                                "xtick.color":"#6b7280","ytick.color":"#6b7280","font.size":9})
+        mc = mpf.make_marketcolors(up="#26a69a", down="#ef5350", wick="inherit",
+                                   edge="inherit", volume="#2a2e39")
+        st = mpf.make_mpf_style(marketcolors=mc, facecolor="#0d1017", figcolor="#0d1017",
+                                gridcolor="#181b24", gridstyle="-",
+                                rc={"axes.labelcolor":"#787b86", "axes.edgecolor":"#181b24",
+                                    "xtick.color":"#787b86","ytick.color":"#787b86","font.size":9})
         aps = [
-            mpf.make_addplot(df["EMA9"],  color="#3b82f6", width=0.9),
-            mpf.make_addplot(df["EMA20"], color="#f59e0b", width=0.9),
-            mpf.make_addplot(df["EMA50"], color="#a855f7", width=1.1),
+            mpf.make_addplot(df["EMA9"],  color="#2962ff", width=1.0),
+            mpf.make_addplot(df["EMA20"], color="#ff9800", width=1.0),
+            mpf.make_addplot(df["EMA50"], color="#ab47bc", width=1.3),
         ]
 
         hl_prices, hl_colors, hl_styles = [], [], []
@@ -543,23 +545,25 @@ def _tg_chart1(s, df, tf_label):
             if p is None: return
             try: hl_prices.append(float(p)); hl_colors.append(col); hl_styles.append(sty)
             except: pass
-        _add(entry,        "#e8eaf0", "-")
-        _add(d.get("eh"),  "#e8eaf0", ":")
-        _add(d.get("sl"),  "#ff3b5c", "--")
-        _add(d.get("tp"),  "#00ff88", "--")
+        _add(entry,        "#d1d4dc", "-")
+        _add(d.get("sl"),  "#ef5350", "--")
+        _add(d.get("tp"),  "#26a69a", "--")
 
-        title = f"\n{sym}  {arrow}  [{tf_label}]   {grade} {score:.0f}/100   1:{rr} R:R   Olas. %{prob:.0f}"
+        title = f"\n{sym}   {arrow}   ·   {grade} {score:.0f}/100   ·   1:{rr} R:R   ·   Olasılık %{prob:.0f}"
+        # Daha geniş ve ferah görünüm: 20:9 oran, büyük ölçek
         kw = dict(type="candle", style=st, addplot=aps, volume=True,
-                  title=title, figratio=(16,9), figscale=1.2, returnfig=True)
+                  title=title, figratio=(20,9), figscale=1.5, returnfig=True,
+                  tight_layout=True, scale_padding={"left":0.4,"right":1.4,"top":1.0,"bottom":0.6})
         if hl_prices:
             kw["hlines"] = dict(hlines=hl_prices, colors=hl_colors,
-                                linestyle=hl_styles, linewidths=1.1)
+                                linestyle=hl_styles, linewidths=1.2)
+        # Kar/zarar bölgeleri — hafif gölge
         fill = []
         try:
             if entry and d.get("tp"):
-                fill.append(dict(y1=float(entry), y2=float(d["tp"]), alpha=0.06, color="#00ff88"))
+                fill.append(dict(y1=float(entry), y2=float(d["tp"]), alpha=0.05, color="#26a69a"))
             if entry and d.get("sl"):
-                fill.append(dict(y1=float(entry), y2=float(d["sl"]), alpha=0.06, color="#ff3b5c"))
+                fill.append(dict(y1=float(entry), y2=float(d["sl"]), alpha=0.05, color="#ef5350"))
             if fill: kw["fill_between"] = fill
         except: pass
 
@@ -572,8 +576,11 @@ def _tg_chart1(s, df, tf_label):
         highs = df["High"].values; lows = df["Low"].values
         opens = df["Open"].values; closes = df["Close"].values
 
-        # ── Trend kanalı ───────────────────────────────────────────────────
-        def _pivots(arr, kind, lw=2, rw=2):
+        # Sağ tarafta etiketler için boşluk (ferah görünüm)
+        ax.set_xlim(-1, n + 9)
+
+        # ── Trend kanalı (sade, iki belirgin swing) ────────────────────────
+        def _pivots(arr, kind, lw=3, rw=3):
             out = []
             for i in range(lw, len(arr) - rw):
                 w = arr[i-lw:i+rw+1]
@@ -593,232 +600,91 @@ def _tg_chart1(s, df, tf_label):
             slope = (y2 - y1) / (i2 - i1)
             x0 = max(0, i1-2); y0 = y1 + slope*(x0 - i1)
             ax.plot([x0, xr], [y0, y1+slope*(xr-i1)],
-                    color=color, lw=1.6, alpha=0.85, linestyle="-", solid_capstyle="round")
+                    color=color, lw=1.4, alpha=0.55, linestyle="-", solid_capstyle="round")
             return slope
         ph = _pivots(highs, "high"); pl = _pivots(lows, "low")
-        sl_slope = _trendline(pl, lows,  "low",  "#5b9bd5")
-        sr_slope = _trendline(ph, highs, "high", "#e06666")
+        sl_slope = _trendline(pl, lows,  "low",  "#26a69a")
+        sr_slope = _trendline(ph, highs, "high", "#ef5350")
         ch_label = ""
         if sl_slope is not None and sr_slope is not None:
-            if sl_slope > 0 and sr_slope > 0:   ch_label = "↗ YÜKSELEN KANAL"
-            elif sl_slope < 0 and sr_slope < 0: ch_label = "↘ DÜŞEN KANAL"
-            elif sl_slope > 0 and sr_slope < 0: ch_label = "◁▷ DARALAN (ÜÇGEN)"
-            else: ch_label = "▭ YATAY KANAL"
-        if ch_label:
-            ax.text(0.5, 0.965, ch_label, transform=ax.transAxes, ha="center", va="top",
-                    fontsize=9, fontweight="bold", color="#9aa3b7", alpha=0.9)
+            if sl_slope > 0 and sr_slope > 0:   ch_label = "↗ Yükselen Kanal"
+            elif sl_slope < 0 and sr_slope < 0: ch_label = "↘ Düşen Kanal"
+            elif sl_slope > 0 and sr_slope < 0: ch_label = "◁▷ Daralan (Üçgen)"
+            else: ch_label = "▭ Yatay Kanal"
 
-        # ── Order Blocks ───────────────────────────────────────────────────
+        # ── Kilit Destek/Direnç (en güçlü swing seviyeleri) ────────────────
+        swing_hi = float(df["High"].tail(min(n, 100)).max())
+        swing_lo = float(df["Low"].tail(min(n, 100)).min())
+        ax.axhline(y=swing_hi, color="#787b86", lw=0.8, linestyle=":", alpha=0.45)
+        ax.axhline(y=swing_lo, color="#787b86", lw=0.8, linestyle=":", alpha=0.45)
+        ax.text(0.5, swing_hi, "  Direnç", fontsize=7.5, color="#787b86",
+                va="bottom", ha="left", alpha=0.7)
+        ax.text(0.5, swing_lo, "  Destek", fontsize=7.5, color="#787b86",
+                va="top", ha="left", alpha=0.7)
+
+        # ── Sadece EN YAKIN tek Order Block zonu (gürültüsüz) ──────────────
         obs = _find_obs(highs, lows, opens, closes, direction)
-        for ob in obs:
+        if obs:
+            ob = obs[-1]  # en yakın/en güncel
             idx = ob["idx"]; top = ob["top"]; bot = ob["bot"]
             w = xr - idx + 1
-            if ob["type"] == "bull_ob":
-                rect = mpatches.Rectangle((idx-0.4, bot), w, top-bot,
-                    facecolor="#00ff88", alpha=0.12, edgecolor="#00ff88", lw=1.2)
-                ax.add_patch(rect)
-                ax.text(idx+0.2, bot - rng*0.012, "OB+", fontsize=7,
-                        color="#00ff88", fontweight="bold", alpha=0.9)
-            else:
-                rect = mpatches.Rectangle((idx-0.4, bot), w, top-bot,
-                    facecolor="#ff3b5c", alpha=0.12, edgecolor="#ff3b5c", lw=1.2)
-                ax.add_patch(rect)
-                ax.text(idx+0.2, top + rng*0.006, "OB-", fontsize=7,
-                        color="#ff3b5c", fontweight="bold", alpha=0.9)
+            is_bull = ob["type"] == "bull_ob"
+            col = "#26a69a" if is_bull else "#ef5350"
+            rect = mpatches.Rectangle((idx-0.4, bot), w, top-bot,
+                facecolor=col, alpha=0.10, edgecolor=col, lw=1.0, linestyle="-")
+            ax.add_patch(rect)
+            ax.text(idx+0.3, (top if not is_bull else bot) + (rng*0.006 if not is_bull else -rng*0.014),
+                    "Talep Bölgesi" if is_bull else "Arz Bölgesi",
+                    fontsize=7, color=col, fontweight="bold", alpha=0.85)
 
-        # ── Fair Value Gaps ────────────────────────────────────────────────
-        fvgs = _find_fvg(highs, lows, closes)
-        for fvg in fvgs:
-            idx = fvg["idx"]; top = fvg["top"]; bot = fvg["bot"]
-            w = xr - idx + 1.5
-            if fvg["type"] == "bull_fvg":
-                rect = mpatches.Rectangle((idx-2.5, bot), w, top-bot,
-                    facecolor="#3b82f6", alpha=0.13, edgecolor="#3b82f6", lw=0.8,
-                    linestyle="--")
-                ax.add_patch(rect)
-                ax.text(idx-1.8, bot + (top-bot)*0.3, "FVG", fontsize=6.5,
-                        color="#3b82f6", alpha=0.85)
-            else:
-                rect = mpatches.Rectangle((idx-2.5, bot), w, top-bot,
-                    facecolor="#f59e0b", alpha=0.13, edgecolor="#f59e0b", lw=0.8,
-                    linestyle="--")
-                ax.add_patch(rect)
-                ax.text(idx-1.8, bot + (top-bot)*0.3, "FVG", fontsize=6.5,
-                        color="#f59e0b", alpha=0.85)
-
-        # ── Giriş/SL/TP etiketleri ────────────────────────────────────────
-        def _tag(price, text, color):
+        # ── Giriş/SL/TP etiketleri (sağ kenar, kutu içinde) ────────────────
+        def _tag(price, text, color, txtcol="#0d1017"):
             if price is None: return
             try: price = float(price)
             except: return
-            ax.annotate(text, xy=(xr, price), xytext=(6, 0),
-                        textcoords="offset points", va="center", ha="left",
-                        fontsize=8.5, fontweight="bold", color="#0a0b0e",
-                        bbox=dict(boxstyle="round,pad=0.3", fc=color, ec="none", alpha=0.95))
-        _tag(entry,       f"GİRİŞ {fp_plain(entry)}",   "#e8eaf0")
-        _tag(d.get("sl"), f"SL {fp_plain(d.get('sl'))}", "#ff3b5c")
-        _tag(d.get("tp"), f"TP {fp_plain(d.get('tp'))}", "#00ff88")
+            ax.annotate(text, xy=(n+0.5, price), va="center", ha="left",
+                        fontsize=9, fontweight="bold", color=txtcol,
+                        bbox=dict(boxstyle="round,pad=0.35", fc=color, ec="none", alpha=0.96))
+        _tag(entry,       f"GİRİŞ {fp_plain(entry)}",      "#d1d4dc")
+        _tag(d.get("sl"), f"SL  {fp_plain(d.get('sl'))}",  "#ef5350", "#ffffff")
+        _tag(d.get("tp"), f"TP  {fp_plain(d.get('tp'))}",  "#26a69a", "#ffffff")
 
-        # ── Yön oku ───────────────────────────────────────────────────────
+        # ── Yön oku (giriş bölgesine işaret) ───────────────────────────────
         if entry:
             up = direction == "LONG"
-            ay = float(entry) + (rng*0.16)*(-1 if up else 1)
+            ay = float(entry) + (rng*0.18)*(-1 if up else 1)
             ax.annotate("AL  ▲" if up else "SAT  ▼",
-                        xy=(xr-2, float(entry)), xytext=(xr-12, ay),
-                        fontsize=11, fontweight="bold",
-                        color="#00ff88" if up else "#ff3b5c",
-                        arrowprops=dict(arrowstyle="-|>", lw=2.2,
-                                        color="#00ff88" if up else "#ff3b5c"))
+                        xy=(xr-1, float(entry)), xytext=(xr-14, ay),
+                        fontsize=12, fontweight="bold",
+                        color="#26a69a" if up else "#ef5350",
+                        arrowprops=dict(arrowstyle="-|>", lw=2.4,
+                                        color="#26a69a" if up else "#ef5350"))
 
-        # ── Analiz kutusu ─────────────────────────────────────────────────
-        ob_txt = f"OB: {len(obs)}" if obs else ""
-        fvg_txt = f"FVG: {len(fvgs)}" if fvgs else ""
+        # ── Analiz kutusu (sol üst — net, sade gerekçe) ────────────────────
         reasons = (d.get("reasons") or [])[:3]
-        lines = [f"[1/2] YAPI & GİRİŞ  —  {sym}  {arrow}",
-                 f"EMA 9/20/50  ·  {ch_label or 'Kanal'}  ·  {ob_txt}  {fvg_txt}",
-                 f"R:R 1:{rr}  ·  Olas. %{prob:.0f}  ·  {grade}  ·  {tf_label}"]
+        bias = "Yükseliş yapısı" if direction == "LONG" else "Düşüş yapısı"
+        lines = [f"{sym}   ·   {bias}",
+                 f"EMA 9/20/50  ·  {ch_label or 'Trend Analizi'}",
+                 f"R:R 1:{rr}   ·   Olasılık %{prob:.0f}   ·   Kalite {grade}"]
         for rsn in reasons:
-            lines.append(f"• {str(rsn)[:46]}")
-        ax.text(0.012, 0.975, "\n".join(lines), transform=ax.transAxes,
-                va="top", ha="left", fontsize=8, color="#e8eaf0", linespacing=1.5,
-                bbox=dict(boxstyle="round,pad=0.5", fc="#111318", ec="#1e2028", alpha=0.92))
+            lines.append(f"• {str(rsn)[:50]}")
+        ax.text(0.010, 0.975, "\n".join(lines), transform=ax.transAxes,
+                va="top", ha="left", fontsize=8.5, color="#d1d4dc", linespacing=1.6,
+                bbox=dict(boxstyle="round,pad=0.6", fc="#131722", ec="#2a2e39", alpha=0.94))
 
-        # ── Timeframe etiketi (sağ üst) ───────────────────────────────────
-        ax.text(0.99, 0.975, tf_label, transform=ax.transAxes,
-                va="top", ha="right", fontsize=9, fontweight="bold",
-                color="#f59e0b", alpha=0.95,
-                bbox=dict(boxstyle="round,pad=0.3", fc="#111318", ec="#f59e0b40", alpha=0.9))
+        # ── Timeframe rozeti (sağ üst) ─────────────────────────────────────
+        ax.text(0.985, 0.975, tf_label, transform=ax.transAxes,
+                va="top", ha="right", fontsize=9.5, fontweight="bold",
+                color="#ff9800", alpha=0.95,
+                bbox=dict(boxstyle="round,pad=0.35", fc="#131722", ec="#ff980055", alpha=0.92))
 
-        ax.text(0.99, 0.02, "TITAN PRIME", transform=ax.transAxes,
-                va="bottom", ha="right", fontsize=9, fontweight="bold",
-                color="#1e2028", alpha=0.8)
-
-        buf = _io.BytesIO()
-        fig.savefig(buf, dpi=130, bbox_inches="tight", facecolor="#0a0b0e")
-        _plt.close(fig); buf.seek(0)
-        return buf.read()
-    except Exception:
-        return None
-
-
-def _tg_chart2(s, df, tf_label):
-    """Grafik 2/2 — ICT Yapıları: Fractal, BOS/CHoCH, Likidite Havuzları, Premium/Discount."""
-    try:
-        import mplfinance as mpf, matplotlib
-        matplotlib.use("Agg")
-        import matplotlib.pyplot as _plt
-        import matplotlib.patches as mpatches
-        import io as _io
-        import numpy as np
-
-        d = s if isinstance(s, dict) else {}
-        direction = d.get("direction", "")
-        sym = d.get("sym", "")
-        score = d.get("score", 0); grade = d.get("quality", "")
-
-        df["EMA9"]  = df["Close"].ewm(span=9,  adjust=False).mean()
-        df["EMA20"] = df["Close"].ewm(span=20, adjust=False).mean()
-        df["EMA50"] = df["Close"].ewm(span=50, adjust=False).mean()
-
-        mc = mpf.make_marketcolors(up="#00ff88", down="#ff3b5c", wick="inherit",
-                                   edge="inherit", volume="#3b82f6")
-        st = mpf.make_mpf_style(marketcolors=mc, facecolor="#0a0b0e", figcolor="#0a0b0e",
-                                gridcolor="#1e2028", rc={"axes.labelcolor":"#6b7280",
-                                "xtick.color":"#6b7280","ytick.color":"#6b7280","font.size":9})
-        aps = [
-            mpf.make_addplot(df["EMA9"],  color="#3b82f6", width=0.9),
-            mpf.make_addplot(df["EMA20"], color="#f59e0b", width=0.9),
-            mpf.make_addplot(df["EMA50"], color="#a855f7", width=1.1),
-        ]
-
-        title = f"\n{sym}  [{tf_label}]  ICT YAPILARI   {grade} {score:.0f}/100"
-        fig, axl = mpf.plot(df, type="candle", style=st, addplot=aps,
-                            volume=True, title=title, figratio=(16,9),
-                            figscale=1.2, returnfig=True)
-        ax = axl[0]
-        n = len(df)
-        xr = n - 1
-        hi = float(df["High"].max()); lo = float(df["Low"].min())
-        rng = (hi - lo) or 1
-        highs = df["High"].values; lows = df["Low"].values
-        closes = df["Close"].values
-
-        # ── Williams Fractals (2-bar) ──────────────────────────────────────
-        frac_h, frac_l = _find_fractals(highs, lows, n=2)
-        for i in frac_h[-12:]:  # son 12 fractal high
-            ax.annotate("▼", xy=(i, highs[i] + rng*0.01), ha="center",
-                        fontsize=9, color="#e06666", fontweight="bold", alpha=0.9)
-        for i in frac_l[-12:]:  # son 12 fractal low
-            ax.annotate("▲", xy=(i, lows[i] - rng*0.015), ha="center",
-                        fontsize=9, color="#5b9bd5", fontweight="bold", alpha=0.9)
-
-        # ── BOS / CHoCH ────────────────────────────────────────────────────
-        bos_events = _find_bos_choch(highs, lows, closes, frac_h, frac_l)
-        for ev in bos_events:
-            ax.axhline(y=ev["price"], color=ev["color"], lw=1.3,
-                       linestyle=":", alpha=0.7, xmin=ev["idx"]/max(n,1))
-            ax.text(ev["idx"] + 1, ev["price"] + rng*0.008,
-                    ev["label"], fontsize=8, color=ev["color"],
-                    fontweight="bold", alpha=0.95,
-                    bbox=dict(boxstyle="round,pad=0.2", fc="#0a0b0e",
-                              ec=ev["color"], alpha=0.85))
-
-        # ── Likidite Havuzları (Equal High / Equal Low) ────────────────────
-        liq = _find_liquidity(highs, lows)
-        for lp in liq:
-            p = lp["price"]
-            i1 = lp["idx1"]; i2 = lp["idx2"]
-            col = "#ffcc44" if lp["type"] == "EQH" else "#44aaff"
-            lbl = "EQH 🔵" if lp["type"] == "EQH" else "EQL 🟡"
-            ax.plot([i1, xr], [p, p], color=col, lw=1.4,
-                    linestyle="--", alpha=0.75)
-            ax.text(xr + 0.5, p, lbl, fontsize=7, color=col,
-                    va="center", fontweight="bold", alpha=0.9)
-
-        # ── Premium / Discount Zonu (ana swing'in %50'si) ─────────────────
-        if len(frac_h) >= 1 and len(frac_l) >= 1:
-            swing_h = highs[frac_h[-1]]
-            swing_l = lows[frac_l[-1]]
-            mid = (swing_h + swing_l) / 2
-            # Premium zone (üst %50) — kısa satış için ideal
-            ax.axhspan(mid, swing_h, alpha=0.04, color="#ff3b5c", label="Premium")
-            # Discount zone (alt %50) — alış için ideal
-            ax.axhspan(swing_l, mid, alpha=0.04, color="#00ff88", label="Discount")
-            ax.axhline(y=mid, color="#9aa3b7", lw=1.0, linestyle=":",
-                       alpha=0.5)
-            ax.text(xr - 8, mid + rng*0.005, "EQ %50", fontsize=7,
-                    color="#9aa3b7", alpha=0.8)
-            ax.text(xr - 14, swing_h - rng*0.02, "PREMIUM", fontsize=7.5,
-                    color="#ff3b5c", alpha=0.75, fontweight="bold")
-            ax.text(xr - 14, swing_l + rng*0.01, "DISCOUNT", fontsize=7.5,
-                    color="#00ff88", alpha=0.75, fontweight="bold")
-
-        # ── Analiz kutusu (sol üst) ────────────────────────────────────────
-        frac_count = len(frac_h) + len(frac_l)
-        bos_labels = " | ".join(e["label"] for e in bos_events) or "Tespit edilmedi"
-        liq_labels = " | ".join(lp["type"] for lp in liq) or "—"
-        lines = [
-            f"[2/2] ICT YAPILARI  —  {sym}  [{tf_label}]",
-            f"Fractal: {len(frac_h)} High  {len(frac_l)} Low  (▼▲ Williams 2-bar)",
-            f"BOS/CHoCH: {bos_labels}",
-            f"Likidite: {liq_labels}",
-            f"Premium/Discount Zonu aktif",
-        ]
-        ax.text(0.012, 0.975, "\n".join(lines), transform=ax.transAxes,
-                va="top", ha="left", fontsize=8, color="#e8eaf0", linespacing=1.5,
-                bbox=dict(boxstyle="round,pad=0.5", fc="#111318", ec="#1e2028", alpha=0.92))
-
-        # ── Timeframe etiketi ─────────────────────────────────────────────
-        ax.text(0.99, 0.975, tf_label, transform=ax.transAxes,
-                va="top", ha="right", fontsize=9, fontweight="bold",
-                color="#f59e0b", alpha=0.95,
-                bbox=dict(boxstyle="round,pad=0.3", fc="#111318", ec="#f59e0b40", alpha=0.9))
-        ax.text(0.99, 0.02, "TITAN PRIME", transform=ax.transAxes,
-                va="bottom", ha="right", fontsize=9, fontweight="bold",
-                color="#1e2028", alpha=0.8)
+        # ── Watermark ──────────────────────────────────────────────────────
+        ax.text(0.5, 0.5, "TITAN PRIME", transform=ax.transAxes,
+                va="center", ha="center", fontsize=34, fontweight="bold",
+                color="#ffffff", alpha=0.03, zorder=0)
 
         buf = _io.BytesIO()
-        fig.savefig(buf, dpi=130, bbox_inches="tight", facecolor="#0a0b0e")
+        fig.savefig(buf, dpi=150, bbox_inches="tight", facecolor="#0d1017", pad_inches=0.15)
         _plt.close(fig); buf.seek(0)
         return buf.read()
     except Exception:
@@ -826,7 +692,7 @@ def _tg_chart2(s, df, tf_label):
 
 
 def _tg_chart_png(s):
-    """Geriye dönük uyumluluk — Chart 1'i döner (web /api/chart endpoint için)."""
+    """Tek kurumsal grafik döner (Telegram + web /api/chart için)."""
     df = _build_chart_df(s)
     if df is None: return None
     tf_label = _detect_tf(df)
@@ -961,17 +827,13 @@ def tg_setup_alert(s):
         f"⚡ <b>BU SİNYAL ÖZEL VE KİŞİSELDİR</b> ⚡")
     def _send():
         try:
-            df = _build_chart_df(s)
-            tf_label = _detect_tf(df) if df is not None else "1 Saatlik"
-            png1 = _tg_chart1(s, df, tf_label) if df is not None else None
-            png2 = _tg_chart2(s, df, tf_label) if df is not None else None
-
-            if png1:
-                # Grafik 1 — Yapı & Giriş (tam mesaj caption olarak)
+            png = _tg_chart_png(s)
+            if png:
+                # Tek geniş grafik + tam mesaj caption olarak
                 cap = msg if len(msg) <= 1024 else msg[:1015] + "…"
                 requests.post(f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendPhoto",
                     data={"chat_id":TELEGRAM_CHAT_ID,"caption":cap,"parse_mode":"HTML"},
-                    files={"photo":("chart1.png", png1, "image/png")}, timeout=20)
+                    files={"photo":("chart.png", png, "image/png")}, timeout=20)
                 # Mesaj 1024+ ise tam metni ayrıca gönder
                 if len(msg) > 1024:
                     requests.post(f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage",
@@ -981,14 +843,6 @@ def tg_setup_alert(s):
                 requests.post(f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage",
                     json={"chat_id":TELEGRAM_CHAT_ID,"text":msg,"parse_mode":"HTML",
                           "disable_web_page_preview":True}, timeout=8)
-
-            # Grafik 2 — ICT Yapıları (kısa caption ile)
-            if png2:
-                cap2 = (f"📐 <b>{s.get('sym')} [{tf_label}] — ICT YAPILARI</b>\n"
-                        f"Fractal · BOS/CHoCH · Likidite · Premium/Discount Zonu")
-                requests.post(f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendPhoto",
-                    data={"chat_id":TELEGRAM_CHAT_ID,"caption":cap2,"parse_mode":"HTML"},
-                    files={"photo":("chart2.png", png2, "image/png")}, timeout=20)
         except: pass
     threading.Thread(target=_send, daemon=True).start()
 
