@@ -143,7 +143,18 @@ tailwind.config = {
           <button data-p="weekly"  class="ptab px-4 py-2 rounded-lg bg-border2 text-xs">HAFTALIK</button>
           <button data-p="monthly" class="ptab px-4 py-2 rounded-lg bg-border2 text-xs">AYLIK</button>
         </div>
+        <div class="grid grid-cols-2 md:grid-cols-4 gap-4 mb-4" id="perf-summary"></div>
         <div class="grid grid-cols-2 md:grid-cols-4 gap-4 mb-4" id="perf-kpi"></div>
+        <div class="bg-card rounded-xl border border-border2 overflow-x-auto mb-4">
+          <h3 class="font-bold p-4 pb-2">💷 Sembol Bazlı Kâr/Zarar</h3>
+          <table class="w-full text-xs">
+            <thead class="bg-border2/40 text-dim"><tr>
+              <th class="text-left p-3">SEMBOL</th><th class="text-right p-3">TP</th>
+              <th class="text-right p-3">SL</th><th class="text-right p-3">WIN RATE</th><th class="text-right p-3">KÂR/ZARAR £</th>
+            </tr></thead>
+            <tbody id="persym-tbody"></tbody>
+          </table>
+        </div>
         <div class="bg-card rounded-xl border border-border2 p-5 mb-4">
           <h3 class="font-bold mb-3">📊 Dönem Bazlı Performans</h3>
           <canvas id="perfChart" height="100"></canvas>
@@ -501,6 +512,23 @@ function renderTrades(){
 }
 
 async function loadPerformance(){
+  // Geçmiş özet (toplam kâr/zarar £, win rate, sembol bazlı)
+  try{
+    const sm=await (await fetch(API+'/api/performance/summary')).json();
+    const pnlPos=sm.total_pnl>=0;
+    document.getElementById('perf-summary').innerHTML=
+      kpi('Bakiye','£'+sm.balance,'güncel',sm.balance>=50?'text-grn':'text-red')+
+      kpi('Toplam Kâr/Zarar',(pnlPos?'+£':'-£')+Math.abs(sm.total_pnl),`${sm.total} işlem`,pnlPos?'text-grn':'text-red')+
+      kpi('Win Rate',sm.wr+'%',`${sm.wins}TP / ${sm.losses}SL`,sm.wr>=50?'text-grn':'text-red')+
+      kpi('En İyi / En Kötü',(sm.best_sym||'—')+' / '+(sm.worst_sym||'—'),'sembol');
+    document.getElementById('persym-tbody').innerHTML=(sm.per_symbol&&sm.per_symbol.length)?
+      sm.per_symbol.map(s=>`<tr class="border-t border-border2">
+        <td class="p-3 font-bold">${s.sym}</td><td class="p-3 text-right text-grn">${s.wins}</td>
+        <td class="p-3 text-right text-red">${s.losses}</td>
+        <td class="p-3 text-right font-bold ${s.wr>=55?'text-grn':s.wr>=45?'text-ylw':'text-red'}">${s.wr}%</td>
+        <td class="p-3 text-right font-bold ${s.pnl>=0?'text-grn':'text-red'}">${s.pnl>=0?'+£':'-£'}${Math.abs(s.pnl)}</td></tr>`).join('')
+      : '<tr><td colspan="5" class="p-6 text-center text-dim">Henüz kapanmış işlem yok</td></tr>';
+  }catch(e){}
   const rows=await (await fetch(API+'/api/performance?p='+perfPeriod)).json();
   const totW=rows.reduce((a,r)=>a+r.wins,0), totL=rows.reduce((a,r)=>a+r.losses,0);
   const totT=totW+totL, totR=rows.reduce((a,r)=>a+r.rr_sum,0);

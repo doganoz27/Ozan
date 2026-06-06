@@ -539,6 +539,49 @@ def api_performance(p: str = "daily"):
         p = "daily"
     return JSONResponse(performance_data(p))
 
+@app.get("/api/performance/summary")
+def api_performance_summary():
+    """Geçmiş özet: toplam kâr/zarar (£), win rate, sembol bazlı dağılım."""
+    out = {"total_pnl": 0.0, "wins": 0, "losses": 0, "total": 0, "wr": 0.0,
+           "best_sym": None, "worst_sym": None, "per_symbol": [],
+           "balance": tf.ACCOUNT["balance"]}
+    try:
+        with tf.db() as c:
+            # Toplam P&L shadow_trades'den
+            prows = c.execute(
+                "SELECT sym, status, pnl FROM shadow_trades "
+                "WHERE status IN ('TP','SL','EXPIRED') ").fetchall()
+            bal_row = c.execute(
+                "SELECT value FROM account_state WHERE key='shadow_balance'").fetchone()
+            if bal_row:
+                out["balance"] = round(bal_row["value"], 2)
+        per: dict = {}
+        for r in prows:
+            sym = r["sym"]; pnl = r["pnl"] or 0; st = r["status"]
+            out["total_pnl"] += pnl
+            if st == "TP": out["wins"] += 1
+            elif st == "SL": out["losses"] += 1
+            d = per.setdefault(sym, {"sym": sym, "wins": 0, "losses": 0, "pnl": 0.0})
+            d["pnl"] += pnl
+            if st == "TP": d["wins"] += 1
+            elif st == "SL": d["losses"] += 1
+        out["total"] = out["wins"] + out["losses"]
+        out["wr"] = round(out["wins"] / out["total"] * 100, 1) if out["total"] else 0.0
+        out["total_pnl"] = round(out["total_pnl"], 2)
+        syms = list(per.values())
+        for s in syms:
+            t = s["wins"] + s["losses"]
+            s["wr"] = round(s["wins"] / t * 100, 1) if t else 0.0
+            s["pnl"] = round(s["pnl"], 2)
+        syms.sort(key=lambda x: x["pnl"], reverse=True)
+        out["per_symbol"] = syms
+        if syms:
+            out["best_sym"] = syms[0]["sym"]
+            out["worst_sym"] = syms[-1]["sym"]
+    except Exception:
+        pass
+    return JSONResponse(out)
+
 @app.get("/api/news")
 def api_news():
     return JSONResponse(news_data())
