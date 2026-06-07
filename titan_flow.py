@@ -779,12 +779,12 @@ def _tg_chart1(s, df, tf_label):
             ax.axhline(y=price, color=color, lw=0.6, linestyle=":", alpha=0.35)
 
         _zone_label(tp_p, "#26a69a",
-                    f"🎯 TP  {fp_plain(tp_p)}",
-                    f"+%{tp_pct:.2f}  kâr hedefi")
+                    f"▲ TP  {fp_plain(tp_p)}",
+                    f"+%{tp_pct:.2f}  kar hedefi")
         _zone_label(entry, "#d1d4dc",
-                    f"◉ GİRİŞ  {fp_plain(entry)}", "")
+                    f"◉ GIRIS  {fp_plain(entry)}", "")
         _zone_label(sl_p, "#ef5350",
-                    f"🛑 SL  {fp_plain(sl_p)}",
+                    f"■ SL  {fp_plain(sl_p)}",
                     f"-%{sl_pct:.2f}  risk")
 
         # ── Yön oku ────────────────────────────────────────────────────────
@@ -811,7 +811,7 @@ def _tg_chart1(s, df, tf_label):
         ]
         factor_lines = []
         for _k, label, val in factor_map:
-            dot = "✅" if val else "○"
+            dot = "●" if val else "○"
             factor_lines.append(f"{dot} {label}")
 
         bias = "Yükseliş yapısı" if direction == "LONG" else "Düşüş yapısı"
@@ -837,7 +837,7 @@ def _tg_chart1(s, df, tf_label):
 
         # ── Formasyon açıklaması (sol alt) ────────────────────────────────
         ax.text(0.010, 0.038,
-                f"📐 {form_name}: {form_desc}",
+                f"◆ {form_name}: {form_desc}",
                 transform=ax.transAxes, va="bottom", ha="left",
                 fontsize=7.6, color="#b2b5be", linespacing=1.4,
                 bbox=dict(boxstyle="round,pad=0.5", fc="#131722", ec="#ff980055", alpha=0.92))
