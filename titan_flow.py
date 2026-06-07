@@ -1607,104 +1607,110 @@ def _send_deep_research_tg(article, research: dict):
 
 def send_telegram(article):
     if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID: return
-    h=article.get("headline","")
+    h = article.get("headline", "")
     if h in _tg_sent: return
     _tg_sent.add(h)
-    imp=article["importance"]
-    rl=article.get("risk_level","NOISE")
-    m=article.get("macro",{})
-    bias_tr=m.get("bias_tr","Nötr")
-    bull_pct=m.get("bull_pct",0); bear_pct=m.get("bear_pct",0); neut_pct=m.get("neut_pct",0)
-    caution=m.get("caution","Normal İşlem")
-    dur=m.get("dur","1h"); conf=m.get("conf",50)
-    ad=m.get("asset_dirs",{})
-    hist_key=m.get("hist_key"); hist_match=m.get("hist_match",{})
-    now_str=datetime.now().strftime("%d.%m.%Y %H:%M")
+    imp   = article["importance"]
+    rl    = article.get("risk_level", "NOISE")
+    m     = article.get("macro", {})
+    bias_tr  = m.get("bias_tr", "Nötr")
+    bull_pct = m.get("bull_pct", 0); bear_pct = m.get("bear_pct", 0)
+    caution  = m.get("caution", "Normal İşlem")
+    dur      = m.get("dur", "1h"); conf = m.get("conf", 50)
+    ad       = m.get("asset_dirs", {})
+    hist_key = m.get("hist_key"); hist_match = m.get("hist_match", {})
+    now_str  = datetime.now().strftime("%d.%m.%Y %H:%M")
+    art_url  = article.get("url", "")
+    art_src  = article.get("source", "Kaynak")
+    summary_txt = (article.get("summary") or "")[:300]
 
-    # Risk level header
-    if imp>=80:   risk_hdr="🔴 KRİTİK HABER"; risk_bar="█████████░"
-    elif imp>=60: risk_hdr="🟠 YÜKSEK ETKİLİ HABER"; risk_bar="███████░░░"
-    elif imp>=40: risk_hdr="🟡 ORTA ETKİLİ HABER"; risk_bar="█████░░░░░"
-    else:         risk_hdr="🔵 DÜŞÜK ETKİLİ HABER"; risk_bar="███░░░░░░░"
+    if imp >= 80:   risk_hdr = "🔴 KRİTİK"; risk_bar = "█████████░"
+    elif imp >= 60: risk_hdr = "🟠 YÜKSEK ETKİ"; risk_bar = "███████░░░"
+    elif imp >= 40: risk_hdr = "🟡 ORTA ETKİ"; risk_bar = "█████░░░░░"
+    else:           risk_hdr = "🔵 DÜŞÜK ETKİ"; risk_bar = "███░░░░░░░"
 
-    bias_emoji="📈" if bias_tr=="Yükseliş" else ("📉" if bias_tr=="Düşüş" else "➡️")
+    bias_emoji = "📈" if bias_tr == "Yükseliş" else ("📉" if bias_tr == "Düşüş" else "➡️")
+    konu, anlam = _turkce_aciklama(h, article.get("summary", ""), imp, bias_tr, hist_key)
 
-    # Turkish summary + meaning
-    ozet, anlam = _turkce_aciklama(h, article.get("summary",""), imp, bias_tr, hist_key)
+    # ── Etkilenen varlıklar ──
+    asset_lines = []
+    for sym, val in ad.items():
+        if isinstance(val, (list, tuple)) and len(val) >= 2:
+            d, strength = val[0], val[1]
+        else:
+            continue
+        if d == "→": continue
+        dir_emoji = "📈" if d == "↑" else "📉"
+        exp = _ASSET_IMPACT.get(sym, {}).get(d, "")
+        clean_sym = sym.replace("USD","").replace("500","") if len(sym) > 6 else sym
+        bar = "█" * max(1, int(strength/20)) + "░" * (5 - max(1, int(strength/20)))
+        line = f"{dir_emoji} <b>{clean_sym}</b>  {bar}"
+        if exp:
+            line += f"\n   <i>{exp[:110]}</i>"
+        asset_lines.append(line)
 
-    # Detailed per-asset impact
-    asset_lines=[]
-    for sym,(d,strength) in ad.items():
-        if d=="→": continue
-        dir_emoji="📈" if d=="↑" else "📉"
-        exp=_ASSET_IMPACT.get(sym,{}).get(d,"")
-        clean_sym=sym.replace("USD","").replace("500","") if len(sym)>6 else sym
-        strength_bar="█"*max(1,int(strength/20))+"░"*(5-max(1,int(strength/20)))
-        asset_lines.append(
-            f"{dir_emoji} <b>{clean_sym}</b>  {strength_bar} {strength:.1f}%\n"
-            f"   └ <i>{exp[:120]}</i>" if exp else
-            f"{dir_emoji} <b>{clean_sym}</b>  {strength_bar} {strength:.1f}%"
-        )
-
-    # Historical comparison
-    hist_block=""
+    # ── Geçmiş karşılaştırma ──
+    hist_block = ""
     if hist_key and hist_match:
-        hist_block=f"\n📜 <b>GEÇMİŞTE NELER OLDU? ({hist_key.upper()})</b>\n"
-        for asym,mv in list(hist_match.items())[:5]:
-            mv_emoji="📈" if mv>0 else "📉"
-            hist_block+=f"  {mv_emoji} {asym}: ortalama {'+' if mv>0 else ''}{mv:.1f}% hareket\n"
-        hist_block+="  <i>Geçmiş performans gelecek garantisi değildir.</i>"
+        hist_block = f"\n\n📜 <b>GEÇMİŞTE '{hist_key.upper()}' OLDUĞUNDA:</b>\n"
+        for asym, mv in list(hist_match.items())[:4]:
+            mv_emoji = "📈" if mv > 0 else "📉"
+            hist_block += f"  {mv_emoji} {asym}: ortalama {'+' if mv>0 else ''}{mv:.1f}% hareket\n"
+        hist_block += "  <i>(Geçmiş performans, gelecek garantisi değildir)</i>"
 
-    # Timeframe impact
-    tf=m.get("tf15m","—"); tf1h=m.get("tf1h","—"); tf4h=m.get("tf4h","—"); tf24h=m.get("tf24h","—")
+    # ── Zaman dilimi ──
+    tf  = m.get("tf15m","—"); tf1h = m.get("tf1h","—")
+    tf4h = m.get("tf4h","—"); tf24h = m.get("tf24h","—")
 
-    assets_block="\n".join(asset_lines) if asset_lines else "Belirgin varlık etkisi tespit edilmedi"
+    assets_block = "\n".join(asset_lines) if asset_lines else "Belirgin varlık etkisi tespit edilmedi."
 
-    msg=(
+    link_block = ""
+    if art_url:
+        link_block = f"\n\n🔗 <b>HABERİN TAMAMI →</b> <a href='{art_url}'>{art_src}</a>"
+
+    msg = (
         f"╔══════════════════════════╗\n"
         f"║  📰 <b>MAKRO HABER ANALİZİ</b>  ║\n"
         f"╚══════════════════════════╝\n\n"
-        f"<b>{risk_hdr}</b>  {risk_bar}\n"
-        f"Etki Skoru: <b>{imp}/100</b>  |  Risk: <b>{rl}</b>\n\n"
-        f"━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-        f"📋 <b>HABER</b>\n"
-        f"<b>{h}</b>\n\n"
-        f"🇹🇷 <b>TÜRKÇE ÖZET</b>\n"
-        f"<i>{ozet}</i>\n\n"
-        f"━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-        f"💡 <b>NE ANLAMALIYIZ?</b>\n"
+        f"<b>{risk_hdr}</b>  {risk_bar}  Skor: <b>{imp}/100</b>\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+        f"📰 <b>HABER</b>\n"
+        f"<b>{h}</b>\n"
+    )
+    if summary_txt:
+        msg += f"<i>{summary_txt}</i>\n"
+    msg += (
+        f"\n━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"🇹🇷 <b>NE OLDU? (Türkçe Özet)</b>\n"
+        f"{konu}\n\n"
+        f"💡 <b>PİYASALAR İÇİN NE ANLAMA GELİYOR?</b>\n"
         f"{anlam}\n\n"
         f"━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-        f"{bias_emoji} <b>PİYASA YÖNÜ</b>: <b>{bias_tr}</b>  (güven: {conf}/100)\n"
-        f"  📈 Yükseliş olasılığı : %{bull_pct}\n"
-        f"  📉 Düşüş olasılığı   : %{bear_pct}\n"
-        f"  ➡️ Nötr olasılığı    : %{neut_pct}\n\n"
-        f"⏱ <b>ZAMAN DİLİMİ ETKİSİ</b>\n"
-        f"  15 dak: {tf}  |  1 saat: {tf1h}  |  4 saat: {tf4h}  |  1 gün: {tf24h}\n\n"
+        f"{bias_emoji} <b>PİYASA YÖNÜ: {bias_tr}</b>  (güven {conf}/100)\n"
+        f"  Yükseliş: %{bull_pct}  |  Düşüş: %{bear_pct}\n\n"
+        f"⏱ <b>ETKİ ZAMAN DİLİMİ</b>\n"
+        f"  15dak: {tf}  ·  1s: {tf1h}  ·  4s: {tf4h}  ·  1g: {tf24h}\n\n"
         f"━━━━━━━━━━━━━━━━━━━━━━━━━\n"
         f"🎯 <b>ETKİLENECEK VARLIKLAR VE NEDEN?</b>\n\n"
         f"{assets_block}"
         f"{hist_block}\n\n"
         f"━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-        f"📊 <b>{caution}</b>  |  Süre tahmini: {dur}\n"
-        f"🕐 {now_str}  |  <i>Titan Prime Elite</i>"
+        f"📊 {caution}  |  Tahmini süre: {dur}\n"
+        f"🕐 {now_str}  ·  <i>Titan Prime Elite</i>"
+        f"{link_block}"
     )
-    # Kaynak URL ekle (her zaman)
-    art_url = article.get("url","")
-    art_src = article.get("source","Kaynak")
-    if art_url:
-        msg += f"\n\n🔗 <b>HABERİN TAMAMI →</b> <a href='{art_url}'>{art_src}</a>"
+
     try:
         requests.post(f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage",
-                      json={"chat_id":TELEGRAM_CHAT_ID,"text":msg,"parse_mode":"HTML",
-                            "disable_web_page_preview":False},timeout=8)
+                      json={"chat_id": TELEGRAM_CHAT_ID, "text": msg, "parse_mode": "HTML",
+                            "disable_web_page_preview": False}, timeout=8)
     except: pass
-    # Yüksek önemli haberler için derin araştırma (ayrı mesaj olarak)
-    if imp >= 65:
+
+    # Yüksek önemli haberler için derin araştırma (ayrı mesaj)
+    if imp >= 50:
         def _deep():
             research = _deep_research(article)
-            if research["corr_count"] >= 1:
-                _send_deep_research_tg(article, research)
+            _send_deep_research_tg(article, research)
         threading.Thread(target=_deep, daemon=True).start()
 
 def news_risk_for_sym(sym, max_age_min=90):

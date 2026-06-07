@@ -108,9 +108,12 @@ tailwind.config = {
       <!-- SIGNALS -->
       <section data-view="signals" class="view hidden">
         <div class="flex flex-wrap gap-2 mb-4" id="sig-tabs">
-          <button data-f="ALL" class="sigtab px-4 py-2 rounded-lg bg-blu text-white text-xs font-bold">TÜMÜ</button>
+          <button data-f="ALL"   class="sigtab px-4 py-2 rounded-lg bg-blu text-white text-xs font-bold">TÜMÜ</button>
           <button data-f="APPROVED" class="sigtab px-4 py-2 rounded-lg bg-border2 text-xs">AKTİF / ONAYLI</button>
           <button data-f="WATCHLIST" class="sigtab px-4 py-2 rounded-lg bg-border2 text-xs">İZLEME</button>
+          <button data-f="FOREX"   class="sigtab px-4 py-2 rounded-lg bg-border2 text-xs">💱 FOREX</button>
+          <button data-f="STOCKS"  class="sigtab px-4 py-2 rounded-lg bg-border2 text-xs">📊 HİSSELER</button>
+          <button data-f="COMMODITIES" class="sigtab px-4 py-2 rounded-lg bg-border2 text-xs">🛢 EMTIA</button>
         </div>
         <div class="bg-card rounded-xl border border-border2 overflow-x-auto">
           <table class="w-full text-xs min-w-[900px]">
@@ -382,9 +385,15 @@ function renderDashboard(){
   drawEquity('equityChart','equityChart_inst', a.equity_curve||[]);
 }
 
+const FOREX_SYMS = ['EUR/USD','GBP/USD','USD/JPY','USD/CHF','AUD/USD','USD/CAD','NZD/USD','EUR/GBP','EUR/JPY','GBP/JPY','EUR/CHF','AUD/JPY','GBP/CHF'];
+const STOCK_SYMS = ['NVDA','AAPL','SPY','QQQ','MSFT','TSLA','AMZN','META','GOOGL','JPM'];
+const COMM_SYMS  = ['XAU/USD','XAG/USD','WTI','BRENT'];
 function renderSignals(){
   let sigs=lastData.signals||[];
-  if(sigFilter!=='ALL') sigs=sigs.filter(s=>s.status===sigFilter);
+  if(sigFilter==='FOREX') sigs=sigs.filter(s=>FOREX_SYMS.includes(s.sym));
+  else if(sigFilter==='STOCKS') sigs=sigs.filter(s=>STOCK_SYMS.includes(s.sym));
+  else if(sigFilter==='COMMODITIES') sigs=sigs.filter(s=>COMM_SYMS.includes(s.sym));
+  else if(sigFilter!=='ALL') sigs=sigs.filter(s=>s.status===sigFilter);
   document.getElementById('sig-tbody').innerHTML = sigs.length? sigs.map((s,i)=>`
     <tr class="border-t border-border2 hover:bg-border2/30 cursor-pointer" onclick="showDetail(${i})">
       <td class="p-3 font-bold">${s.sym}</td>
@@ -412,7 +421,10 @@ function aiBar(label,val){
 
 function showDetail(i){
   let sigs=lastData.signals||[];
-  if(sigFilter!=='ALL') sigs=sigs.filter(s=>s.status===sigFilter);
+  if(sigFilter==='FOREX') sigs=sigs.filter(s=>FOREX_SYMS.includes(s.sym));
+  else if(sigFilter==='STOCKS') sigs=sigs.filter(s=>STOCK_SYMS.includes(s.sym));
+  else if(sigFilter==='COMMODITIES') sigs=sigs.filter(s=>COMM_SYMS.includes(s.sym));
+  else if(sigFilter!=='ALL') sigs=sigs.filter(s=>s.status===sigFilter);
   const s=sigs[i]; if(!s) return;
   const ai=s.ai_scores||{};
   const aiHtml=Object.keys(ai).map(k=>aiBar(k,ai[k])).join('');
@@ -618,40 +630,41 @@ function renderMarket(){
 }
 
 async function loadNews(){
-  const d=await (await fetch(API+'/api/news')).json();
-  document.getElementById('news-list').innerHTML=d.length? d.map(n=>{
-    const ic=n.importance>=80?'border-red':n.importance>=60?'border-ylw':'border-blu';
-    const bc=n.bias==='Yükseliş'?'text-grn':n.bias==='Düşüş'?'text-red':'text-dim';
-    const rlBadge=n.importance>=80?'bg-red/20 text-red':n.importance>=60?'bg-ylw/20 text-ylw':'bg-blu/20 text-blu';
-    const impacts=n.impacts||{};
-    const impHtml=Object.keys(impacts).length? `<div class="mt-3 pt-3 border-t border-border2">
-      <div class="text-xs text-dim font-bold mb-1">📉 ETKİLENECEK VARLIKLAR</div>
-      ${Object.entries(impacts).map(([k,v])=>`<div class="text-xs mb-1"><span class="font-bold text-blu">${k}:</span> <span class="text-dim">${v}</span></div>`).join('')}</div>`:'';
-    const ne=n.ne_anlamaliyiz? `<div class="mt-2 bg-blu/10 border border-blu/20 rounded p-2">
-      <span class="text-xs text-blu font-bold">💡 NE ANLAMALIYIZ:</span> <span class="text-xs text-dim">${n.ne_anlamaliyiz}</span></div>`:'';
-    const summary=n.summary? `<div class="text-xs text-dim mt-2 leading-relaxed">${n.summary}</div>`:'';
-    const headlineEl=n.url
-      ? `<a href="${n.url}" target="_blank" rel="noopener" class="font-bold text-sm flex-1 hover:text-blu transition cursor-pointer underline-offset-2 hover:underline">${n.headline||''}</a>`
-      : `<div class="font-bold text-sm flex-1">${n.headline||''}</div>`;
-    const sourceBar=`<div class="flex items-center gap-2 mt-1 text-xs text-dim">
-      ${n.source?`<span class="font-semibold text-dim">${n.source}</span><span>·</span>`:''}
-      <span>${n.age_str||''}</span>
-      ${n.url?`<a href="${n.url}" target="_blank" rel="noopener" class="text-blu hover:underline ml-auto">🔗 Haberi Oku</a>`:''}
-    </div>`;
-    return `<div class="border-l-4 ${ic} bg-border2/20 rounded-r-lg p-4">
-      <div class="flex justify-between items-start mb-1">
-        ${headlineEl}
-        <span class="text-xs px-2 py-0.5 rounded ${rlBadge} ml-3 whitespace-nowrap font-bold">${n.importance}/100</span>
-      </div>
-      ${sourceBar}
-      ${summary}
-      <div class="flex gap-4 text-xs flex-wrap mt-2">
-        <span class="${bc} font-bold">${n.bias||'Nötr'}</span>
-        <span class="text-grn">↑%${n.bull_pct}</span><span class="text-red">↓%${n.bear_pct}</span>
-        <span class="text-dim">güven ${n.conf}/100</span><span class="text-dim">${n.dur||''}</span>
-        <span class="text-ylw">${n.caution||''}</span>
-      </div>${ne}${impHtml}</div>`;
-  }).join('') : '<div class="text-dim text-sm">Haber bekleniyor…</div>';
+  try{
+    const news = await (await fetch(API+'/api/news')).json();
+    document.getElementById('news-list').innerHTML = news.length ? news.map(n=>{
+      const imp = n.importance || 0;
+      const impColor = imp>=80?'#ff3b5c':imp>=60?'#f59e0b':imp>=40?'#3b82f6':'#6b7280';
+      const bar = Math.round(imp/10);
+      const barHtml = '█'.repeat(bar) + '░'.repeat(10-bar);
+      const biasColor = n.bias_tr==='Yükseliş'?'text-grn':n.bias_tr==='Düşüş'?'text-red':'text-dim';
+      const headlineEl = n.url
+        ? `<a href="${n.url}" target="_blank" class="font-bold hover:text-grn transition">${n.headline}</a>`
+        : `<span class="font-bold">${n.headline}</span>`;
+      const impactSyms = Object.entries(n.sym_impacts||{}).slice(0,5)
+        .map(([sym,[dir]])=>`<span class="px-1.5 py-0.5 rounded text-xs ${dir==='↑'?'bg-grn/15 text-grn':'bg-red/15 text-red'}">${sym.replace('USD','').replace('/USD','')} ${dir}</span>`)
+        .join(' ');
+      return `
+      <div class="border border-border2 rounded-xl p-4 fade hover:border-border2/80 transition">
+        <div class="flex items-start justify-between gap-3 mb-2">
+          <div class="flex-1">${headlineEl}</div>
+          <div class="text-right shrink-0">
+            <span class="font-bold text-xs" style="color:${impColor}">${imp}/100</span>
+            <div class="text-xs font-mono" style="color:${impColor}">${barHtml}</div>
+          </div>
+        </div>
+        ${n.summary ? `<div class="text-dim text-xs mb-2 leading-relaxed">${n.summary}</div>` : ''}
+        <div class="flex items-center gap-3 flex-wrap mt-2">
+          <span class="text-xs text-dim">📡 ${n.source||'—'}</span>
+          <span class="text-xs text-dim">🕐 ${n.age_str||'—'}</span>
+          <span class="text-xs px-2 py-0.5 rounded bg-border2 ${biasColor}">${n.bias_tr||'Nötr'}</span>
+          <span class="text-xs bg-border2 px-2 py-0.5 rounded">${n.risk_level||'—'}</span>
+          ${impactSyms}
+          ${n.url ? `<a href="${n.url}" target="_blank" class="ml-auto text-xs px-3 py-1 rounded-lg bg-blu/20 text-blu hover:bg-blu/30 transition font-bold">Haberi Oku →</a>` : ''}
+        </div>
+      </div>`;
+    }).join('') : '<div class="text-dim text-xs">Henüz haber yok.</div>';
+  }catch(e){ console.error(e); }
 }
 
 async function loadHealth(){
@@ -694,6 +707,7 @@ fetch(API+'/api/snapshot').then(r=>r.json()).then(d=>{lastData={...d,signals:[],
 loadJournal(); loadNews();
 setInterval(()=>{const v=[...document.querySelectorAll('.view')].find(x=>!x.classList.contains('hidden'))?.dataset.view;
   if(v==='journal')loadJournal(); if(v==='news')loadNews(); if(v==='performance')loadPerformance(); if(v==='system')loadHealth();},8000);
+setInterval(()=>{ if(document.querySelector('[data-view="news"]')&&!document.querySelector('[data-view="news"]').classList.contains('hidden')) loadNews(); }, 60000);
 </script>
 </body>
 </html>
