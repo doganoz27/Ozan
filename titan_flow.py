@@ -45,8 +45,8 @@ MIN_TRADES_ADAPT  = 5
 # ── Trade212 CFD Account Settings ────────────────────────────────────────────
 ACCOUNT = {
     "balance":        50.0,    # Starting balance £
-    "risk_pct":       0.01,    # 1% default risk per trade
-    "max_risk_pct":   0.02,    # 2% max risk per trade
+    "risk_pct":       0.025,   # 2.5% default risk per trade
+    "max_risk_pct":   0.03,    # 3% max risk per trade
     "max_daily_dd":   0.03,    # 3% max daily drawdown
     "max_weekly_dd":  0.05,    # 5% max weekly drawdown
     "compounding":    True,
@@ -551,7 +551,14 @@ def _build_chart_df(s):
                     "GBP/JPY":"GBPJPY=X","EUR/CHF":"EURCHF=X","AUD/JPY":"AUDJPY=X",
                     "GBP/CHF":"GBPCHF=X","XAU/USD":"GC=F","XAG/USD":"SI=F",
                     "WTI":"CL=F","BRENT":"BZ=F"}
-            ticker = tmap.get(sym, sym.replace("/","")+"=X")
+            # For equity symbols (uppercase letters only, no slash), use as-is
+            import re as _re
+            if sym in tmap:
+                ticker = tmap[sym]
+            elif _re.match(r'^[A-Z]{1,5}$', sym):
+                ticker = sym  # equity: NVDA, AAPL, SPY etc
+            else:
+                ticker = sym.replace("/","") + "=X"
             df = yf.Ticker(ticker).history(period="14d", interval="1h")
             if df is None or df.empty: return None
             if df.index.tzinfo: df.index = df.index.tz_localize(None)
@@ -1327,44 +1334,92 @@ def analyze_article(article):
     return enriched
 
 def _turkce_aciklama(headline, summary, imp, bias_tr, hist_key):
-    """Generate Turkish explanation + 'ne anlamalıyız' for a news headline."""
-    text=(headline+" "+summary).lower()
-    # --- Haber ne diyor? (Türkçe özet) ---
-    ozet_parts=[]
-    if any(w in text for w in ["fed","federal reserve","fomc","powell"]): ozet_parts.append("ABD Merkez Bankası (Fed) politikasına ilişkin bir gelişme")
-    if any(w in text for w in ["rate hike","faiz artırım","interest rate hike"]): ozet_parts.append("faiz oranları artırılıyor")
-    if any(w in text for w in ["rate cut","faiz indirim","interest rate cut"]): ozet_parts.append("faiz oranları indiriliyor")
-    if any(w in text for w in ["inflation","cpi","enflasyon"]): ozet_parts.append("enflasyon verisi açıklandı")
-    if any(w in text for w in ["nfp","non-farm","jobs","employment","unemployment"]): ozet_parts.append("ABD istihdam/işsizlik verisi açıklandı")
-    if any(w in text for w in ["gdp","büyüme","büyüdü","growth"]): ozet_parts.append("ekonomik büyüme (GSYİH) verisi açıklandı")
-    if any(w in text for w in ["recession","durgunluk","recessionary"]): ozet_parts.append("resesyon (ekonomik durgunluk) endişeleri artıyor")
-    if any(w in text for w in ["war","savaş","military","strike","attack"]): ozet_parts.append("jeopolitik gerilim/askeri gelişme")
-    if any(w in text for w in ["opec","petrol","oil production","crude"]): ozet_parts.append("OPEC petrol üretim kararı")
-    if any(w in text for w in ["china","çin","beijing"]): ozet_parts.append("Çin ekonomisine ilişkin gelişme")
-    if any(w in text for w in ["russia","rusya","ukraine","ukrayna"]): ozet_parts.append("Rusya-Ukrayna jeopolitik gelişmesi")
-    if any(w in text for w in ["earnings","kar açıkladı","revenue","quarterly"]): ozet_parts.append("şirket kazanç/bilanço açıklaması")
-    if any(w in text for w in ["tariff","gümrük","trade war","ticaret savaşı"]): ozet_parts.append("ticaret savaşı/gümrük tarifeleri")
-    if any(w in text for w in ["bank","banka","banking crisis","svb","failure"]): ozet_parts.append("bankacılık sektörü gelişmesi")
-    ozet = "; ".join(ozet_parts) if ozet_parts else "önemli makroekonomik gelişme"
+    """Doğrudan, okunabilir Türkçe özet + piyasa anlamı."""
+    text = (headline + " " + summary).lower()
 
-    # --- Ne anlamalıyız? ---
-    anlam_parts=[]
-    if bias_tr=="Yükseliş":
-        anlam_parts.append("Bu haber piyasalar için olumlu — risk iştahı artabilir")
-        if imp>=80: anlam_parts.append("Etki büyük ihtimalle hızlı ve sert olacak, ani fiyat hareketleri beklenebilir")
-    elif bias_tr=="Düşüş":
-        anlam_parts.append("Bu haber piyasalar için olumsuz — yatırımcılar güvenli limanlara yönelebilir")
-        if imp>=80: anlam_parts.append("Sert satış dalgası, ani dolar ve altın talebi gelebilir")
+    # ── Haber konusunu belirle ───────────────────────────────────────────
+    konu_parts = []
+    konu_emoji = "📋"
+    if any(w in text for w in ["fed","federal reserve","fomc","powell"]):
+        konu_parts.append("ABD Merkez Bankası (Fed) harekete geçti")
+        konu_emoji = "🏦"
+    if any(w in text for w in ["rate hike","interest rate hike","faiz artış"]):
+        konu_parts.append("faiz oranları yükseltildi")
+    if any(w in text for w in ["rate cut","interest rate cut","faiz indir"]):
+        konu_parts.append("faiz oranları indirildi")
+    if any(w in text for w in ["pause","hold","bekleme"]):
+        konu_parts.append("faiz değiştirilmedi, politika sabit tutuldu")
+    if any(w in text for w in ["inflation","cpi","enflasyon","pce"]):
+        konu_parts.append("enflasyon verisi açıklandı")
+        konu_emoji = "📊"
+    if any(w in text for w in ["nfp","non-farm","jobs report","unemployment","payroll"]):
+        konu_parts.append("ABD istihdam raporu (NFP) açıklandı")
+        konu_emoji = "📊"
+    if any(w in text for w in ["gdp","büyüme","growth"]):
+        konu_parts.append("ekonomik büyüme (GSYİH) verisi geldi")
+        konu_emoji = "📊"
+    if any(w in text for w in ["recession","durgunluk"]):
+        konu_parts.append("resesyon (ekonomik durgunluk) endişeleri tırmanıyor")
+        konu_emoji = "⚠️"
+    if any(w in text for w in ["war","savaş","military","strike","attack","missile"]):
+        konu_parts.append("askeri/jeopolitik gelişme yaşandı")
+        konu_emoji = "⚠️"
+    if any(w in text for w in ["opec","petrol üretim","oil production"]):
+        konu_parts.append("OPEC üretim kararı açıklandı")
+        konu_emoji = "🛢️"
+    if any(w in text for w in ["tariff","gümrük","trade war","ticaret savaş"]):
+        konu_parts.append("ticaret savaşı/gümrük tarifeleri gündeme geldi")
+        konu_emoji = "🔒"
+    if any(w in text for w in ["china","çin","beijing","xi"]):
+        konu_parts.append("Çin kaynaklı ekonomik gelişme")
+        konu_emoji = "🇨🇳"
+    if any(w in text for w in ["russia","rusya","ukraine","ukrayna"]):
+        konu_parts.append("Rusya-Ukrayna cephesinde yeni gelişme")
+        konu_emoji = "⚡"
+    if any(w in text for w in ["earnings","quarterly results","net income","revenue beat","eps"]):
+        konu_parts.append("şirket bilançosu/kazanç raporu açıklandı")
+        konu_emoji = "📈"
+    if any(w in text for w in ["bank","banka","banking crisis","default","bankrupt"]):
+        konu_parts.append("bankacılık/kredi alanında kritik gelişme")
+        konu_emoji = "🏦"
+    if any(w in text for w in ["trump","biden","white house","congress","senate"]):
+        konu_parts.append("ABD siyasi arenasında önemli gelişme")
+        konu_emoji = "🇺🇸"
+    if any(w in text for w in ["ecb","lagarde","boe","boj","rba","snb"]):
+        konu_parts.append("merkez bankası kararı/açıklaması geldi")
+        konu_emoji = "🏦"
+
+    if konu_parts:
+        konu = f"{konu_emoji} " + " ve ".join(konu_parts[:2])
     else:
-        anlam_parts.append("Etki belirsiz — piyasalar bu haberi sindirmesi gerekiyor")
+        konu = f"📋 Makroekonomik gelişme — piyasalar etkilenebilir"
+
+    # ── Piyasa anlamı (net, doğrudan) ────────────────────────────────────
+    anlam_parts = []
+    if bias_tr == "Yükseliş":
+        anlam_parts.append("✅ Bu haber piyasalar için OLUMLU — risk iştahı artıyor, alım baskısı gelebilir")
+        if imp >= 80:
+            anlam_parts.append("🔥 Etki BÜYÜK ve HIZLI olabilir — ani fiyat sıçramaları bekleniyor")
+        elif imp >= 60:
+            anlam_parts.append("📈 Orta-güçlü etki — saatler içinde fiyatlar tepki verecek")
+    elif bias_tr == "Düşüş":
+        anlam_parts.append("❌ Bu haber piyasalar için OLUMSUZ — satış baskısı ve panik alımlar gelebilir")
+        if imp >= 80:
+            anlam_parts.append("💥 SERT etki bekleniyor — stop seviyeleri kontrol et, pozisyon boyutunu düşür")
+        elif imp >= 60:
+            anlam_parts.append("📉 Risk-off modu — güvenli limanlara (altın, yen, CHF) talep artabilir")
+    else:
+        anlam_parts.append("➡️ Etki henüz belirsiz — piyasalar haberi sindiriyor, volatilite artabilir")
 
     if hist_key:
-        anlam_parts.append(f"Geçmişte '{hist_key}' temalı haberler sonrası piyasalar önemli hareketler yaşadı")
+        anlam_parts.append(f"📜 Geçmişte '{hist_key}' haberleri sonrası piyasalarda belirgin hareketler yaşandı")
 
-    if imp>=80: anlam_parts.append("🔴 ÖNEMLİ: Açık pozisyon varsa stop seviyelerini gözden geçir")
-    elif imp>=60: anlam_parts.append("🟡 Dikkat: Pozisyon boyutunu azaltmayı düşünebilirsin")
+    if imp >= 80:
+        anlam_parts.append("🔴 ACİL: Açık pozisyon varsa stop seviyelerini hemen gözden geçir!")
+    elif imp >= 60:
+        anlam_parts.append("🟡 Dikkat: Yeni pozisyon açmadan önce bu gelişmeyi değerlendir")
 
-    return ozet, " | ".join(anlam_parts)
+    return konu, " | ".join(anlam_parts)
 
 # Detailed per-asset Turkish impact explanation
 _ASSET_IMPACT = {
@@ -2665,9 +2720,9 @@ def score_setup(sym, candles, price, news_items=None):
     sl=structural_sl(candles, direction, price, av)
     if sl is None: return None
 
-    # ── Structural TP (S/R based, min 1:1.8) ────────────────────
-    tp, rr=structural_tp(candles, direction, price, sl, min_rr=1.8)
-    if tp is None or rr<1.8: return None   # HARD REJECT
+    # ── Structural TP (S/R based, min 1:2.0) ────────────────────
+    tp, rr=structural_tp(candles, direction, price, sl, min_rr=2.0)
+    if tp is None or rr<2.0: return None   # HARD REJECT
 
     # ── RR bonus scoring ─────────────────────────────────────────
     rr_bonus = 16 if rr>=3.5 else 14 if rr>=3.0 else 12 if rr>=2.5 else 9 if rr>=2.0 else 6
