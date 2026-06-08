@@ -176,12 +176,83 @@ tailwind.config = {
 
       <!-- JOURNAL -->
       <section data-view="journal" class="view hidden">
-        <div class="flex gap-2 mb-4">
-          <button data-j="open" class="jtab px-4 py-2 rounded-lg bg-blu text-white text-xs font-bold">AKTİF</button>
+        <div class="flex flex-wrap gap-2 mb-4">
+          <button data-j="analytics" class="jtab px-4 py-2 rounded-lg bg-blu text-white text-xs font-bold">📊 ÖZET</button>
+          <button data-j="open" class="jtab px-4 py-2 rounded-lg bg-border2 text-xs">AKTİF</button>
           <button data-j="tp" class="jtab px-4 py-2 rounded-lg bg-border2 text-xs">🎯 TAKE PROFIT</button>
           <button data-j="sl" class="jtab px-4 py-2 rounded-lg bg-border2 text-xs">🛑 STOP LOSS</button>
         </div>
-        <div class="bg-card rounded-xl border border-border2 overflow-x-auto">
+
+        <!-- ANALYTICS PANEL -->
+        <div id="j-analytics">
+          <!-- KPI Row -->
+          <div class="grid grid-cols-2 md:grid-cols-4 gap-4 mb-4" id="j-kpi"></div>
+          <!-- Extra KPIs -->
+          <div class="grid grid-cols-2 md:grid-cols-4 gap-4 mb-4" id="j-kpi2"></div>
+
+          <!-- Grade + Mistakes -->
+          <div class="grid grid-cols-1 lg:grid-cols-2 gap-4 mb-4">
+            <div class="bg-card rounded-xl border border-border2 p-5">
+              <h3 class="font-bold mb-3">🏅 Grade Bazlı Performans (A+/A/B+/B)</h3>
+              <table class="w-full text-xs">
+                <thead class="text-dim"><tr>
+                  <th class="text-left p-2">GRADE</th><th class="text-right p-2">İŞLEM</th>
+                  <th class="text-right p-2">TP</th><th class="text-right p-2">SL</th>
+                  <th class="text-right p-2">WIN RATE</th><th class="text-right p-2">ORT R</th>
+                </tr></thead>
+                <tbody id="j-grade-tbody"></tbody>
+              </table>
+              <div class="mt-4 pt-3 border-t border-border2">
+                <h4 class="text-xs text-dim font-bold mb-2">YÖN BAZLI</h4>
+                <div id="j-dir" class="flex gap-4"></div>
+              </div>
+            </div>
+            <div class="bg-card rounded-xl border border-border2 p-5">
+              <h3 class="font-bold mb-3">⚠️ Hata Analizi — Kaybeden İşlemlerde Eksik Faktörler</h3>
+              <div id="j-mistakes" class="space-y-3">
+                <div class="text-dim text-xs">Yükleniyor…</div>
+              </div>
+              <div class="mt-4 pt-3 border-t border-border2">
+                <h4 class="text-xs text-dim font-bold mb-2">EN İYİ / EN KÖTÜ İŞLEM</h4>
+                <div id="j-bestworst" class="space-y-2 text-xs"></div>
+              </div>
+            </div>
+          </div>
+
+          <!-- Last 50 trades -->
+          <div class="bg-card rounded-xl border border-border2 overflow-x-auto mb-4">
+            <div class="flex items-center justify-between p-4 pb-2">
+              <h3 class="font-bold">📋 Son 50 İşlem — Giriş/Çıkış Analizi</h3>
+              <span class="text-dim text-xs" id="j-50-count"></span>
+            </div>
+            <table class="w-full text-xs min-w-[960px]">
+              <thead class="bg-border2/40 text-dim"><tr>
+                <th class="text-left p-3">TARİH</th><th class="text-left p-3">SEMBOL</th>
+                <th class="text-left p-3">GR</th><th class="text-left p-3">YÖN</th>
+                <th class="text-right p-3">SKOR</th><th class="text-right p-3">GERÇEK R</th>
+                <th class="text-right p-3">HEDEF R</th><th class="text-left p-3">GİRİŞ NEDENİ</th>
+                <th class="text-left p-3">ÇIKIŞ/RİSK</th><th class="text-center p-3">SONUÇ</th>
+              </tr></thead>
+              <tbody id="j-last50-tbody"></tbody>
+            </table>
+          </div>
+
+          <!-- Symbol stats -->
+          <div class="bg-card rounded-xl border border-border2 overflow-x-auto">
+            <h3 class="font-bold p-4 pb-2">🌐 Sembol Bazlı İstatistik</h3>
+            <table class="w-full text-xs">
+              <thead class="bg-border2/40 text-dim"><tr>
+                <th class="text-left p-3">SEMBOL</th><th class="text-right p-3">İŞLEM</th>
+                <th class="text-right p-3">TP</th><th class="text-right p-3">SL</th>
+                <th class="text-right p-3">WIN RATE</th><th class="text-right p-3">ORT R</th>
+              </tr></thead>
+              <tbody id="j-sym-tbody"></tbody>
+            </table>
+          </div>
+        </div>
+
+        <!-- TRADE LIST PANEL (open/tp/sl tabs) -->
+        <div id="j-table" class="hidden bg-card rounded-xl border border-border2 overflow-x-auto">
           <table class="w-full text-xs">
             <thead class="bg-border2/40 text-dim"><tr id="j-head"></tr></thead>
             <tbody id="j-tbody"></tbody>
@@ -256,7 +327,7 @@ tailwind.config = {
 
 <script>
 const API = '';
-let WS = null, lastData = {}, sigFilter = 'ALL', jTab = 'open', perfPeriod = 'daily';
+let WS = null, lastData = {}, sigFilter = 'ALL', jTab = 'analytics', perfPeriod = 'daily';
 
 const fmt = (v,d=4) => v==null ? '—' : (typeof v==='number' ? v.toFixed(d) : v);
 const money = v => v==null ? '£—' : (v>=0?'£':'-£')+Math.abs(v).toFixed(2);
@@ -281,7 +352,7 @@ document.querySelectorAll('.nav-item').forEach(el=>{
     document.querySelectorAll('.view').forEach(v=>v.classList.add('hidden'));
     document.querySelector(`[data-view="${page}"]`).classList.remove('hidden');
     document.getElementById('sidebar').classList.remove('open');
-    if(page==='journal') loadJournal();
+    if(page==='journal'){ if(jTab==='analytics') loadJournalAnalytics(); else loadJournal(); }
     if(page==='news') loadNews();
     if(page==='performance') loadPerformance();
     if(page==='insights') loadInsights();
@@ -300,7 +371,8 @@ document.querySelectorAll('.jtab').forEach(b=>b.onclick=()=>{
   jTab=b.dataset.j;
   document.querySelectorAll('.jtab').forEach(x=>{x.className='jtab px-4 py-2 rounded-lg bg-border2 text-xs';});
   b.className='jtab px-4 py-2 rounded-lg bg-blu text-white text-xs font-bold';
-  loadJournal();
+  if(jTab==='analytics'){ document.getElementById('j-analytics').classList.remove('hidden'); document.getElementById('j-table').classList.add('hidden'); loadJournalAnalytics(); }
+  else { document.getElementById('j-analytics').classList.add('hidden'); document.getElementById('j-table').classList.remove('hidden'); loadJournal(); }
 });
 document.querySelectorAll('.ptab').forEach(b=>b.onclick=()=>{
   perfPeriod=b.dataset.p;
@@ -597,6 +669,101 @@ async function loadInsights(){
   }catch(e){ console.error(e); }
 }
 
+async function loadJournalAnalytics(){
+  try {
+    const d = await (await fetch(API+'/api/journal/analytics')).json();
+    const pnlPos = d.total_pnl >= 0;
+    // KPI row 1
+    document.getElementById('j-kpi').innerHTML =
+      kpi('Toplam İşlem', d.total||0, `${d.wins||0} TP / ${d.losses||0} SL`) +
+      kpi('Win Rate', (d.wr||0).toFixed(1)+'%', 'başarı oranı', d.wr>=55?'text-grn':d.wr>=45?'text-ylw':'text-red') +
+      kpi('Ort. R:R', (d.avg_rr>=0?'+':'')+(d.avg_rr||0).toFixed(2)+'R', 'işlem başına', d.avg_rr>=0?'text-grn':'text-red') +
+      kpi('Toplam Kâr/Zarar', (pnlPos?'+£':'-£')+Math.abs(d.total_pnl||0).toFixed(2), 'net P&L', pnlPos?'text-grn':'text-red');
+    // KPI row 2
+    const strColor = d.streak_type==='Kazanç'?'text-grn':'text-red';
+    document.getElementById('j-kpi2').innerHTML =
+      kpi('Kazanma Ort. R', '+'+(d.avg_win_rr||0).toFixed(2)+'R', 'TP işlemleri', 'text-grn') +
+      kpi('Kayıp Ort. R', (d.avg_loss_rr||0).toFixed(2)+'R', 'SL işlemleri', 'text-red') +
+      kpi('Mevcut Seri', d.streak||0, d.streak_type||'—', strColor) +
+      kpi('Toplam SL', d.losses||0, `%${d.total?(100-d.wr).toFixed(1):0} kayıp oranı`, 'text-red');
+
+    // Grade breakdown
+    const grades = ['A+','A','B+','B'];
+    const bg = d.by_grade||{};
+    document.getElementById('j-grade-tbody').innerHTML = grades.map(q=>{
+      const g = bg[q]; if(!g) return '';
+      return `<tr class="border-t border-border2 hover:bg-border2/20">
+        <td class="p-2 font-bold ${gradeColor(q)}">${q}</td>
+        <td class="p-2 text-right">${g.total}</td>
+        <td class="p-2 text-right text-grn">${g.wins}</td>
+        <td class="p-2 text-right text-red">${g.losses}</td>
+        <td class="p-2 text-right font-bold ${g.wr>=55?'text-grn':g.wr>=45?'text-ylw':'text-red'}">${g.wr}%</td>
+        <td class="p-2 text-right ${g.avg_rr>=0?'text-grn':'text-red'}">${g.avg_rr>=0?'+':''}${g.avg_rr}R</td>
+      </tr>`;
+    }).join('') || '<tr><td colspan="6" class="p-3 text-center text-dim">Henüz veri yok</td></tr>';
+
+    // Direction
+    const bd = d.by_direction||{};
+    document.getElementById('j-dir').innerHTML = ['LONG','SHORT'].map(dir=>{
+      const v = bd[dir]; if(!v) return '';
+      return `<div class="flex-1 rounded-lg p-3 ${dir==='LONG'?'bg-grn/10':'bg-red/10'} text-center">
+        <div class="text-xs font-bold ${dir==='LONG'?'text-grn':'text-red'}">${dir}</div>
+        <div class="text-lg font-bold mt-1">${v.wr}%</div>
+        <div class="text-xs text-dim">${v.wins}TP / ${v.losses}SL</div>
+      </div>`;
+    }).join('');
+
+    // Mistakes
+    const mistakes = d.mistakes||[];
+    document.getElementById('j-mistakes').innerHTML = mistakes.length ? mistakes.map(m=>`
+      <div>
+        <div class="flex justify-between text-xs mb-1">
+          <span class="text-dim">${m.factor}</span>
+          <span class="font-bold text-red">%${m.absent_pct} SL'de yoktu</span>
+        </div>
+        <div class="h-2 bg-border2 rounded overflow-hidden">
+          <div class="h-full bg-red/60 rounded" style="width:${m.absent_pct}%"></div>
+        </div>
+      </div>`) .join('') : '<div class="text-dim text-xs">Yeterli veri yok</div>';
+
+    // Best/Worst
+    const bw = [];
+    if(d.best_trade) bw.push(`<div class="flex justify-between"><span class="text-dim">🏆 En İyi</span><span class="text-grn font-bold">${d.best_trade.sym} +${d.best_trade.rr}R <span class="text-dim">${d.best_trade.date}</span></span></div>`);
+    if(d.worst_trade) bw.push(`<div class="flex justify-between"><span class="text-dim">💔 En Kötü</span><span class="text-red font-bold">${d.worst_trade.sym} ${d.worst_trade.rr}R <span class="text-dim">${d.worst_trade.date}</span></span></div>`);
+    document.getElementById('j-bestworst').innerHTML = bw.join('') || '<div class="text-dim">Henüz veri yok</div>';
+
+    // Last 50
+    const last50 = d.last50||[];
+    document.getElementById('j-50-count').textContent = `${last50.length} işlem`;
+    document.getElementById('j-last50-tbody').innerHTML = last50.length ? last50.map(r=>`
+      <tr class="border-t border-border2 hover:bg-border2/20">
+        <td class="p-3 text-dim">${r.date||'—'}</td>
+        <td class="p-3 font-bold">${r.sym}</td>
+        <td class="p-3 font-bold ${gradeColor(r.quality)}">${r.quality||'—'}</td>
+        <td class="p-3">${dirBadge(r.direction)}</td>
+        <td class="p-3 text-right">${r.score}</td>
+        <td class="p-3 text-right font-bold ${r.act_rr>=0?'text-grn':'text-red'}">${r.act_rr>=0?'+':''}${r.act_rr}R</td>
+        <td class="p-3 text-right text-dim">${r.rr_t}R</td>
+        <td class="p-3 text-dim max-w-[200px] truncate" title="${r.entry_reason}">${r.entry_reason||'—'}</td>
+        <td class="p-3 text-dim max-w-[140px] truncate" title="${r.exit_reason}">${r.exit_reason||'—'}</td>
+        <td class="p-3 text-center">${statusBadge(r.status)}</td>
+      </tr>`).join('') : emptyRow(10);
+
+    // Symbol table
+    const syms = d.by_symbol||[];
+    document.getElementById('j-sym-tbody').innerHTML = syms.length ? syms.map(s=>`
+      <tr class="border-t border-border2 hover:bg-border2/20">
+        <td class="p-3 font-bold">${s.sym}</td>
+        <td class="p-3 text-right">${s.total}</td>
+        <td class="p-3 text-right text-grn">${s.wins}</td>
+        <td class="p-3 text-right text-red">${s.losses}</td>
+        <td class="p-3 text-right font-bold ${s.wr>=55?'text-grn':s.wr>=45?'text-ylw':'text-red'}">${s.wr}%</td>
+        <td class="p-3 text-right ${s.avg_rr>=0?'text-grn':'text-red'}">${s.avg_rr>=0?'+':''}${s.avg_rr}R</td>
+      </tr>`).join('') : emptyRow(6);
+
+  } catch(e){ console.error('Journal analytics error:', e); }
+}
+
 async function loadJournal(){
   const d=await (await fetch(API+'/api/journal')).json();
   const rows=d[jTab]||[];
@@ -742,9 +909,10 @@ setInterval(()=>{document.getElementById('clock').textContent=new Date().toLocal
 connectWS();
 fetch(API+'/api/snapshot').then(r=>r.json()).then(d=>{lastData={...d,signals:[],active_trades:d.active_trades};
   fetch(API+'/api/signals').then(r=>r.json()).then(s=>{lastData.signals=s;render();});});
-loadJournal(); loadNews();
+loadJournalAnalytics(); loadNews();
 setInterval(()=>{const v=[...document.querySelectorAll('.view')].find(x=>!x.classList.contains('hidden'))?.dataset.view;
-  if(v==='journal')loadJournal(); if(v==='news')loadNews(); if(v==='performance')loadPerformance();
+  if(v==='journal'){ if(jTab==='analytics') loadJournalAnalytics(); else loadJournal(); }
+  if(v==='news')loadNews(); if(v==='performance')loadPerformance();
   if(v==='insights')loadInsights(); if(v==='system')loadHealth();},8000);
 setInterval(()=>{ if(document.querySelector('[data-view="news"]')&&!document.querySelector('[data-view="news"]').classList.contains('hidden')) loadNews(); }, 60000);
 </script>

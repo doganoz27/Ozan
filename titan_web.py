@@ -316,6 +316,150 @@ def active_trades_live():
         })
     return out
 
+def journal_analytics():
+    """Full journal analytics read directly from SQLite."""
+    out = {
+        "total": 0, "wins": 0, "losses": 0, "wr": 0.0,
+        "avg_rr": 0.0, "avg_win_rr": 0.0, "avg_loss_rr": 0.0,
+        "total_pnl": 0.0, "best_trade": None, "worst_trade": None,
+        "by_grade": {}, "by_direction": {}, "by_symbol": [],
+        "mistakes": [], "last50": [], "streak": 0, "streak_type": ""
+    }
+    try:
+        with tf.db() as c:
+            closed = c.execute(
+                "SELECT id,sym,quality,direction,status,entry,out_price,act_rr,rr_t,score,"
+                "created,out_at,f_ema,f_rsi,f_macd,f_sweep,f_ob,f_fvg,f_struct,f_cot,f_news,narrative "
+                "FROM signals WHERE status IN ('TP','SL') ORDER BY id DESC LIMIT 500"
+            ).fetchall()
+            try:
+                pnl_rows = c.execute(
+                    "SELECT sig_id, pnl FROM shadow_trades WHERE status IN ('TP','SL','EXPIRED')"
+                ).fetchall()
+                pnl_map = {r["sig_id"]: r["pnl"] for r in pnl_rows}
+            except Exception:
+                pnl_map = {}
+
+        rr_list = []; win_rrs = []; loss_rrs = []
+        grade_stats: dict = {}; dir_stats: dict = {}; sym_stats: dict = {}
+        factor_losses = {f: 0 for f in ["f_ema","f_rsi","f_macd","f_sweep","f_ob","f_fvg","f_struct","f_cot","f_news"]}
+        loss_total_for_factors = 0
+        best_rr: float | None = None; worst_rr: float | None = None
+        best_row = None; worst_row = None
+        streak_list = []
+
+        for r in closed:
+            status = r["status"]; rr = float(r["act_rr"] or 0)
+            q = r["quality"] or "B"; sym = r["sym"]; direction = r["direction"] or "LONG"
+            is_win = status == "TP"
+            out["total"] += 1
+            if is_win: out["wins"] += 1
+            else: out["losses"] += 1
+            rr_list.append(rr)
+            if is_win: win_rrs.append(rr)
+            else: loss_rrs.append(rr)
+            streak_list.append("W" if is_win else "L")
+            pnl = pnl_map.get(r["id"], 0) or 0
+            out["total_pnl"] += pnl
+            if best_rr is None or rr > best_rr: best_rr = rr; best_row = dict(r)
+            if worst_rr is None or rr < worst_rr: worst_rr = rr; worst_row = dict(r)
+            g = grade_stats.setdefault(q, {"wins":0,"losses":0,"rr_sum":0.0})
+            if is_win: g["wins"] += 1
+            else: g["losses"] += 1
+            g["rr_sum"] += rr
+            d = dir_stats.setdefault(direction, {"wins":0,"losses":0})
+            if is_win: d["wins"] += 1
+            else: d["losses"] += 1
+            s = sym_stats.setdefault(sym, {"wins":0,"losses":0,"rr_sum":0.0})
+            if is_win: s["wins"] += 1
+            else: s["losses"] += 1
+            s["rr_sum"] += rr
+            if not is_win:
+                loss_total_for_factors += 1
+                keys = r.keys()
+                for f in factor_losses:
+                    if f in keys and not r[f]:
+                        factor_losses[f] += 1
+
+        total = out["total"]
+        out["wr"] = round(out["wins"] / total * 100, 1) if total else 0.0
+        out["avg_rr"] = round(sum(rr_list) / len(rr_list), 2) if rr_list else 0.0
+        out["avg_win_rr"] = round(sum(win_rrs) / len(win_rrs), 2) if win_rrs else 0.0
+        out["avg_loss_rr"] = round(sum(loss_rrs) / len(loss_rrs), 2) if loss_rrs else 0.0
+        out["total_pnl"] = round(out["total_pnl"], 2)
+        if best_row: out["best_trade"] = {"sym": best_row["sym"], "rr": round(best_rr,2), "date": (best_row.get("out_at") or "")[:10]}
+        if worst_row: out["worst_trade"] = {"sym": worst_row["sym"], "rr": round(worst_rr,2), "date": (worst_row.get("out_at") or "")[:10]}
+
+        for q, g in grade_stats.items():
+            t = g["wins"] + g["losses"]
+            out["by_grade"][q] = {"wins":g["wins"],"losses":g["losses"],"total":t,
+                                   "wr":round(g["wins"]/t*100,1) if t else 0.0,
+                                   "avg_rr":round(g["rr_sum"]/t,2) if t else 0.0}
+        for d, v in dir_stats.items():
+            t = v["wins"] + v["losses"]
+            out["by_direction"][d] = {"wins":v["wins"],"losses":v["losses"],"total":t,
+                                       "wr":round(v["wins"]/t*100,1) if t else 0.0}
+
+        sym_list = []
+        for sym, v in sym_stats.items():
+            t = v["wins"] + v["losses"]
+            sym_list.append({"sym":sym,"wins":v["wins"],"losses":v["losses"],"total":t,
+                              "wr":round(v["wins"]/t*100,1) if t else 0.0,
+                              "avg_rr":round(v["rr_sum"]/t,2) if t else 0.0})
+        sym_list.sort(key=lambda x: -x["total"])
+        out["by_symbol"] = sym_list[:12]
+
+        factor_names = {
+            "f_ema":"EMA Trend Teyidi","f_rsi":"RSI Momentum","f_macd":"MACD Uyumu",
+            "f_sweep":"Likidite Süpürmesi","f_ob":"Order Block","f_fvg":"FVG Boşluk",
+            "f_struct":"Yapı Kırılımı","f_cot":"COT Pozisyon","f_news":"Haber Desteği"
+        }
+        mistakes = []
+        for f, cnt in factor_losses.items():
+            if loss_total_for_factors > 0 and cnt > 0:
+                rate = round(cnt / loss_total_for_factors * 100, 0)
+                if rate >= 25:
+                    mistakes.append({"factor":factor_names.get(f,f),"absent_pct":int(rate),"count":cnt})
+        mistakes.sort(key=lambda x: -x["absent_pct"])
+        out["mistakes"] = mistakes[:6]
+
+        if streak_list:
+            cur = streak_list[0]; cnt = 1
+            for x in streak_list[1:]:
+                if x == cur: cnt += 1
+                else: break
+            out["streak"] = cnt
+            out["streak_type"] = "Kazanç" if cur == "W" else "Kayıp"
+
+        last50 = []
+        with tf.db() as c:
+            rows50 = c.execute(
+                "SELECT id,sym,quality,direction,status,entry,out_price,act_rr,rr_t,score,created,out_at,narrative "
+                "FROM signals WHERE status IN ('TP','SL') ORDER BY id DESC LIMIT 50"
+            ).fetchall()
+        for r in rows50:
+            narr = r["narrative"] or ""
+            lines = narr.split("\n")
+            pos = [l.strip() for l in lines if l.strip().startswith("+")]
+            neg = [l.strip() for l in lines if l.strip().startswith("-") or "RİSK" in l.upper() or "UYARI" in l.upper()]
+            entry_reason = " | ".join(pos[:2]) if pos else narr[:100]
+            exit_reason = " | ".join(neg[:2]) if neg else ""
+            last50.append({
+                "id":r["id"],"sym":r["sym"],"quality":r["quality"],
+                "direction":r["direction"],"status":r["status"],
+                "entry":r["entry"],"out_price":r["out_price"],
+                "act_rr":round(float(r["act_rr"] or 0),2),
+                "rr_t":round(float(r["rr_t"] or 0),2),
+                "score":r["score"] or 0,
+                "date":(r["out_at"] or r["created"] or "")[:10],
+                "entry_reason":entry_reason[:120],
+                "exit_reason":exit_reason[:100],
+            })
+        out["last50"] = last50
+    except Exception as e:
+        out["error"] = str(e)
+    return out
+
 def journal_data():
     try:
         with tf.db() as c:
@@ -554,6 +698,10 @@ def api_trades():
 @app.get("/api/journal")
 def api_journal():
     return JSONResponse(journal_data())
+
+@app.get("/api/journal/analytics")
+def api_journal_analytics():
+    return JSONResponse(journal_analytics())
 
 @app.get("/api/analytics")
 def api_analytics():
