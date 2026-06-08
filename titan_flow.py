@@ -1847,29 +1847,254 @@ def _send_titan_tg(article: dict, analysis: str):
             pass
 
 
+def _titan_local_analysis(article: dict) -> str:
+    """
+    TITAN NEWS INTELLIGENCE PRO MAX formatında TAM yerel analiz —
+    Claude API olmadan, keyword motorundan üretilen yapılandırılmış çıktı.
+    """
+    h       = article.get("headline", "")
+    summary = (article.get("summary", "") or "")[:400]
+    source  = article.get("source", "")
+    imp     = article.get("importance", 0)
+    rl      = article.get("risk_level", "NOISE")
+    m       = article.get("macro", {})
+    asent   = article.get("asset_sent", {})
+    regs    = article.get("regimes", [])
+    bias_tr = m.get("bias_tr", "Nötr")
+    bull_pct= m.get("bull_pct", 0); bear_pct = m.get("bear_pct", 0)
+    conf    = m.get("conf", 50)
+    hist_key= m.get("hist_key"); hist_match = m.get("hist_match", {})
+    ad      = m.get("asset_dirs", {})
+    now_str = datetime.now().strftime("%d.%m.%Y %H:%M")
+    text    = (h + " " + summary).lower()
+
+    # ── Kategori ──
+    cat = "Genel Piyasa"
+    if any(w in text for w in ["fed","fomc","ecb","boe","boj","rate","faiz","central bank"]): cat = "Merkez Bankası / Para Politikası"
+    elif any(w in text for w in ["cpi","inflation","pce","enflasyon"]): cat = "Enflasyon Verisi"
+    elif any(w in text for w in ["nfp","payroll","jobs","unemployment","istihdam"]): cat = "İstihdam Verisi"
+    elif any(w in text for w in ["gdp","growth","büyüme"]): cat = "Büyüme (GSYİH)"
+    elif any(w in text for w in ["war","military","strike","attack","savaş","missile"]): cat = "Jeopolitik / Askeri"
+    elif any(w in text for w in ["opec","oil","crude","petrol","brent"]): cat = "Enerji / Emtia"
+    elif any(w in text for w in ["earnings","revenue","eps","bilanço","quarterly"]): cat = "Şirket / Bilanço"
+    elif any(w in text for w in ["tariff","trade war","gümrük","ticaret savaş"]): cat = "Ticaret / Tarife"
+    elif any(w in text for w in ["bitcoin","crypto","ethereum","etf"]): cat = "Kripto / Dijital Varlık"
+    elif any(w in text for w in ["bank","banking","default","credit","debt"]): cat = "Bankacılık / Kredi"
+
+    # ── Haber tipi ──
+    if any(w in text for w in ["announces","announced","decision","released","reported","açıkladı","kararı"]):
+        haber_tipi = "Resmi Açıklama"
+    elif any(w in text for w in ["could","may","might","expected","forecast","likely","beklen","tahmin"]):
+        haber_tipi = "Tahmin / Beklenti"
+    elif any(w in text for w in ["rumor","sources say","reportedly","alleged","iddia","söylenti"]):
+        haber_tipi = "Söylenti / Spekülasyon"
+    elif any(w in text for w in ["says","said","comments","view","opinion","görüş"]):
+        haber_tipi = "Yorum / Görüş"
+    else:
+        haber_tipi = "Haber"
+
+    # ── Risk duyarlılığı ──
+    if "RISK ON" in regs: risk_duy = "Risk On (Risk İştahı)"
+    elif "RISK OFF" in regs: risk_duy = "Risk Off (Riskten Kaçış)"
+    elif bias_tr == "Yükseliş": risk_duy = "Risk On eğilimli"
+    elif bias_tr == "Düşüş": risk_duy = "Risk Off eğilimli"
+    else: risk_duy = "Nötr / Karışık"
+
+    # ── Derece ──
+    if imp >= 95:   derece = "A+"
+    elif imp >= 90: derece = "A"
+    elif imp >= 80: derece = "B+"
+    elif imp >= 70: derece = "B"
+    elif imp >= 60: derece = "WATCHLIST"
+    else:           derece = "IGNORE"
+
+    # ── 9 varlık etki haritası ──
+    # MACRO_ASSETS sembollerini TITAN formatına eşle
+    def _asset_block(emoji, name, macro_sym, dxy_invert=False):
+        d, strength = ad.get(macro_sym, ("→", 0))
+        # DXY özel: USD gücü
+        if macro_sym == "DXY":
+            # USD güçlü mü? bias + regime'den çıkar
+            if "RISK OFF" in regs or any("USD" in a and v[0]=="BULLISH" for a,v in asent.items()):
+                d = "↑"; strength = strength or 2
+            elif "RISK ON" in regs: d = "↓"; strength = strength or 2
+        yon = "🟢 Yükseliş" if d == "↑" else "🔴 Düşüş" if d == "↓" else "⚪ Nötr"
+        # Etki gücü 0-5: nötr ise daima düşük
+        if d == "→":
+            etki = 0
+        elif strength and strength <= 5:
+            etki = max(1, round(strength))
+        elif strength:
+            etki = min(5, max(1, round(strength / 20)))
+        else:
+            etki = 3 if imp >= 80 else 2 if imp >= 60 else 1
+        gv = min(95, conf) if d != "→" else max(20, 40 - imp//5)
+        exp = _ASSET_IMPACT.get(name.replace("/",""), {}).get(d, "")
+        if not exp:
+            if d == "↑": exp = f"{name} bu haberle yukarı yönlü baskı altında."
+            elif d == "↓": exp = f"{name} bu haberle aşağı yönlü baskı altında."
+            else: exp = f"{name} bu haberden belirgin şekilde etkilenmiyor."
+        return (f"{emoji} <b>{name}</b>\n"
+                f"Yön: {yon}  |  Etki: {etki}/5  |  Güven: {gv}/100\n"
+                f"<i>{exp[:140]}</i>\n")
+
+    varliklar = (
+        _asset_block("🥇", "XAUUSD", "XAUUSD") +
+        _asset_block("💵", "DXY", "DXY") +
+        _asset_block("💶", "EURUSD", "EURUSD") +
+        _asset_block("💷", "GBPUSD", "GBPUSD") +
+        _asset_block("💴", "USDJPY", "USDJPY") +
+        _asset_block("🛢", "WTI", "USOIL") +
+        _asset_block("📈", "SP500", "SPX500") +
+        _asset_block("💻", "NASDAQ", "NAS100") +
+        _asset_block("₿", "BTCUSD", "BTCUSD")
+    )
+
+    # ── Türkçe özet ──
+    konu, anlam = _turkce_aciklama(h, summary, imp, bias_tr, hist_key)
+
+    # ── Şirket etkileri ──
+    companies = []
+    comp_map = {"nvidia":"NVIDIA (NVDA)","apple":"Apple (AAPL)","tesla":"Tesla (TSLA)",
+                "microsoft":"Microsoft (MSFT)","amazon":"Amazon (AMZN)","meta":"Meta (META)",
+                "google":"Alphabet (GOOGL)","jpmorgan":"JPMorgan (JPM)","jp morgan":"JPMorgan (JPM)"}
+    for kw, nm in comp_map.items():
+        if kw in text: companies.append(nm)
+    sirket_blok = ("\n".join(f"• {c} — habere doğrudan maruz" for c in companies)
+                   if companies else "Doğrudan şirket etkisi tespit edilmedi.")
+
+    # ── Piyasa psikolojisi ──
+    if bias_tr == "Yükseliş":
+        kurumsal = "Kurumlar kademeli alım yapabilir, risk iştahı pozisyonları artabilir."
+        perakende = "Perakende FOMO ile geç alım yapma eğiliminde — tepe riski."
+        algo = "Momentum algoları yukarı yönlü tetiklenebilir."
+    elif bias_tr == "Düşüş":
+        kurumsal = "Kurumlar riski azaltır, güvenli liman (altın/yen/CHF) talebi artabilir."
+        perakende = "Perakende panik satışı yapabilir, dip yakalama denemeleri riskli."
+        algo = "Stop-avı ve satış algoları aşağı yönlü hızlandırabilir."
+    else:
+        kurumsal = "Kurumlar büyük ölçüde beklemede — net konum almıyor."
+        perakende = "Perakende kararsız, volatilite tuzağına dikkat."
+        algo = "Algoritmik tepki sınırlı — net tetik yok."
+
+    # ── Zaman dilimi ──
+    tf15 = m.get("tf15m","—"); tf1h = m.get("tf1h","—")
+    tf4h = m.get("tf4h","—"); tf24h = m.get("tf24h","—")
+
+    # ── Geçmiş ──
+    hist_blok = ""
+    if hist_key and hist_match:
+        hist_blok = f"\n📜 Geçmişte '{hist_key.upper()}' olduğunda:\n"
+        for asym, mv in list(hist_match.items())[:4]:
+            e = "📈" if mv > 0 else "📉"
+            hist_blok += f"  {e} {asym}: ort. {'+' if mv>0 else ''}{mv:.1f}%\n"
+
+    # ── Karşı senaryo ──
+    if bias_tr == "Yükseliş":
+        karsi = "Haber zaten fiyatlanmış olabilir (buy the rumor, sell the news). Beklenenden zayıf veri gelmesi veya kâr satışı yönü tersine çevirebilir."
+    elif bias_tr == "Düşüş":
+        karsi = "Aşırı satım sonrası teknik tepki gelebilir. Merkez bankası/hükümet müdahalesi veya pozisyon kapatma toparlanma yaratabilir."
+    else:
+        karsi = "Belirsiz görünüm aldatıcı olabilir — gizli bir katalizör tek yöne sert hareket başlatabilir."
+
+    # ── Sonuç ──
+    if derece in ("A+", "A"):
+        sonuc = f"Yüksek öncelikli haber. {bias_tr} yönü {conf}/100 güvenle destekleniyor. Açık pozisyonları gözden geçir, ilgili varlıklarda kurulum ara."
+    elif derece == "B+":
+        sonuc = f"Önemli ama tek başına işlem açtırmaz. {bias_tr} eğilimi izlenmeli, teknik teyit beklenmeli."
+    elif derece == "WATCHLIST":
+        sonuc = "İzleme listesine al. Şu an aksiyon gerektirmiyor, gelişmeleri takip et."
+    else:
+        sonuc = "Düşük etki — piyasalar büyük ihtimalle umursamayacak. Beklemek daha akıllıca."
+
+    msg = (
+        f"━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"📰 <b>HABER</b>\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"<b>{h}</b>\n"
+        + (f"<i>{summary}</i>\n" if summary else "")
+        + f"📡 {source or '—'}  ·  🕐 {now_str}\n\n"
+
+        f"━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"🧠 <b>TÜRKÇE ÖZET</b>\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"{konu}\n\n"
+        f"💡 {anlam}\n\n"
+
+        f"━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"🌍 <b>MAKRO DEĞERLENDİRME</b>\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"Kategori: <b>{cat}</b>\n"
+        f"Haber Tipi: {haber_tipi}\n"
+        f"Risk Duyarlılığı: <b>{risk_duy}</b>\n"
+        f"Önem Skoru: <b>{imp}/100</b>  ·  Güven: <b>{conf}/100</b>\n\n"
+
+        f"━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"📊 <b>VARLIK ETKİ ANALİZİ</b>\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"{varliklar}\n"
+
+        f"━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"🏢 <b>ŞİRKET ETKİLERİ</b>\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"{sirket_blok}\n\n"
+
+        f"━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"🧠 <b>PİYASA PSİKOLOJİSİ</b>\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"Kurumsal: {kurumsal}\n"
+        f"Perakende: {perakende}\n"
+        f"Algoritmik: {algo}\n\n"
+
+        f"━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"🎯 <b>TRADE RELEVANCE</b>\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"Derece: <b>{derece}</b>\n"
+        f"Piyasa Yönü: {bias_tr}  (Yükseliş %{bull_pct} / Düşüş %{bear_pct})\n\n"
+        f"⏱ Beklenen Etki:\n"
+        f"  15 Dakika: {tf15}\n"
+        f"  1 Saat: {tf1h}\n"
+        f"  4 Saat: {tf4h}\n"
+        f"  1 Gün: {tf24h}\n"
+        f"{hist_blok}\n"
+
+        f"━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"⚠️ <b>KARŞI SENARYO</b>\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"{karsi}\n\n"
+
+        f"━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"🏛 <b>SONUÇ</b>\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"{sonuc}\n"
+        f"<i>Titan Prime Elite — Kurumsal Haber Motoru</i>"
+    )
+    return msg
+
+
 def send_telegram(article):
     if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID: return
     h = article.get("headline", "")
     if h in _tg_sent: return
     _tg_sent.add(h)
 
-    # ── TITAN NEWS INTELLIGENCE PRO MAX — Claude API analizi ──────────────
-    # API key varsa Claude ile tam kurumsal analiz yap, yoksa fallback
+    # ── TITAN NEWS INTELLIGENCE PRO MAX ───────────────────────────────────
+    # API key varsa Claude ile tam analiz, YOKSA yerel TITAN motoru çalışır.
     if ANTHROPIC_API_KEY:
         def _run_titan():
             analysis = _titan_news_intelligence(article)
-            if analysis:
-                _send_titan_tg(article, analysis)
+            # Claude başarısız olursa yerel motora düş
+            _send_titan_tg(article, analysis) if analysis else \
+                _send_titan_tg(article, _titan_local_analysis(article))
         threading.Thread(target=_run_titan, daemon=True).start()
-        # Deep research da paralel çalışsın (keyword-based corroboration)
-        imp_quick = article.get("importance", 0)
-        if imp_quick >= 50:
-            def _deep():
-                research = _deep_research(article)
-                if research["corr_count"] >= 2:
-                    _send_deep_research_tg(article, research)
-            threading.Thread(target=_deep, daemon=True).start()
-        return  # Claude analizi gönderdi, fallback'e gerek yok
+        return
+    else:
+        # API yok → yerel TITAN formatlı analiz (tam kurumsal çıktı)
+        try:
+            _send_titan_tg(article, _titan_local_analysis(article))
+        except Exception:
+            pass
+        return
     imp   = article["importance"]
     rl    = article.get("risk_level", "NOISE")
     m     = article.get("macro", {})
