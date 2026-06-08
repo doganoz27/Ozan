@@ -32,10 +32,12 @@ from rich         import box
 # ═══════════════════════════════════════════════════════════════
 # CONFIG
 # ═══════════════════════════════════════════════════════════════
-API_KEY  = "d8ce4jpr01qidic7ibt0d8ce4jpr01qidic7ibtg"
-BASE_URL = "https://finnhub.io/api/v1"
-WS_URL   = f"wss://ws.finnhub.io?token={API_KEY}"
-DB_PATH  = os.path.join(os.path.expanduser("~"), "titan_journal.db")
+API_KEY       = "d8ce4jpr01qidic7ibt0d8ce4jpr01qidic7ibtg"
+BASE_URL      = "https://finnhub.io/api/v1"
+WS_URL        = f"wss://ws.finnhub.io?token={API_KEY}"
+DB_PATH       = os.path.join(os.path.expanduser("~"), "titan_journal.db")
+# Claude API key — set via env var ANTHROPIC_API_KEY or paste here
+ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY", "")
 
 REFRESH_SEC       = 2
 ANALYSIS_SEC      = 30
@@ -1605,11 +1607,269 @@ def _send_deep_research_tg(article, research: dict):
     except: pass
 
 
+_TITAN_NEWS_SYSTEM_PROMPT = """# TITAN NEWS INTELLIGENCE PRO MAX v12
+
+You are TITAN NEWS INTELLIGENCE PRO MAX.
+
+You are not a news summarizer.
+
+You are an institutional-grade market intelligence engine combining:
+Hedge Fund Macro Analyst, Forex Strategist, Commodity Analyst, Equity Analyst,
+Risk Manager, Market Psychologist, Geopolitical Analyst, Central Bank Analyst,
+Smart Money Analyst.
+
+Your objective is to determine:
+- What happened
+- Why it matters
+- Whether markets care
+- Which assets are affected and which are NOT
+- Directional bias, Risk level, Trading relevance
+- Institutional and Retail reaction
+
+CORE PRINCIPLE:
+MOST NEWS IS NOISE. MOST NEWS DOES NOT CREATE A TRADE.
+Most news should end as WATCHLIST or IGNORE.
+Only exceptional news deserves A or A+.
+Never assign high impact unless evidence supports it.
+Never exaggerate. Never force a reaction. Never assume. Never invent.
+
+SCORING:
+95-100 = A+
+90-94 = A
+80-89 = B+
+70-79 = B
+60-69 = WATCHLIST
+0-59 = IGNORE
+
+OUTPUT FORMAT (always in Turkish, follow exactly):
+
+━━━━━━━━━━━━━━━━━━━━━━
+📰 HABER
+━━━━━━━━━━━━━━━━━━━━━━
+[Original headline + summary]
+
+━━━━━━━━━━━━━━━━━━━━━━
+🇹🇷 TÜRKÇE HABER
+━━━━━━━━━━━━━━━━━━━━━━
+[Full professional Turkish translation - Bloomberg Turkey editor quality]
+
+━━━━━━━━━━━━━━━━━━━━━━
+🧠 TÜRKÇE ÖZET
+━━━━━━━━━━━━━━━━━━━━━━
+• Ne oldu?
+• Neden önemli?
+• Kim etkileniyor?
+• Piyasalar neden umursayabilir?
+• Hangi varlıklar etkilenebilir?
+
+━━━━━━━━━━━━━━━━━━━━━━
+🌍 MAKRO DEĞERLENDİRME
+━━━━━━━━━━━━━━━━━━━━━━
+Kategori: [type]
+Risk Duyarlılığı: [Risk On / Risk Off / Neutral / Mixed]
+Önem Skoru: [0-100]
+Güven Skoru: [0-100]
+Haber Tipi: [Fact / Opinion / Speculation / Forecast / Official Announcement]
+
+━━━━━━━━━━━━━━━━━━━━━━
+📊 VARLIK ETKİ ANALİZİ
+━━━━━━━━━━━━━━━━━━━━━━
+
+🥇 XAUUSD
+Yön: 🟢 Bullish / 🔴 Bearish / ⚪ Neutral
+Etki: [0-5]
+Güven: [0-100]
+Sebep: [one sentence]
+
+💵 DXY
+Yön: ...
+Etki: ...
+Güven: ...
+Sebep: ...
+
+💶 EURUSD
+Yön: ...
+Etki: ...
+Güven: ...
+Sebep: ...
+
+💷 GBPUSD
+Yön: ...
+Etki: ...
+Güven: ...
+Sebep: ...
+
+💴 USDJPY
+Yön: ...
+Etki: ...
+Güven: ...
+Sebep: ...
+
+🛢 WTI OIL
+Yön: ...
+Etki: ...
+Güven: ...
+Sebep: ...
+
+📈 SP500
+Yön: ...
+Etki: ...
+Güven: ...
+Sebep: ...
+
+💻 NASDAQ
+Yön: ...
+Etki: ...
+Güven: ...
+Sebep: ...
+
+₿ BITCOIN
+Yön: ...
+Etki: ...
+Güven: ...
+Sebep: ...
+
+━━━━━━━━━━━━━━━━━━━━━━
+🏢 ŞİRKET ETKİLERİ
+━━━━━━━━━━━━━━━━━━━━━━
+[List affected companies or "Doğrudan şirket etkisi yok."]
+
+━━━━━━━━━━━━━━━━━━━━━━
+🧠 PİYASA PSİKOLOJİSİ
+━━━━━━━━━━━━━━━━━━━━━━
+Kurumsal Davranış: ...
+Perakende Davranışı: ...
+Beklenen Algoritmik Tepki: ...
+
+━━━━━━━━━━━━━━━━━━━━━━
+🎯 TRADE RELEVANCE
+━━━━━━━━━━━━━━━━━━━━━━
+Derece: [A+ / A / B+ / B / WATCHLIST / IGNORE]
+
+15 Dakika: [expected move]
+1 Saat: [expected move]
+4 Saat: [expected move]
+1 Gün: [expected move]
+1 Hafta: [expected move]
+
+━━━━━━━━━━━━━━━━━━━━━━
+⚠️ KARŞI SENARYO
+━━━━━━━━━━━━━━━━━━━━━━
+[Why this analysis could be wrong]
+
+━━━━━━━━━━━━━━━━━━━━━━
+🏛 SONUÇ
+━━━━━━━━━━━━━━━━━━━━━━
+[Short, sharp institutional verdict in Turkish]"""
+
+
+def _titan_news_intelligence(article: dict) -> str | None:
+    """
+    Calls Claude API with the TITAN NEWS INTELLIGENCE PRO MAX system prompt.
+    Returns the full analysis string or None if API key missing / error.
+    """
+    if not ANTHROPIC_API_KEY:
+        return None
+    h       = article.get("headline", "")
+    summary = article.get("summary", "") or ""
+    source  = article.get("source", "")
+    url     = article.get("url", "")
+    dt_str  = datetime.now().strftime("%d %b %Y %H:%M UTC")
+
+    user_msg = (
+        f"Date: {dt_str}\n"
+        f"Source: {source}\n"
+        f"Headline: {h}\n"
+        f"Summary: {summary}\n"
+        + (f"URL: {url}\n" if url else "")
+    )
+    try:
+        resp = requests.post(
+            "https://api.anthropic.com/v1/messages",
+            headers={
+                "x-api-key": ANTHROPIC_API_KEY,
+                "anthropic-version": "2023-06-01",
+                "content-type": "application/json",
+            },
+            json={
+                "model": "claude-haiku-4-5-20251001",
+                "max_tokens": 2048,
+                "system": _TITAN_NEWS_SYSTEM_PROMPT,
+                "messages": [{"role": "user", "content": user_msg}],
+            },
+            timeout=30,
+        )
+        if resp.status_code == 200:
+            return resp.json()["content"][0]["text"]
+    except Exception:
+        pass
+    return None
+
+
+def _send_titan_tg(article: dict, analysis: str):
+    """Splits Claude analysis into ≤4096-char Telegram messages and sends them."""
+    if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID:
+        return
+    art_url = article.get("url", "")
+    art_src = article.get("source", "")
+    # Append source link at end
+    if art_url:
+        analysis += f"\n\n🔗 <b>HABERİN TAMAMI →</b> <a href='{art_url}'>{art_src}</a>"
+
+    # Convert plain text to HTML-safe (analysis already uses plain separators)
+    # Telegram HTML: only bold/italic/link supported — wrap section headers in <b>
+    # The Claude output uses ━━━ separators which Telegram renders fine as text
+    max_len = 4000
+    if len(analysis) <= max_len:
+        chunks = [analysis]
+    else:
+        # Split at ━━━ section boundaries
+        parts = analysis.split("━━━━━━━━━━━━━━━━━━━━━━")
+        chunks, cur = [], ""
+        for p in parts:
+            block = "━━━━━━━━━━━━━━━━━━━━━━" + p
+            if len(cur) + len(block) > max_len:
+                if cur: chunks.append(cur.strip())
+                cur = block
+            else:
+                cur += block
+        if cur: chunks.append(cur.strip())
+
+    for chunk in chunks:
+        try:
+            requests.post(
+                f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage",
+                json={"chat_id": TELEGRAM_CHAT_ID, "text": chunk,
+                      "parse_mode": "HTML", "disable_web_page_preview": False},
+                timeout=10,
+            )
+        except Exception:
+            pass
+
+
 def send_telegram(article):
     if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID: return
     h = article.get("headline", "")
     if h in _tg_sent: return
     _tg_sent.add(h)
+
+    # ── TITAN NEWS INTELLIGENCE PRO MAX — Claude API analizi ──────────────
+    # API key varsa Claude ile tam kurumsal analiz yap, yoksa fallback
+    if ANTHROPIC_API_KEY:
+        def _run_titan():
+            analysis = _titan_news_intelligence(article)
+            if analysis:
+                _send_titan_tg(article, analysis)
+        threading.Thread(target=_run_titan, daemon=True).start()
+        # Deep research da paralel çalışsın (keyword-based corroboration)
+        imp_quick = article.get("importance", 0)
+        if imp_quick >= 50:
+            def _deep():
+                research = _deep_research(article)
+                if research["corr_count"] >= 2:
+                    _send_deep_research_tg(article, research)
+            threading.Thread(target=_deep, daemon=True).start()
+        return  # Claude analizi gönderdi, fallback'e gerek yok
     imp   = article["importance"]
     rl    = article.get("risk_level", "NOISE")
     m     = article.get("macro", {})
