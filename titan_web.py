@@ -83,6 +83,7 @@ def start_engine():
         ("stats_loop",               tf.stats_loop),
         ("portfolio_loop",           tf.portfolio_loop),
         ("performance_report_loop",  tf.performance_report_loop),
+        ("telegram_command_loop",    tf.telegram_command_loop),
         ("analysis_loop",            _analysis_loop),
     ]:
         threading.Thread(target=fn, daemon=True, name=name).start()
@@ -259,6 +260,9 @@ def _signal_to_dict(s):
         "price": _fp(s.get("price")), "el": _fp(s.get("el")), "eh": _fp(s.get("eh")),
         "sl": _fp(s.get("sl")), "tp": _fp(s.get("tp")), "rr": s.get("rr"),
         "regime": s.get("regime"), "duration": s.get("duration"),
+        "regime_tech": s.get("regime_tech"), "regime_code": s.get("regime_code"),
+        "mtf_aligned": s.get("mtf_aligned"), "mtf_total": s.get("mtf_total"),
+        "mtf_detail": s.get("mtf_detail", []),
         "contrarian_score": s.get("contrarian_score"), "contrarian_label": s.get("contrarian_label"),
         "news_risk": s.get("news_risk"), "hold_h": s.get("hold_h"),
         "consensus_view": s.get("consensus_view"), "sm_view": s.get("sm_view"),
@@ -298,9 +302,14 @@ def active_trades_live():
         pnl_gbp = round(rr_live * exp_loss, 2)
         tp_dist = abs(tp - ep) if (tp and ep) else 1
         prog = max(0, min(100, round(pnl_pts / tp_dist * 100, 1))) if tp_dist else 0
+        dist_tp = abs(tp - cp) if (tp and cp) else 0
+        dist_sl = abs(cp - sl) if (sl and cp) else 0
+        pnl_pct = round(pnl_pts / ep * 100, 3) if ep else 0
         out.append({
             "sym": sym, "direction": direction, "entry": _fp(ep), "current": _fp(cp),
             "sl": _fp(sl), "tp": _fp(tp), "rr_live": rr_live, "pnl_gbp": pnl_gbp,
+            "pnl_pct": pnl_pct, "dist_tp": _fp(dist_tp), "dist_sl": _fp(dist_sl),
+            "be_moved": bool(t.get("_be_moved")),
             "progress": prog, "margin": sz.get("margin"), "exp_loss": exp_loss,
             "id": t.get("db_id", 0), "score": t.get("score", 0),
             "quality": t.get("quality", ""),
@@ -550,6 +559,14 @@ def api_journal():
 def api_analytics():
     return JSONResponse(analytics_data())
 
+@app.get("/api/insights")
+def api_insights():
+    """AI Performans Koçu — eyleme dönük içgörüler."""
+    try:
+        return JSONResponse(tf.ai_coach_insights())
+    except Exception as e:
+        return JSONResponse([{"type":"info","icon":"⚠️","text":f"Koç hazırlanıyor: {e}"}])
+
 @app.get("/api/performance")
 def api_performance(p: str = "daily"):
     if p not in ("daily", "weekly", "monthly"):
@@ -726,6 +743,7 @@ def _keep_awake():
         ("monitor_loop",             tf.monitor_loop),
         ("stats_loop",               tf.stats_loop),
         ("analysis_loop",            _analysis_loop),
+        ("telegram_command_loop",    tf.telegram_command_loop),
         ("ws_cache",                 _refresh_ws_cache),
     ]
     running: dict = {}

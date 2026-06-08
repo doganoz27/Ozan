@@ -309,6 +309,60 @@ def tg_send_raw(message: str, disable_preview: bool = True):
             timeout=8)
     except: pass
 
+def tg_send_get_id(message: str, chat_id=None, reply_markup=None, disable_preview=True):
+    """sendMessage döner ve message_id'yi geri verir (mesaj düzenleme için)."""
+    if not TELEGRAM_TOKEN or not (chat_id or TELEGRAM_CHAT_ID):
+        return None
+    try:
+        payload = {"chat_id": chat_id or TELEGRAM_CHAT_ID, "text": message,
+                   "parse_mode": "HTML", "disable_web_page_preview": disable_preview}
+        if reply_markup: payload["reply_markup"] = reply_markup
+        r = requests.post(f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage",
+                          json=payload, timeout=8)
+        if r.status_code == 200:
+            return r.json().get("result", {}).get("message_id")
+    except: pass
+    return None
+
+def tg_edit_message(message_id: int, new_text: str, chat_id=None, reply_markup=None):
+    """editMessageText — mevcut mesajı günceller (spam yerine)."""
+    if not TELEGRAM_TOKEN or not message_id:
+        return False
+    try:
+        payload = {"chat_id": chat_id or TELEGRAM_CHAT_ID, "message_id": message_id,
+                   "text": new_text, "parse_mode": "HTML",
+                   "disable_web_page_preview": True}
+        if reply_markup: payload["reply_markup"] = reply_markup
+        r = requests.post(f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/editMessageText",
+                          json=payload, timeout=8)
+        return r.status_code == 200
+    except: pass
+    return False
+
+def tg_breakeven_alert(sym, direction, entry, cur, new_sl, at_key):
+    """Break-even tetiklendi — pozisyon artık risksiz. Mevcut setup mesajını düzenle."""
+    if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID:
+        return
+    now_str = datetime.now().strftime("%H:%M")
+    dir_emoji = "📈" if direction == "LONG" else "📉"
+    msg = (
+        f"🟦 <b>BREAK-EVEN — RİSKSİZ POZİSYON</b>\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"{dir_emoji} <b>{sym}</b>  ·  {direction}\n\n"
+        f"✅ Fiyat +1R kâra ulaştı — Stop Loss <b>girişe çekildi</b>.\n"
+        f"📥 Giriş   : <code>{fp_plain(entry)}</code>\n"
+        f"🛡 Yeni SL : <code>{fp_plain(new_sl)}</code>  (artık zarar etmen imkansız)\n"
+        f"💹 Güncel  : <code>{fp_plain(cur)}</code>\n\n"
+        f"<i>Sermaye korundu — kalan yol saf kâr. 🕐 {now_str}</i>"
+    )
+    def _send():
+        # Varsa setup mesajını düzenle; yoksa yeni gönder
+        with _tg_msg_lock: mid = _tg_trade_msgid.get(at_key)
+        if mid and tg_edit_message(mid, msg):
+            return
+        tg_send_raw(msg)
+    threading.Thread(target=_send, daemon=True).start()
+
 # ── AI Karar Motoru — bireysel skorlar ───────────────────────────────────────
 def ai_decision_scores(s):
     """Sinyalden 8 bireysel AI skoru türet (0-100)."""
@@ -1002,24 +1056,24 @@ def tg_setup_alert(s):
         f"🕐 {now_str}\n"
         f"🔖 Sinyal ID: <code>#{s.get('_tg_signal_id',0):05d}</code>\n"
         f"⚡ <b>BU SİNYAL ÖZEL VE KİŞİSELDİR</b> ⚡")
+    at_key = f"{sym}_{direction}"
     def _send():
         try:
             png = _tg_chart_png(s)
+            mid = None
             if png:
                 # Tek geniş grafik + tam mesaj caption olarak
                 cap = msg if len(msg) <= 1024 else msg[:1015] + "…"
                 requests.post(f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendPhoto",
                     data={"chat_id":TELEGRAM_CHAT_ID,"caption":cap,"parse_mode":"HTML"},
                     files={"photo":("chart.png", png, "image/png")}, timeout=20)
-                # Mesaj 1024+ ise tam metni ayrıca gönder
+                # Mesaj 1024+ ise tam metni ayrıca gönder — bu mesajı izle (düzenlenebilir)
                 if len(msg) > 1024:
-                    requests.post(f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage",
-                        json={"chat_id":TELEGRAM_CHAT_ID,"text":msg,"parse_mode":"HTML",
-                              "disable_web_page_preview":True}, timeout=8)
+                    mid = tg_send_get_id(msg)
             else:
-                requests.post(f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage",
-                    json={"chat_id":TELEGRAM_CHAT_ID,"text":msg,"parse_mode":"HTML",
-                          "disable_web_page_preview":True}, timeout=8)
+                mid = tg_send_get_id(msg)
+            if mid:
+                with _tg_msg_lock: _tg_trade_msgid[at_key] = mid
         except: pass
     threading.Thread(target=_send, daemon=True).start()
 
@@ -1070,10 +1124,14 @@ def tg_outcome_alert(sym, direction, status, entry, out_price, act_rr, sig_id=No
         f"🕐 {now_str}"
         +(f"\n🔖 Sinyal ID: <code>#{sig_id:05d}</code>" if sig_id else "")+
         f"\n<i>Titan Prime Elite — sistem bu sonuçtan öğreniyor</i>")
+    at_key = f"{sym}_{direction}"
     def _send():
         try:
-            requests.post(f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage",
-                json={"chat_id":TELEGRAM_CHAT_ID,"text":msg,"parse_mode":"HTML"},timeout=8)
+            # Mevcut setup mesajını sonuçla GÜNCELLE (spam yerine), yoksa yeni gönder
+            with _tg_msg_lock: mid = _tg_trade_msgid.pop(at_key, None)
+            if not (mid and tg_edit_message(mid, msg)):
+                requests.post(f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage",
+                    json={"chat_id":TELEGRAM_CHAT_ID,"text":msg,"parse_mode":"HTML"},timeout=8)
         except: pass
     threading.Thread(target=_send,daemon=True).start()
 
@@ -2519,6 +2577,17 @@ TRADE_BUDGET      = 50.0    # Total budget to split across trades
 MAX_CONCURRENT    = 3       # Max simultaneous open trades
 _budget_lock      = threading.Lock()
 
+# ── Break-even / trade lifecycle state ────────────────────────────────────────
+BE_TRIGGER_R      = 1.0     # Move SL to entry when price reaches +1.0R profit
+_be_moved         : dict[str,bool]  = {}   # at_key → SL already moved to BE
+# ── Telegram message editing (anti-spam) ──────────────────────────────────────
+_tg_trade_msgid   : dict[str,int]   = {}   # at_key → telegram message_id of setup alert
+_tg_msg_lock      = threading.Lock()
+# ── Self-learning milestone reports ───────────────────────────────────────────
+_milestone_sent   : set = set()            # milestones (50,100,...) already reported
+# ── Telegram command center (interactive) ─────────────────────────────────────
+_tg_update_offset = [0]                     # getUpdates offset cursor (list = mutable)
+
 # ═══════════════════════════════════════════════════════════════
 # DATABASE
 # ═══════════════════════════════════════════════════════════════
@@ -3015,6 +3084,93 @@ def structure(highs,lows,n=8):
 #   Max raw ≈ 96
 MAX_RAW = 96
 
+def _technical_regime(candles):
+    """
+    Teknik piyasa rejimi: Trending / Ranging / Volatile / Low-Vol.
+    Fiyat yapısı + ATR'den (haber-temelli rejimden ayrı) sınıflandırır.
+    Döner: (regime_code, türkçe_etiket, atr_pct)
+    """
+    if len(candles) < 30:
+        return ("UNKNOWN", "Belirsiz", 0.0)
+    cl = [c[4] for c in candles]
+    hi = [c[2] for c in candles]
+    lo = [c[3] for c in candles]
+    price = cl[-1] or 1
+    av = atr(candles) or 0
+    atr_pct = (av / price * 100) if price else 0
+
+    # ATR'nin son 50 bardaki yüzdelik konumu → volatilite rejimi
+    atrs = []
+    for i in range(20, len(candles)):
+        a = atr(candles[max(0,i-20):i+1])
+        if a: atrs.append(a)
+    cur_atr = atrs[-1] if atrs else av
+    if atrs:
+        srt = sorted(atrs)
+        rank = sum(1 for x in srt if x <= cur_atr) / len(srt)
+    else:
+        rank = 0.5
+
+    # Trend gücü: EMA50 eğimi + fiyatın aralık içindeki yönü
+    e20 = ema(cl, 20); e50 = ema(cl, 50)
+    trend_strength = 0.0
+    if e50 and len(e50) >= 10:
+        slope = (e50[-1] - e50[-10]) / (abs(e50[-10]) or 1)
+        trend_strength = abs(slope) * 100
+    # Aralık sıkışması: son 20 barın yüksek-düşük bandı / fiyat
+    rng = (max(hi[-20:]) - min(lo[-20:])) / price * 100 if price else 0
+
+    # Sınıflandırma
+    if rank >= 0.80:
+        return ("VOLATILE", "📊 Volatil — geniş bar, dikkatli SL", round(atr_pct,3))
+    if rank <= 0.20:
+        return ("LOW_VOL", "😴 Düşük Volatilite — sıkışma, kırılım bekle", round(atr_pct,3))
+    if trend_strength >= 0.8 and rng > atr_pct * 2.5:
+        return ("TRENDING", "📈 Trend — yön net, trend takip et", round(atr_pct,3))
+    if trend_strength < 0.4:
+        return ("RANGING", "↔️ Yatay/Range — banttan al-sat", round(atr_pct,3))
+    return ("TRENDING", "📈 Trend — yön net", round(atr_pct,3))
+
+
+def _resample_candles(candles, factor):
+    """N adet 1-birim mumu tek bir daha-yüksek-TF mumuna birleştir."""
+    out = []
+    for i in range(0, len(candles) - factor + 1, factor):
+        grp = candles[i:i+factor]
+        if len(grp) < factor: break
+        ts = grp[0][0]; o = grp[0][1]
+        h = max(g[2] for g in grp); l = min(g[3] for g in grp)
+        c = grp[-1][4]; v = sum(g[5] for g in grp)
+        out.append((ts, o, h, l, c, v))
+    return out
+
+
+def _mtf_confluence(candles, direction):
+    """
+    Çoklu zaman dilimi teyidi — 1H temelli mumlardan 4H ve Günlük türetip
+    EMA trendinin sinyal yönüyle uyumunu kontrol eder.
+    Döner: (aligned_count, total_checked, detail_list)
+    """
+    # 1H temelli mumlardan 4H ve 8H türet — ~130 barla ikisi de hesaplanabilir
+    tfs = [("4 Saat", 4), ("8 Saat", 8)]
+    aligned = 0; total = 0; detail = []
+    for label, fac in tfs:
+        rs = _resample_candles(candles, fac)
+        if len(rs) < 11:   # EMA9 için yeterli
+            continue
+        cl = [c[4] for c in rs]
+        e9 = ema(cl, 9); e20 = ema(cl, 20)
+        if not e9 or not e20:
+            continue
+        total += 1
+        up = e9[-1] > e20[-1]
+        tf_dir = "LONG" if up else "SHORT"
+        ok = (tf_dir == direction)
+        if ok: aligned += 1
+        detail.append((label, tf_dir, ok))
+    return aligned, total, detail
+
+
 def score_setup(sym, candles, price, news_items=None):
     if len(candles) < 40: return None
     cl=[c[4] for c in candles]
@@ -3273,13 +3429,30 @@ def score_setup(sym, candles, price, news_items=None):
     elif st=="BEAR" and (rv or 50)>35: regime="Risk-Off"
     else: regime="Nötr"
 
+    # ── Teknik rejim (Trending/Ranging/Volatile/Low-Vol) ─────────
+    regime_code, regime_tech, regime_atr = _technical_regime(candles)
+
+    # ── Çoklu zaman dilimi teyidi (4H + Günlük) ──────────────────
+    mtf_aligned, mtf_total, mtf_detail = _mtf_confluence(candles, direction)
+    conf_bonus = 0
+    if mtf_total > 0:
+        if mtf_aligned == mtf_total:
+            conf_bonus = 6   # tüm üst TF'ler uyumlu — güçlü teyit
+            reasons.append(f"Çoklu TF teyidi: {mtf_total}/{mtf_total} üst zaman dilimi uyumlu")
+        elif mtf_aligned == 0:
+            conf_bonus = -8  # tüm üst TF'ler ters — büyük resim karşı
+            neg_factors.append(f"Üst zaman dilimleri ters yönde ({mtf_total}/{mtf_total} karşı)")
+        else:
+            conf_bonus = 1
+            neg_factors.append(f"Kısmi TF teyidi: {mtf_aligned}/{mtf_total} üst TF uyumlu")
+
     # ── Equity bonus — stocks get +4 if EMA+structure aligned ───
     eq_bonus=0
     if get_asset_class(sym) in ("stocks","indices") and fl["f_ema"] and fl["f_struct"]:
         eq_bonus=4
 
     # ── Normalise to 100 then blend RR bonus ─────────────────────
-    score_100=round(min(max(raw/MAX_RAW*85+rr_bonus+eq_bonus-news_penalty,0),100),1)
+    score_100=round(min(max(raw/MAX_RAW*85+rr_bonus+eq_bonus+conf_bonus-news_penalty,0),100),1)
 
     # ── Expected hold time (TP distance ÷ ATR = hours) ───────────
     hold_h=round(abs(tp-price)/av,1) if av else 8.0
@@ -3347,6 +3520,9 @@ def score_setup(sym, candles, price, news_items=None):
         "sm_notes":sm_notes,"trap_warnings":trap_warnings,
         "contrarian_score":c_score,"contrarian_label":c_label,
         "regime":regime,
+        "regime_tech":regime_tech,"regime_code":regime_code,
+        "mtf_aligned":mtf_aligned,"mtf_total":mtf_total,
+        "mtf_detail":[{"tf":d[0],"dir":d[1],"ok":d[2]} for d in mtf_detail],
         "time":datetime.now().strftime("%H:%M:%S"),
         "narrative": _narrative(sym,direction,price,el,eh,sl,tp,rr,av,rv,mh,st,sw,bOB,beOB,bFVG,beFVG,cot,news_rl+news_rs,news_score),
     }
@@ -3768,6 +3944,34 @@ def _check_open():
             if cur is None: continue
             risk=abs(ep-sl)
             if risk==0: continue
+            at_key = f"{sym}_{direction}"
+
+            # ── BREAK-EVEN: +1R'ye ulaşınca SL'yi girişe çek (risksiz pozisyon) ──
+            with _budget_lock: be_done = _be_moved.get(at_key, False)
+            # Restart sonrası: SL zaten kâr tarafındaysa BE'yi işaretli say (tekrar uyarma)
+            if not be_done and ep:
+                already_be = (sl >= ep) if direction=="LONG" else (sl <= ep)
+                if already_be:
+                    with _budget_lock: _be_moved[at_key] = True
+                    be_done = True
+            if not be_done and ep and sl != ep:
+                # Mevcut kâr (R cinsinden)
+                cur_r = (cur-ep)/risk if direction=="LONG" else (ep-cur)/risk
+                if cur_r >= BE_TRIGGER_R:
+                    # SL'yi girişe çek (çok küçük tampon ile masraf/komisyon koruması)
+                    buf = risk * 0.02
+                    new_sl = round(ep + buf, 8) if direction=="LONG" else round(ep - buf, 8)
+                    c.execute("UPDATE signals SET sl=? WHERE id=?", (new_sl, r["id"]))
+                    sl = new_sl  # bu döngüde de yeni SL kullanılsın
+                    with _budget_lock: _be_moved[at_key] = True
+                    with lock:
+                        if at_key in active_trades:
+                            active_trades[at_key]["sl"] = new_sl
+                            active_trades[at_key]["_be_moved"] = True
+                    try: tg_breakeven_alert(sym, direction, ep, cur, new_sl, at_key)
+                    except: pass
+                    risk = abs(ep - sl) or risk
+
             ns=None; arr=None; arr_r=None
             if direction=="LONG":
                 if cur<=sl:    ns="SL";  arr_r=-1.0; arr=round(-risk/ep*100,3) if ep else -1.0
@@ -3787,11 +3991,10 @@ def _check_open():
                 act_rr_val = arr_r if arr_r is not None else (arr or 0)
                 c.execute("UPDATE signals SET status=?,out_price=?,out_at=?,act_rr=? WHERE id=?",
                           (ns,cur,now,act_rr_val,r["id"]))
-                # Grab the at_key for active_trades removal — use sym+direction (most reliable)
-                at_key = f"{sym}_{direction}"
                 # Mark as recently closed FIRST — prevents run_analysis re-adding it
                 with _budget_lock:
                     _recently_closed[at_key] = time.time()
+                    _be_moved.pop(at_key, None)   # break-even durumunu temizle
                 # Sync active_trades dict — remove closed entries
                 with lock:
                     t2 = active_trades.pop(at_key, None)
@@ -4047,11 +4250,349 @@ def compute_stats():
         if total>=3:
             adap_weights.update(new_w)
 
+    # ── Milestone raporu (50/100/150... işlem) — kilitli I/O dışında ──
+    try: _check_milestone(total)
+    except: pass
+
+
+def ai_coach_insights() -> list:
+    """
+    AI Performans Koçu — istatistiklerden eyleme dönük Türkçe içgörüler üretir.
+    Örn: 'GBPUSD altından daha iyi performans gösteriyor', 'Londra seansı NY'den üstün'.
+    """
+    with lock: sc = dict(stats_cache)
+    out = []
+    total = sc.get("total", 0)
+    if total < 5:
+        return [{"type":"info","icon":"🌱",
+                 "text":f"Henüz {total} işlem var. Anlamlı koçluk için en az 5 işlem gerekiyor — sistem öğrenmeye devam ediyor."}]
+
+    # ── Sembol karşılaştırması (en iyi vs en kötü) ──
+    sym_perf = sc.get("sym_perf", {})
+    syms = [(s,d) for s,d in sym_perf.items() if d.get("t",0) >= 2]
+    if len(syms) >= 2:
+        best = max(syms, key=lambda x: x[1]["wr"])
+        worst = min(syms, key=lambda x: x[1]["wr"])
+        if best[0] != worst[0] and best[1]["wr"] - worst[1]["wr"] >= 15:
+            out.append({"type":"asset","icon":"🏆",
+                "text":f"<b>{best[0]}</b> ({best[1]['wr']:.0f}% WR) "
+                       f"<b>{worst[0]}</b>'den ({worst[1]['wr']:.0f}% WR) belirgin şekilde daha iyi. "
+                       f"{best[0]}'e daha çok ağırlık ver, {worst[0]}'de seçici ol."})
+
+    # ── Seans karşılaştırması ──
+    ss = sc.get("sess_stats", {})
+    sess_wr = {s: (round(d["w"]/d["t"]*100,1), d["t"]) for s,d in ss.items() if d.get("t",0) >= 2}
+    if len(sess_wr) >= 2:
+        bs = max(sess_wr.items(), key=lambda x: x[1][0])
+        ws = min(sess_wr.items(), key=lambda x: x[1][0])
+        if bs[0] != ws[0] and bs[1][0] - ws[1][0] >= 12:
+            out.append({"type":"session","icon":"🕑",
+                "text":f"<b>{bs[0]}</b> seansı ({bs[1][0]:.0f}% WR) "
+                       f"<b>{ws[0]}</b>'den ({ws[1][0]:.0f}% WR) daha kârlı. "
+                       f"İşlemlerini {bs[0]} saatlerine yoğunlaştır."})
+
+    # ── Kalite (güven) karşılaştırması ──
+    bq = sc.get("by_q", {})
+    aplus = bq.get("A+", {}); bplus = bq.get("B+", {})
+    if aplus.get("t",0) >= 2 and bplus.get("t",0) >= 2:
+        if aplus["wr"] - bplus["wr"] >= 10:
+            out.append({"type":"quality","icon":"⭐",
+                "text":f"A+ sinyaller ({aplus['wr']:.0f}% WR) B+'dan ({bplus['wr']:.0f}% WR) "
+                       f"daha güvenilir. Düşük kaliteli setuplarda pozisyon küçült."})
+
+    # ── Profit factor / beklenti yorumu ──
+    pf = sc.get("pf", 0); wr = sc.get("wr", 0); avg_rr = sc.get("avg_rr", 0)
+    if pf >= 1.5:
+        out.append({"type":"edge","icon":"📈",
+            "text":f"Profit Factor <b>{pf:.2f}</b> — sistemin pozitif beklentisi var. "
+                   f"Win rate %{wr:.0f}, ortalama {avg_rr:+.2f}R. Disiplini koru."})
+    elif pf < 1.0 and sc.get("total",0) >= 10:
+        out.append({"type":"warn","icon":"⚠️",
+            "text":f"Profit Factor <b>{pf:.2f}</b> (1.0 altı) — şu an net kayıptasın. "
+                   f"İşlem sıklığını düşür, sadece A+/A setuplara odaklan."})
+
+    # ── En iyi/en zayıf faktör ──
+    fstats = sc.get("fstats", {})
+    fnames = {"f_ema":"EMA Yığını","f_rsi":"RSI Aşırı","f_macd":"MACD","f_sweep":"Likidite Süpürme",
+              "f_ob":"Order Block","f_struct":"Yapı Kırılımı","f_news":"Haber Teyidi","f_cot":"COT"}
+    valid_f = [(f,d) for f,d in fstats.items() if d.get("n",0) >= 3 and d.get("wr") is not None]
+    if valid_f:
+        bf = max(valid_f, key=lambda x: x[1]["wr"])
+        if bf[1]["wr"] >= 60:
+            out.append({"type":"setup","icon":"🎯",
+                "text":f"En güçlü faktörün <b>{fnames.get(bf[0],bf[0])}</b> "
+                       f"(%{bf[1]['wr']:.0f} WR, {bf[1]['n']} işlem). Bu faktör olan setupları öncele."})
+
+    # ── Streak uyarısı ──
+    streak = sc.get("streak", 0); st_type = sc.get("streak_type", "")
+    if st_type == "SL" and streak >= 3:
+        out.append({"type":"warn","icon":"🛑",
+            "text":f"<b>{streak} ardışık kayıp</b> serisi. Ara ver, piyasayı yeniden değerlendir. "
+                   f"Tilt'e (öfkeyle işlem) düşme — sermaye koruması önce gelir."})
+    elif st_type == "TP" and streak >= 3:
+        out.append({"type":"edge","icon":"🔥",
+            "text":f"<b>{streak} ardışık kazanç</b>! Momentum iyi ama aşırı güvene kapılma — "
+                   f"risk yönetimini aynı tut."})
+
+    if not out:
+        out.append({"type":"info","icon":"📊",
+            "text":f"{total} işlem analiz edildi. Win rate %{wr:.0f}, PF {pf:.2f}. "
+                   f"Performans dengeli — net bir üstünlük/zaafiyet sinyali yok."})
+    return out
+
+
+def _check_milestone(total):
+    """Her 50 işlemde otomatik optimizasyon raporu (Telegram)."""
+    if total < 50: return
+    milestone = (total // 50) * 50
+    if milestone in _milestone_sent: return
+    _milestone_sent.add(milestone)
+    if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID: return
+
+    with lock: sc = dict(stats_cache)
+    insights = ai_coach_insights()
+    now_str = datetime.now().strftime("%d.%m.%Y %H:%M")
+    wr = sc.get("wr",0); pf = sc.get("pf",0); avg_rr = sc.get("avg_rr",0)
+    sharpe = sc.get("sharpe") or 0; mdd = sc.get("mdd",0)
+
+    ins_txt = "\n".join(f"{i['icon']} {i['text']}" for i in insights[:6])
+    msg = (
+        f"╔══════════════════════════╗\n"
+        f"║  🧠 {milestone} İŞLEM — OPTİMİZASYON  ║\n"
+        f"╚══════════════════════════╝\n\n"
+        f"📊 <b>GENEL PERFORMANS</b>\n"
+        f"  Win Rate : <b>%{wr:.1f}</b>\n"
+        f"  Profit Factor : <b>{pf:.2f}</b>\n"
+        f"  Ort. R : <b>{avg_rr:+.2f}R</b>\n"
+        f"  Sharpe : <b>{sharpe:.2f}</b>  |  Max DD : <b>%{mdd:.1f}</b>\n\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"🎓 <b>AI KOÇ — EYLEM ÖNERİLERİ</b>\n\n"
+        f"{ins_txt}\n\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"🕐 {now_str}  ·  <i>Titan Prime Elite — Kendi Kendine Öğrenme Motoru</i>"
+    )
+    threading.Thread(target=tg_send_raw, args=(msg,), daemon=True).start()
+
+
 def stats_loop():
     while True:
         try: compute_stats()
         except: pass
         time.sleep(60)   # 1 dakikada bir istatistik + adaptif ağırlık güncelle
+
+
+# ═══════════════════════════════════════════════════════════════
+# TELEGRAM KOMUTA MERKEZİ  (interaktif — /dashboard /trades /signals ...)
+# ═══════════════════════════════════════════════════════════════
+def _tg_main_menu():
+    """Inline klavye ana menüsü."""
+    return {"inline_keyboard": [
+        [{"text":"📊 Panel","callback_data":"dashboard"}, {"text":"📈 Açık İşlemler","callback_data":"trades"}],
+        [{"text":"🎯 Sinyaller","callback_data":"signals"}, {"text":"📰 Haberler","callback_data":"news"}],
+        [{"text":"📒 Journal","callback_data":"journal"}, {"text":"🏆 İstatistik","callback_data":"stats"}],
+        [{"text":"🧠 AI Koç","callback_data":"insights"}, {"text":"🔄 Yenile","callback_data":"dashboard"}],
+    ]}
+
+def _cmd_dashboard():
+    with lock:
+        sc = dict(stats_cache); ps = dict(portfolio_state)
+        n_open = len(active_trades)
+    bal = round(ps.get("shadow_balance", ACCOUNT["balance"]), 2)
+    pnl = round(bal - ACCOUNT["balance"], 2)
+    wr = sc.get("wr",0); pf = sc.get("pf",0); total = sc.get("total",0)
+    # Rejim: aktif sinyallerin çoğunluk rejimi
+    reg = "Nötr"
+    try:
+        with lock: ss = list(setups)
+        counts = {}
+        for s in ss:
+            r = s.get("regime") or "Nötr"
+            counts[r] = counts.get(r,0)+1
+        if counts: reg = max(counts, key=counts.get)
+    except: pass
+    pe = "🟢" if pnl>=0 else "🔴"
+    return (
+        f"╔══════════════════════════╗\n"
+        f"║  📊 <b>TITAN PRIME PANEL</b>  ║\n"
+        f"╚══════════════════════════╝\n\n"
+        f"💷 Bakiye      : <b>£{bal:.2f}</b>\n"
+        f"{pe} Net K/Z     : <b>{'+' if pnl>=0 else ''}£{pnl:.2f}</b>\n"
+        f"🎯 Win Rate    : <b>%{wr:.1f}</b>  ({sc.get('wins',0)}TP/{sc.get('losses',0)}SL)\n"
+        f"📈 Profit Factor: <b>{pf:.2f}</b>\n"
+        f"💼 Açık İşlem  : <b>{n_open}/{MAX_CONCURRENT}</b>\n"
+        f"🧮 Toplam İşlem: <b>{total}</b>\n"
+        f"🌡 Piyasa Rejimi: <b>{reg}</b>\n\n"
+        f"<i>Bir bölüm seçmek için aşağıdaki menüyü kullan 👇</i>"
+    )
+
+def _cmd_trades():
+    with lock:
+        at = dict(active_trades); snap = dict(market)
+    if not at:
+        return "💼 <b>AÇIK İŞLEM YOK</b>\n\nŞu an izlenen aktif pozisyon bulunmuyor. Sistem fırsat tarıyor."
+    lines = ["╔══════════════════════════╗\n║  📈 <b>AÇIK POZİSYONLAR</b>  ║\n╚══════════════════════════╝\n"]
+    for k, t in at.items():
+        sym = t.get("sym"); ep = t.get("_trade_entry_price") or t.get("price") or 0
+        sl = t.get("sl") or 0; tp = t.get("tp") or 0; d = t.get("direction")
+        md = snap.get(sym); cur = (md.price if md and md.price else ep) or ep
+        risk = abs(ep-sl) if (ep and sl) else 1
+        rr_live = round(((cur-ep) if d=="LONG" else (ep-cur))/risk, 2) if risk else 0
+        be = "🛡BE" if t.get("_be_moved") else ""
+        emo = "🟢" if rr_live>=0 else "🔴"
+        dist_tp = abs(tp-cur); dist_sl = abs(cur-sl)
+        lines.append(
+            f"{emo} <b>{sym}</b> {d} {be}\n"
+            f"   Giriş {fp_plain(ep)} · Şu an {fp_plain(cur)}\n"
+            f"   SL {fp_plain(sl)} · TP {fp_plain(tp)}\n"
+            f"   Anlık: <b>{rr_live:+.2f}R</b> · TP'ye {fp_plain(dist_tp)} / SL'ye {fp_plain(dist_sl)}\n")
+    return "\n".join(lines)
+
+def _cmd_signals():
+    with lock: ss = list(setups)
+    appr = [s for s in ss if s.get("status")=="APPROVED" and s.get("quality") in ("A+","A","B+")]
+    appr = sorted(appr, key=lambda x:-x.get("score",0))[:5]
+    if not appr:
+        return "🎯 <b>ONAYLI SİNYAL YOK</b>\n\nŞu an A+/A/B+ seviyesinde fırsat yok. Kalite > miktar."
+    lines = ["╔══════════════════════════╗\n║  🎯 <b>AKTİF SİNYALLER</b>  ║\n╚══════════════════════════╝\n"]
+    for s in appr:
+        d = s.get("direction"); emo = "📈" if d=="LONG" else "📉"
+        mtf = f"{s.get('mtf_aligned',0)}/{s.get('mtf_total',0)}TF"
+        lines.append(
+            f"{emo} <b>{s['sym']}</b> {d} · {s['quality']} {s.get('score',0):.0f}/100\n"
+            f"   Giriş {fp_plain(s.get('el'))} · SL {fp_plain(s.get('sl'))} · TP {fp_plain(s.get('tp'))}\n"
+            f"   R:R 1:{s.get('rr')} · Olasılık %{signal_probability(s):.0f} · {mtf}\n")
+    return "\n".join(lines)
+
+def _cmd_news():
+    with lock: arts = list(analyzed_news)[:5]
+    if not arts:
+        return "📰 <b>HABER YOK</b>\n\nHenüz analiz edilmiş haber yok."
+    lines = ["╔══════════════════════════╗\n║  📰 <b>SON HABERLER</b>  ║\n╚══════════════════════════╝\n"]
+    for a in arts:
+        imp = a.get("importance",0)
+        e = "🔴" if imp>=80 else "🟠" if imp>=60 else "🟡" if imp>=40 else "🔵"
+        bias = a.get("macro",{}).get("bias_tr","Nötr")
+        lines.append(f"{e} <b>{a.get('headline','')[:90]}</b>\n   Etki {imp}/100 · Yön: {bias}\n")
+    return "\n".join(lines)
+
+def _cmd_journal():
+    try:
+        with db() as c:
+            tp = c.execute("SELECT sym,direction,act_rr,out_at FROM signals WHERE status='TP' ORDER BY id DESC LIMIT 5").fetchall()
+            sl = c.execute("SELECT sym,direction,act_rr,out_at FROM signals WHERE status='SL' ORDER BY id DESC LIMIT 5").fetchall()
+    except: tp = sl = []
+    lines = ["╔══════════════════════════╗\n║  📒 <b>SON İŞLEMLER</b>  ║\n╚══════════════════════════╝\n"]
+    lines.append("🎯 <b>Son Kazançlar (TP)</b>")
+    if tp:
+        for r in tp: lines.append(f"   ✅ {r['sym']} {r['direction']} <b>{(r['act_rr'] or 0):+.2f}R</b>")
+    else: lines.append("   — yok")
+    lines.append("\n🛑 <b>Son Kayıplar (SL)</b>")
+    if sl:
+        for r in sl: lines.append(f"   ❌ {r['sym']} {r['direction']} <b>{(r['act_rr'] or 0):+.2f}R</b>")
+    else: lines.append("   — yok")
+    return "\n".join(lines)
+
+def _cmd_stats():
+    with lock: sc = dict(stats_cache)
+    if not sc or sc.get("total",0)==0:
+        return "🏆 <b>İSTATİSTİK YOK</b>\n\nHenüz kapanmış işlem yok."
+    return (
+        f"╔══════════════════════════╗\n"
+        f"║  🏆 <b>PERFORMANS İSTATİSTİĞİ</b>  ║\n"
+        f"╚══════════════════════════╝\n\n"
+        f"🧮 Toplam İşlem : <b>{sc.get('total',0)}</b>\n"
+        f"🎯 Win Rate     : <b>%{sc.get('wr',0):.1f}</b>\n"
+        f"📈 Profit Factor: <b>{sc.get('pf',0):.2f}</b>\n"
+        f"⚖️ Ortalama R   : <b>{sc.get('avg_rr',0):+.2f}R</b>\n"
+        f"📊 Sharpe       : <b>{(sc.get('sharpe') or 0):.2f}</b>\n"
+        f"📉 Max Drawdown : <b>%{sc.get('mdd',0):.1f}</b>\n"
+        f"🃏 Kelly        : <b>%{sc.get('kelly',0):.1f}</b>\n"
+        f"🔥 Seri         : <b>{sc.get('streak',0)} {sc.get('streak_type','')}</b>\n"
+    )
+
+def _cmd_insights():
+    ins = ai_coach_insights()
+    head = "╔══════════════════════════╗\n║  🧠 <b>AI PERFORMANS KOÇU</b>  ║\n╚══════════════════════════╝\n\n"
+    return head + "\n\n".join(f"{i['icon']} {i['text']}" for i in ins[:6])
+
+_TG_COMMANDS = {
+    "dashboard": _cmd_dashboard, "panel": _cmd_dashboard,
+    "trades": _cmd_trades, "islemler": _cmd_trades, "positions": _cmd_trades,
+    "signals": _cmd_signals, "sinyaller": _cmd_signals,
+    "news": _cmd_news, "haberler": _cmd_news,
+    "journal": _cmd_journal,
+    "stats": _cmd_stats, "istatistik": _cmd_stats,
+    "insights": _cmd_insights, "koc": _cmd_insights, "ai": _cmd_insights,
+}
+
+def _tg_handle_command(cmd: str, chat_id):
+    cmd = cmd.lower().lstrip("/").split("@")[0].split()[0] if cmd else ""
+    if cmd in ("start", "menu", "help", ""):
+        txt = (
+            "👋 <b>TITAN PRIME ELITE — Komuta Merkezi</b>\n\n"
+            "Aşağıdaki menüden bir bölüm seç ya da komut yaz:\n\n"
+            "📊 /dashboard — genel panel\n"
+            "📈 /trades — açık işlemler\n"
+            "🎯 /signals — aktif sinyaller\n"
+            "📰 /news — son haberler\n"
+            "📒 /journal — işlem geçmişi\n"
+            "🏆 /stats — istatistikler\n"
+            "🧠 /insights — AI koç önerileri\n"
+        )
+        tg_send_get_id(txt, chat_id=chat_id, reply_markup=json.dumps(_tg_main_menu()))
+        return
+    fn = _TG_COMMANDS.get(cmd)
+    if fn:
+        try: txt = fn()
+        except Exception as e: txt = f"⚠️ Hata: {e}"
+        tg_send_get_id(txt, chat_id=chat_id, reply_markup=json.dumps(_tg_main_menu()))
+    else:
+        tg_send_get_id("❓ Bilinmeyen komut. /menu yazarak menüyü aç.",
+                       chat_id=chat_id, reply_markup=json.dumps(_tg_main_menu()))
+
+def _tg_answer_callback(callback_id):
+    try:
+        requests.post(f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/answerCallbackQuery",
+                      json={"callback_query_id": callback_id}, timeout=6)
+    except: pass
+
+def telegram_command_loop():
+    """getUpdates ile gelen komutları dinler ve yanıtlar (long-polling)."""
+    if not TELEGRAM_TOKEN:
+        return
+    # Başlangıçta birikmiş eski update'leri atla
+    try:
+        r = requests.get(f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/getUpdates",
+                         params={"timeout": 0, "offset": -1}, timeout=10)
+        if r.status_code == 200:
+            res = r.json().get("result", [])
+            if res: _tg_update_offset[0] = res[-1]["update_id"] + 1
+    except: pass
+
+    while True:
+        try:
+            r = requests.get(f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/getUpdates",
+                             params={"timeout": 25, "offset": _tg_update_offset[0]}, timeout=35)
+            if r.status_code != 200:
+                time.sleep(3); continue
+            for upd in r.json().get("result", []):
+                _tg_update_offset[0] = upd["update_id"] + 1
+                # Mesaj komutu
+                msg = upd.get("message") or upd.get("edited_message")
+                if msg and msg.get("text"):
+                    chat_id = msg["chat"]["id"]
+                    _tg_handle_command(msg["text"], chat_id)
+                # Inline buton (callback)
+                cq = upd.get("callback_query")
+                if cq:
+                    _tg_answer_callback(cq.get("id"))
+                    data = cq.get("data", "")
+                    chat_id = cq.get("message", {}).get("chat", {}).get("id") or TELEGRAM_CHAT_ID
+                    _tg_handle_command(data, chat_id)
+        except requests.exceptions.Timeout:
+            continue
+        except Exception:
+            time.sleep(5)
 
 # ═══════════════════════════════════════════════════════════════
 # ANALYSIS
@@ -5183,6 +5724,7 @@ def main():
     threading.Thread(target=auto_scroll_loop,        daemon=True).start()
     threading.Thread(target=portfolio_loop,          daemon=True).start()
     threading.Thread(target=performance_report_loop, daemon=True).start()
+    threading.Thread(target=telegram_command_loop,   daemon=True).start()
     # Açılışta mevcut sinyalleri hemen kontrol et
     try: _check_open()
     except: pass
