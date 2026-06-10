@@ -299,11 +299,9 @@ def active_trades_live():
         rr_live = round(pnl_pts / risk, 2) if risk else 0
         sz = t.get("sizing", {}) or {}
         exp_loss = sz.get("exp_loss", 0) or sz.get("risk_amt", 0) or 0
-        # Fallback: account risk% × balance × rr_live
+        # Fallback: fixed £2 risk per trade
         if not exp_loss:
-            bal = tf.portfolio_state.get("shadow_balance", tf.ACCOUNT.get("balance", 50))
-            risk_pct = tf.ACCOUNT.get("risk_pct", 0.025)
-            exp_loss = round(bal * risk_pct, 2)
+            exp_loss = getattr(tf, "FIXED_RISK_GBP", 2.0)
         pnl_gbp = round(rr_live * exp_loss, 2)
         tp_dist = abs(tp - ep) if (tp and ep) else 1
         prog = max(0, min(100, round(pnl_pts / tp_dist * 100, 1))) if tp_dist else 0
@@ -485,8 +483,7 @@ def merged_active_trades():
             rows = c.execute("SELECT * FROM signals WHERE status='OPEN' ORDER BY id DESC").fetchall()
         with tf.lock:
             snap = dict(tf.market)
-        bal = tf.portfolio_state.get("shadow_balance", tf.ACCOUNT.get("balance", 50))
-        risk_pct = tf.ACCOUNT.get("risk_pct", 0.025)
+        exp_loss_fixed = getattr(tf, "FIXED_RISK_GBP", 2.0)
         def col(r, name, default=None):
             try:
                 return r[name] if name in r.keys() else default
@@ -507,7 +504,7 @@ def merged_active_trades():
             risk = abs(ep - sl) if (ep and sl) else 1
             pnl_pts = (cp - ep) if direction == "LONG" else (ep - cp)
             rr_live = round(pnl_pts / risk, 2) if risk else 0
-            exp_loss = round(bal * risk_pct, 2)
+            exp_loss = exp_loss_fixed
             tp_dist = abs(tp - ep) if (tp and ep) else 1
             prog = max(0, min(100, round(pnl_pts / tp_dist * 100, 1))) if tp_dist else 0
             live.append({

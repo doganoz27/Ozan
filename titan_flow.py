@@ -60,6 +60,13 @@ ACCOUNT = {
     "compounding":    True,
 }
 
+# ── Fixed-risk sizing: risk exactly £2 per trade, target £4 (1:2) ──
+# Position is sized so the loss at SL is exactly FIXED_RISK_GBP; profit at
+# TP = risk × signal R:R (a 1:2 setup → £2 risk / £4 reward). Override via
+# TITAN_RISK_GBP env var.
+FIXED_RISK_GBP   = float(os.getenv("TITAN_RISK_GBP",   "2.0"))
+TARGET_REWARD_RR = float(os.getenv("TITAN_TARGET_RR",  "2.0"))   # 1:2 default
+
 # Trade212 CFD leverage by asset class
 LEVERAGE = {
     "forex":   30,
@@ -2749,9 +2756,9 @@ db_cleanup()
 # ═══════════════════════════════════════════════════════════════
 def calc_sizing(setup):
     """
-    Calculate position sizing for a setup using Trade212 CFD rules.
-    £50 budget is split evenly across MAX_CONCURRENT slots.
-    Returns dict with capital, risk_amount, expected_loss/profit, margin.
+    Fixed-risk sizing (Trade212 CFD): size the position so the loss at SL is
+    exactly FIXED_RISK_GBP (£2). Profit at TP = risk × signal R:R, so a 1:2
+    setup risks £2 to make £4. Same numbers feed the shadow trade.
     """
     sym=setup["sym"]; entry=setup["price"]; sl=setup["sl"]
     rr=setup["rr"]
@@ -2760,31 +2767,27 @@ def calc_sizing(setup):
         bal=portfolio_state["shadow_balance"]
         heat=portfolio_state["heat"]
         open_count=len(active_trades)
-    # Per-trade budget = total_balance / MAX_CONCURRENT slots
-    per_slot = round(bal / MAX_CONCURRENT, 2)
-    remaining_slots = max(1, MAX_CONCURRENT - open_count)
-    # Risk 2% of the per-slot allocation
-    risk_pct=ACCOUNT["risk_pct"]
-    if heat>10: risk_pct=risk_pct*0.5
-    risk_pct=min(risk_pct,ACCOUNT["max_risk_pct"])
-    risk_amt=round(per_slot*risk_pct,2)
-    sl_dist_pct=abs(entry-sl)/entry if entry else 0.01
-    if sl_dist_pct==0: return None
-    # Notional size required to risk exactly risk_amt at SL
-    notional=risk_amt/sl_dist_pct
-    margin=round(notional/lev,2)
-    # Cap margin at 40% of per-slot allocation (not full balance)
-    margin=min(margin,round(per_slot*0.4,2))
-    # Recalculate actual risk at capped margin
-    actual_notional=margin*lev
-    actual_risk=round(actual_notional*sl_dist_pct,2)
-    exp_profit=round(actual_risk*rr,2)
+    sl_dist_pct=abs(entry-sl)/entry if entry else 0
+    if not sl_dist_pct: return None
+
+    # Risk EXACTLY £2 per trade (halve if portfolio is overheated;
+    # never risk more than 50% of a very small balance).
+    risk_amt = FIXED_RISK_GBP
+    if heat > 10:
+        risk_amt = round(risk_amt * 0.5, 2)
+    risk_amt = round(min(risk_amt, bal * 0.5), 2)
+    if risk_amt <= 0: return None
+
+    # Notional required to lose exactly risk_amt at SL; margin = notional/leverage
+    notional = risk_amt / sl_dist_pct
+    margin   = round(notional / lev, 2)
+    exp_profit = round(risk_amt * rr, 2)   # 1:2 → £4
     return {
-        "margin":margin,"notional":round(actual_notional,2),
-        "risk_amt":actual_risk,"leverage":lev,
-        "exp_loss":actual_risk,
+        "margin":margin,"notional":round(notional,2),
+        "risk_amt":risk_amt,"leverage":lev,
+        "exp_loss":risk_amt,
         "exp_profit":exp_profit,
-        "risk_pct":round(actual_risk/bal*100,2),
+        "risk_pct":round(risk_amt/bal*100,2) if bal else 0,
         "asset_class":get_asset_class(sym),
     }
 
