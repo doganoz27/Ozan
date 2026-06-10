@@ -433,17 +433,24 @@ def journal_analytics():
 
         last50 = []
         with tf.db() as c:
+            cols = {r2[1] for r2 in c.execute("PRAGMA table_info(signals)").fetchall()}
+            has_logic = "entry_logic" in cols
             rows50 = c.execute(
-                "SELECT id,sym,quality,direction,status,entry,out_price,act_rr,rr_t,score,created,out_at,narrative "
-                "FROM signals WHERE status IN ('TP','SL') ORDER BY id DESC LIMIT 50"
+                "SELECT * FROM signals WHERE status IN ('TP','SL') ORDER BY id DESC LIMIT 50"
             ).fetchall()
         for r in rows50:
-            narr = r["narrative"] or ""
-            lines = narr.split("\n")
-            pos = [l.strip() for l in lines if l.strip().startswith("+")]
-            neg = [l.strip() for l in lines if l.strip().startswith("-") or "RİSK" in l.upper() or "UYARI" in l.upper()]
-            entry_reason = " | ".join(pos[:2]) if pos else narr[:100]
-            exit_reason = " | ".join(neg[:2]) if neg else ""
+            keys = r.keys()
+            if has_logic and (r["entry_logic"] if "entry_logic" in keys else None):
+                entry_reason = r["entry_logic"]
+                exit_reason = (r["exit_logic"] if "exit_logic" in keys else "") or ""
+            else:
+                # Fallback: parse narrative for older rows
+                narr = (r["narrative"] if "narrative" in keys else "") or ""
+                lines = narr.split("\n")
+                pos = [l.strip() for l in lines if l.strip().startswith("+")]
+                entry_reason = " | ".join(pos[:2]) if pos else narr[:100]
+                exit_reason = ""
+            chart_path = (r["chart_path"] if "chart_path" in keys else None)
             last50.append({
                 "id":r["id"],"sym":r["sym"],"quality":r["quality"],
                 "direction":r["direction"],"status":r["status"],
@@ -451,9 +458,11 @@ def journal_analytics():
                 "act_rr":round(float(r["act_rr"] or 0),2),
                 "rr_t":round(float(r["rr_t"] or 0),2),
                 "score":r["score"] or 0,
-                "date":(r["out_at"] or r["created"] or "")[:10],
-                "entry_reason":entry_reason[:120],
-                "exit_reason":exit_reason[:100],
+                "strategy":(r["strategy"] if "strategy" in keys else None) or "—",
+                "date":(r["out_at"] or r["created"] or "")[:16].replace("T"," "),
+                "entry_reason":(entry_reason or "")[:160],
+                "exit_reason":(exit_reason or "")[:140],
+                "has_chart": bool(chart_path),
             })
         out["last50"] = last50
     except Exception as e:
@@ -702,6 +711,28 @@ def api_journal():
 @app.get("/api/journal/analytics")
 def api_journal_analytics():
     return JSONResponse(journal_analytics())
+
+@app.get("/api/journal/chart/{sig_id}")
+def api_journal_chart(sig_id: int):
+    """Serve the automated chart screenshot captured at trade close."""
+    try:
+        with tf.db() as c:
+            row = c.execute("SELECT chart_path FROM signals WHERE id=?", (sig_id,)).fetchone()
+        path = row["chart_path"] if row else None
+        if path and os.path.exists(path):
+            with open(path, "rb") as f:
+                return Response(content=f.read(), media_type="image/png")
+        # Fallback: regenerate live if the screenshot is missing
+        with tf.db() as c:
+            s = c.execute("SELECT sym,direction,entry,sl,tp FROM signals WHERE id=?", (sig_id,)).fetchone()
+        if s:
+            png = tf._save_trade_chart(sig_id, s["sym"], s["direction"], s["entry"], s["sl"], s["tp"])
+            if png and os.path.exists(png):
+                with open(png, "rb") as f:
+                    return Response(content=f.read(), media_type="image/png")
+    except Exception as e:
+        _log(f"Journal chart hatası #{sig_id}: {e}", "WARN")
+    return JSONResponse({"error": "chart yok"}, status_code=404)
 
 @app.get("/api/analytics")
 def api_analytics():

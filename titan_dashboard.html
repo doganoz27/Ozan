@@ -3,45 +3,109 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Titan Prime Elite — Institutional Trading Terminal</title>
+<title>TITAN_PRIME // RETRO TERMINAL</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@300;400;500;700;800&display=swap" rel="stylesheet">
 <script src="https://cdn.tailwindcss.com"></script>
 <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
+<!-- Motion One — framer-motion-grade animation engine, no build step -->
+<script src="https://cdn.jsdelivr.net/npm/motion@10.18.0/dist/motion.js"></script>
 <script>
 tailwind.config = {
   theme: { extend: { colors: {
-    bg: '#0a0b0e', card: '#111318', border2: '#1e2028',
-    grn: '#00ff88', red: '#ff3b5c', blu: '#3b82f6', ylw: '#f59e0b', prp: '#a855f7',
-    txt: '#e8eaf0', dim: '#6b7280'
-  }, fontFamily: { mono: ['ui-monospace','SFMono-Regular','Menlo','monospace'] } } }
+    // ── Monochrome phosphor-green cyberpunk palette ──
+    bg: '#040806', card: 'rgba(9,20,13,0.55)', border2: 'rgba(255,255,255,0.10)',
+    grn: '#00ff9c', red: '#ff4d6d', blu: '#22d3ee', ylw: '#ffd166', prp: '#7cffb2',
+    txt: '#c8ffe0', dim: '#5e9c78'
+  }, fontFamily: { mono: ['JetBrains Mono','ui-monospace','SFMono-Regular','Menlo','monospace'] } } }
 }
 </script>
 <style>
-  body { background:#0a0b0e; color:#e8eaf0; }
-  ::-webkit-scrollbar { width:8px; height:8px; }
-  ::-webkit-scrollbar-track { background:#0a0b0e; }
-  ::-webkit-scrollbar-thumb { background:#1e2028; border-radius:4px; }
-  .glow-grn { box-shadow:0 0 20px rgba(0,255,136,.15); }
-  .glow-red { box-shadow:0 0 20px rgba(255,59,92,.15); }
-  .fade { animation: fade .4s ease; }
-  @keyframes fade { from{opacity:0;transform:translateY(6px)} to{opacity:1;transform:none} }
-  .pulse-dot { animation: pulse 2s infinite; }
-  @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:.3} }
-  .nav-active { background:linear-gradient(90deg,rgba(59,130,246,.15),transparent); border-left:3px solid #3b82f6; }
-  table { border-collapse:collapse; }
+  :root{ --phos:#00ff9c; --phos-dim:#0c2a1c; }
+  *{ font-family:'JetBrains Mono',ui-monospace,monospace; }
+  html,body{ background:#040806; color:#c8ffe0; }
+  body{ position:relative; }
+
+  /* ── CRT scanline overlay ── */
+  body::before{
+    content:''; position:fixed; inset:0; z-index:9998; pointer-events:none;
+    background:repeating-linear-gradient(0deg,
+      rgba(0,255,156,0.04) 0px, rgba(0,255,156,0.04) 1px,
+      transparent 2px, transparent 4px);
+    mix-blend-mode:overlay;
+  }
+  /* ── CRT flicker + vignette ── */
+  body::after{
+    content:''; position:fixed; inset:0; z-index:9999; pointer-events:none;
+    background:radial-gradient(ellipse at center, transparent 60%, rgba(0,0,0,0.55) 100%);
+    animation:flicker 4.5s infinite steps(60);
+  }
+  @keyframes flicker{
+    0%,100%{opacity:.92} 5%{opacity:.86} 10%{opacity:.95} 15%{opacity:.80}
+    20%{opacity:.93} 50%{opacity:.90} 70%{opacity:.96} 80%{opacity:.84} 90%{opacity:.94}
+  }
+  /* faint moving scan band */
+  .scanbar{ position:fixed; left:0; right:0; height:120px; z-index:9997; pointer-events:none;
+    background:linear-gradient(180deg, transparent, rgba(0,255,156,0.05), transparent);
+    animation:scan 7s linear infinite; }
+  @keyframes scan{ 0%{top:-120px} 100%{top:100%} }
+
+  /* ── Glassmorphism cards (10% white border + blur) ── */
+  .bg-card{ backdrop-filter:blur(14px) saturate(120%); -webkit-backdrop-filter:blur(14px) saturate(120%);
+    box-shadow:inset 0 1px 0 rgba(255,255,255,0.06), 0 8px 40px rgba(0,0,0,0.5); }
+  aside.bg-card{ background:rgba(6,14,9,0.78); }
+
+  /* phosphor text glow on headings & brand */
+  h1,h2,h3,.glow-text{ text-shadow:0 0 8px rgba(0,255,156,0.35); }
+
+  ::-webkit-scrollbar{ width:8px; height:8px; }
+  ::-webkit-scrollbar-track{ background:#040806; }
+  ::-webkit-scrollbar-thumb{ background:rgba(0,255,156,0.25); border-radius:4px; }
+  ::-webkit-scrollbar-thumb:hover{ background:rgba(0,255,156,0.45); }
+  ::selection{ background:rgba(0,255,156,0.3); color:#eafff4; }
+
+  .glow-grn{ box-shadow:0 0 24px rgba(0,255,156,.18), inset 0 0 0 1px rgba(0,255,156,.25); }
+  .glow-red{ box-shadow:0 0 24px rgba(255,77,109,.16), inset 0 0 0 1px rgba(255,77,109,.25); }
+  .fade{ animation:fade .45s cubic-bezier(.2,.7,.2,1); }
+  @keyframes fade{ from{opacity:0;transform:translateY(8px)} to{opacity:1;transform:none} }
+  .pulse-dot{ animation:pulse 2s infinite; }
+  @keyframes pulse{ 0%,100%{opacity:1} 50%{opacity:.25} }
+  .nav-active{ background:linear-gradient(90deg,rgba(0,255,156,.14),transparent); border-left:3px solid #00ff9c;
+    box-shadow:inset 0 0 18px rgba(0,255,156,.06); }
+  .nav-item:hover{ text-shadow:0 0 6px rgba(0,255,156,.4); }
+  table{ border-collapse:collapse; }
+  tbody tr:hover{ background:rgba(0,255,156,0.04); }
+
+  /* Bento grid */
+  .bento{ display:grid; grid-template-columns:repeat(4,1fr); gap:14px; }
+  .bento .b-wide{ grid-column:span 2; }
+  .bento .b-tall{ grid-row:span 2; }
+  @media (max-width:900px){ .bento{ grid-template-columns:repeat(2,1fr); } .bento .b-wide{ grid-column:span 2; } }
+
+  /* badge pill */
+  .badge{ display:inline-flex; align-items:center; gap:6px; padding:3px 10px; border-radius:999px;
+    border:1px solid rgba(255,255,255,0.12); font-weight:700; font-size:11px; }
+
+  /* terminal blink caret */
+  .caret::after{ content:'_'; animation:blink 1.1s steps(1) infinite; color:#00ff9c; }
+  @keyframes blink{ 50%{opacity:0} }
+
   @media (max-width:768px){ aside{transform:translateX(-100%);transition:.3s} aside.open{transform:none} main{margin-left:0!important} .topkpi{display:none} }
-  .ring { transform: rotate(-90deg); }
+  .ring{ transform:rotate(-90deg); }
 </style>
 </head>
 <body class="font-mono text-sm">
+<div class="scanbar"></div>
 
-<button id="menu-btn" class="md:hidden fixed top-3 left-3 z-30 bg-card border border-border2 rounded-lg p-2">☰</button>
+<button id="menu-btn" class="md:hidden fixed top-3 left-3 z-30 bg-card border border-border2 rounded-lg p-2 text-grn">▚</button>
 
 <div class="flex min-h-screen">
   <!-- SIDEBAR -->
   <aside id="sidebar" class="w-56 bg-card border-r border-border2 flex flex-col fixed h-full z-20">
     <div class="p-5 border-b border-border2">
-      <div class="text-grn font-bold text-lg tracking-tight">⬡ TITAN PRIME</div>
-      <div class="text-dim text-xs mt-1">ELITE TERMINAL</div>
+      <div class="text-grn font-bold text-lg tracking-tight glow-text">⬡ TITAN_PRIME</div>
+      <div class="text-dim text-[10px] mt-1 tracking-widest caret">RETRO·TERMINAL·v13</div>
     </div>
     <nav class="flex-1 py-3 overflow-y-auto" id="nav">
       <a data-page="dashboard"   class="nav-item nav-active flex items-center gap-3 px-5 py-2.5 cursor-pointer hover:bg-border2/40 transition">📊 <span>Dashboard</span></a>
@@ -83,6 +147,8 @@ tailwind.config = {
     <div class="p-6">
       <!-- DASHBOARD -->
       <section data-view="dashboard" class="view">
+        <!-- BENTO HERO -->
+        <div class="bento mb-5" id="bento-hero"></div>
         <div class="grid grid-cols-2 md:grid-cols-4 gap-4 mb-5" id="kpi-row"></div>
         <div class="grid grid-cols-1 lg:grid-cols-3 gap-4">
           <div class="lg:col-span-2 bg-card rounded-xl border border-border2 p-5">
@@ -325,8 +391,32 @@ tailwind.config = {
   </main>
 </div>
 
+<!-- TRADE CHART MODAL -->
+<div id="chart-modal" class="hidden fixed inset-0 z-[10000] items-center justify-center bg-black/80 backdrop-blur-sm p-6" onclick="closeTradeChart(event)">
+  <div class="bg-card rounded-2xl border border-border2 p-4 max-w-3xl w-full" onclick="event.stopPropagation()">
+    <div class="flex items-center justify-between mb-3">
+      <h3 class="font-bold text-grn glow-text" id="chart-modal-title">İşlem Grafiği</h3>
+      <button onclick="closeTradeChart()" class="text-dim hover:text-red text-lg px-2">✕</button>
+    </div>
+    <img id="chart-modal-img" src="" alt="grafik yükleniyor…" class="rounded-lg border border-border2 w-full">
+    <div class="text-dim text-[11px] mt-2 text-center">İşlem kapanışında otomatik kaydedilen ekran görüntüsü</div>
+  </div>
+</div>
+
 <script>
 const API = '';
+function showTradeChart(id, sym){
+  const m=document.getElementById('chart-modal');
+  document.getElementById('chart-modal-title').textContent=`📷 ${sym} — #${id}`;
+  const img=document.getElementById('chart-modal-img');
+  img.src=`/api/journal/chart/${id}?t=`+Date.now();
+  img.onerror=()=>{ img.alt='Grafik bulunamadı'; };
+  m.classList.remove('hidden'); m.classList.add('flex');
+}
+function closeTradeChart(e){
+  if(e && e.target && e.target.id!=='chart-modal' && e.type==='click') { /* outside click only */ }
+  const m=document.getElementById('chart-modal'); m.classList.add('hidden'); m.classList.remove('flex');
+}
 let WS = null, lastData = {}, sigFilter = 'ALL', jTab = 'analytics', perfPeriod = 'daily';
 
 const fmt = (v,d=4) => v==null ? '—' : (typeof v==='number' ? v.toFixed(d) : v);
@@ -352,6 +442,7 @@ document.querySelectorAll('.nav-item').forEach(el=>{
     document.querySelectorAll('.view').forEach(v=>v.classList.add('hidden'));
     document.querySelector(`[data-view="${page}"]`).classList.remove('hidden');
     document.getElementById('sidebar').classList.remove('open');
+    animateIn(page);
     if(page==='journal'){ if(jTab==='analytics') loadJournalAnalytics(); else loadJournal(); }
     if(page==='news') loadNews();
     if(page==='performance') loadPerformance();
@@ -390,6 +481,19 @@ function connectWS(){
   WS.onmessage = e=>{ lastData = JSON.parse(e.data); render(); };
 }
 
+// ── Motion One — framer-motion-style entrance (no build step) ──
+const MO = window.Motion || {};
+function animateIn(view){
+  if(!MO.animate) return;
+  const root=document.querySelector(`[data-view="${view}"]`); if(!root) return;
+  const cards=root.querySelectorAll('.bg-card, .bento > div');
+  if(!cards.length) return;
+  try{
+    MO.animate(cards, {opacity:[0,1], y:[12,0]},
+      {duration:0.5, delay: MO.stagger ? MO.stagger(0.045) : 0, easing:[0.2,0.7,0.2,1]});
+  }catch(e){ /* glitch-free fallback: CSS fade already applied */ }
+}
+
 // ── Render ──
 function render(){
   if(!lastData.analytics) return;
@@ -423,8 +527,63 @@ function kpi(label,val,sub,color){
     <div class="text-dim text-xs mt-1">${sub||''}</div></div>`;
 }
 
+function renderBentoHero(){
+  const a=lastData.analytics||{}; const tr=lastData.active_trades||[];
+  const pnl=(a.balance||0)-(a.start_balance||0);
+  const pnlPos=pnl>=0; const wr=a.wr||0;
+  const floatPnl=tr.reduce((x,t)=>x+(t.pnl_gbp||0),0);
+  const el=document.getElementById('bento-hero'); if(!el) return;
+  el.innerHTML=`
+    <!-- PnL badge (wide, tall) -->
+    <div class="bg-card rounded-2xl border border-border2 p-5 b-wide b-tall flex flex-col justify-between ${pnlPos?'glow-grn':'glow-red'}">
+      <div class="flex items-center justify-between">
+        <span class="text-dim text-[11px] tracking-widest">NET_P&L // £</span>
+        <span class="badge ${pnlPos?'text-grn':'text-red'}">${pnlPos?'▲ KÂR':'▼ ZARAR'}</span>
+      </div>
+      <div>
+        <div class="text-5xl font-extrabold ${pnlPos?'text-grn':'text-red'} glow-text">${pnlPos?'+£':'-£'}${Math.abs(pnl).toFixed(2)}</div>
+        <div class="text-dim text-xs mt-2">Bakiye <span class="text-txt font-bold">${money(a.balance)}</span> · Başlangıç £${(a.start_balance||0).toFixed(0)}</div>
+        <div class="text-xs mt-1 ${floatPnl>=0?'text-grn':'text-red'}">Yüzen P&L ${money(floatPnl)} · ${tr.length} açık</div>
+      </div>
+    </div>
+    <!-- Winrate badge -->
+    <div class="bg-card rounded-2xl border border-border2 p-5 flex flex-col justify-between">
+      <span class="text-dim text-[11px] tracking-widest">WIN_RATE</span>
+      <div>
+        <div class="text-4xl font-extrabold ${wr>=55?'text-grn':wr>=45?'text-ylw':'text-red'} glow-text">${wr.toFixed(1)}<span class="text-lg">%</span></div>
+        <div class="h-1.5 bg-border2 rounded mt-2 overflow-hidden"><div class="h-full ${wr>=55?'bg-grn':wr>=45?'bg-ylw':'bg-red'}" style="width:${Math.min(100,wr)}%"></div></div>
+        <div class="text-dim text-[11px] mt-2">${a.wins||0}W / ${a.losses||0}L</div>
+      </div>
+    </div>
+    <!-- Profit Factor -->
+    <div class="bg-card rounded-2xl border border-border2 p-5 flex flex-col justify-between">
+      <span class="text-dim text-[11px] tracking-widest">PROFIT_FACTOR</span>
+      <div>
+        <div class="text-4xl font-extrabold ${(a.pf||0)>=1.5?'text-grn':(a.pf||0)>=1?'text-ylw':'text-red'} glow-text">${(a.pf||0).toFixed(2)}</div>
+        <div class="text-dim text-[11px] mt-2">Sharpe ${(a.sharpe||0).toFixed(2)} · Sortino ${(a.sortino||0).toFixed(2)}</div>
+      </div>
+    </div>
+    <!-- Avg RR -->
+    <div class="bg-card rounded-2xl border border-border2 p-5 flex flex-col justify-between">
+      <span class="text-dim text-[11px] tracking-widest">AVG_R:R</span>
+      <div>
+        <div class="text-4xl font-extrabold ${(a.avg_rr||0)>=0?'text-grn':'text-red'} glow-text">${(a.avg_rr||0)>=0?'+':''}${(a.avg_rr||0).toFixed(2)}<span class="text-lg">R</span></div>
+        <div class="text-dim text-[11px] mt-2">${a.total||0} işlem · Kelly ${(a.kelly||0).toFixed(0)}%</div>
+      </div>
+    </div>
+    <!-- Trades count -->
+    <div class="bg-card rounded-2xl border border-border2 p-5 flex flex-col justify-between">
+      <span class="text-dim text-[11px] tracking-widest">TOPLAM_İŞLEM</span>
+      <div>
+        <div class="text-4xl font-extrabold text-txt glow-text">${a.total||0}</div>
+        <div class="text-dim text-[11px] mt-2">Seri ${a.streak||0} ${a.streak_type||''}</div>
+      </div>
+    </div>`;
+}
+
 function renderDashboard(){
   const a=lastData.analytics;
+  renderBentoHero();
   document.getElementById('kpi-row').innerHTML =
     kpi('Win Rate',(a.wr||0).toFixed(1)+'%',`${a.wins||0}W / ${a.losses||0}L`, a.wr>=55?'text-grn':'text-ylw')+
     kpi('Profit Factor',(a.pf||0).toFixed(2),'kar/zarar oranı', a.pf>=1.5?'text-grn':'text-ylw')+
@@ -737,16 +896,19 @@ async function loadJournalAnalytics(){
     document.getElementById('j-50-count').textContent = `${last50.length} işlem`;
     document.getElementById('j-last50-tbody').innerHTML = last50.length ? last50.map(r=>`
       <tr class="border-t border-border2 hover:bg-border2/20">
-        <td class="p-3 text-dim">${r.date||'—'}</td>
-        <td class="p-3 font-bold">${r.sym}</td>
+        <td class="p-3 text-dim whitespace-nowrap">${r.date||'—'}</td>
+        <td class="p-3 font-bold">${r.sym}<div class="text-[10px] text-dim font-normal">${r.strategy||''}</div></td>
         <td class="p-3 font-bold ${gradeColor(r.quality)}">${r.quality||'—'}</td>
         <td class="p-3">${dirBadge(r.direction)}</td>
         <td class="p-3 text-right">${r.score}</td>
         <td class="p-3 text-right font-bold ${r.act_rr>=0?'text-grn':'text-red'}">${r.act_rr>=0?'+':''}${r.act_rr}R</td>
         <td class="p-3 text-right text-dim">${r.rr_t}R</td>
-        <td class="p-3 text-dim max-w-[200px] truncate" title="${r.entry_reason}">${r.entry_reason||'—'}</td>
-        <td class="p-3 text-dim max-w-[140px] truncate" title="${r.exit_reason}">${r.exit_reason||'—'}</td>
-        <td class="p-3 text-center">${statusBadge(r.status)}</td>
+        <td class="p-3 text-dim max-w-[220px] truncate" title="${(r.entry_reason||'').replace(/"/g,'&quot;')}">${r.entry_reason||'—'}</td>
+        <td class="p-3 text-dim max-w-[160px] truncate" title="${(r.exit_reason||'').replace(/"/g,'&quot;')}">${r.exit_reason||'—'}</td>
+        <td class="p-3 text-center whitespace-nowrap">
+          ${statusBadge(r.status)}
+          ${r.has_chart?`<button onclick="showTradeChart(${r.id},'${r.sym}')" class="ml-1 px-1.5 py-0.5 rounded bg-grn/10 text-grn text-xs hover:bg-grn/20" title="Grafik ekran görüntüsü">📷</button>`:''}
+        </td>
       </tr>`).join('') : emptyRow(10);
 
     // Symbol table
@@ -907,6 +1069,8 @@ setInterval(()=>{document.getElementById('clock').textContent=new Date().toLocal
 
 // ── Boot ──
 connectWS();
+setTimeout(()=>animateIn('dashboard'),350);
+document.addEventListener('keydown',e=>{ if(e.key==='Escape') closeTradeChart(); });
 fetch(API+'/api/snapshot').then(r=>r.json()).then(d=>{lastData={...d,signals:[],active_trades:d.active_trades};
   fetch(API+'/api/signals').then(r=>r.json()).then(s=>{lastData.signals=s;render();});});
 loadJournalAnalytics(); loadNews();

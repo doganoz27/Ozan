@@ -32,11 +32,17 @@ from rich         import box
 # ═══════════════════════════════════════════════════════════════
 # CONFIG
 # ═══════════════════════════════════════════════════════════════
-API_KEY       = "d8ce4jpr01qidic7ibt0d8ce4jpr01qidic7ibtg"
+# ── Secrets — read from environment variables (fall back to literals so the
+#    one-command download-and-run workflow keeps working). Set these in your
+#    shell / .env to override and keep keys out of source control:
+#        FINNHUB_API_KEY, TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID, ANTHROPIC_API_KEY
+API_KEY       = os.getenv("FINNHUB_API_KEY",  "d8ce4jpr01qidic7ibt0d8ce4jpr01qidic7ibtg")
 BASE_URL      = "https://finnhub.io/api/v1"
 WS_URL        = f"wss://ws.finnhub.io?token={API_KEY}"
-DB_PATH       = os.path.join(os.path.expanduser("~"), "titan_journal.db")
-# Claude API key — set via env var ANTHROPIC_API_KEY or paste here
+DB_PATH       = os.getenv("TITAN_DB_PATH", os.path.join(os.path.expanduser("~"), "titan_journal.db"))
+CHART_DIR     = os.getenv("TITAN_CHART_DIR", os.path.join(os.path.expanduser("~"), "titan_charts"))
+os.makedirs(CHART_DIR, exist_ok=True)
+# Claude API key — set via env var ANTHROPIC_API_KEY (kept empty by default = local engine)
 ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY", "")
 
 REFRESH_SEC       = 2
@@ -176,9 +182,10 @@ BEAR_W = ["drop","fall","crash","plunge","decline","selloff","bearish","miss",
           "downgrade","sell","outflow","ban","hack","lawsuit","fine","hawkish",
           "inflation","recession","default","war","tariff","loss","rate hike","risk-off"]
 
-# ── Telegram (CHAT_ID ayarlı — BOT_TOKEN'ı @BotFather'dan al ve buraya yaz) ──
-TELEGRAM_TOKEN   = "7731993816:AAHZ1gRt7xxolBzEA9ptAlGv48igZfIuGL0"
-TELEGRAM_CHAT_ID = "8237226783"
+# ── Telegram — read from env (TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID), with
+#    literal fallback so the bundled app still runs out of the box. ──
+TELEGRAM_TOKEN   = os.getenv("TELEGRAM_BOT_TOKEN", "7731993816:AAHZ1gRt7xxolBzEA9ptAlGv48igZfIuGL0")
+TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID",   "8237226783")
 
 # ── High-impact keyword → base importance score ───────────────────────────────
 HIGH_IMP_KW = {
@@ -583,6 +590,38 @@ def _detect_formation(highs, lows, closes):
         return ("Genişleyen Formasyon", "Artan oynaklık — riskli, kırılım teyidi şart.")
     return ("Trend Devam", "Mevcut trend sürüyor — momentum yönünde işlem.")
 
+
+def _derive_strategy(s) -> str:
+    """Human-readable strategy label for journaling (S/R breakout, S/D zone, pattern…)."""
+    txt = " ".join((s.get("reasons") or [])).upper()
+    fl  = s.get("flags") or {}
+    if fl.get("f_struct") or "KIRILIM" in txt or "BREAKOUT" in txt or "BOS" in txt or "CHOCH" in txt:
+        return "Destek/Direnç Kırılımı"
+    if fl.get("f_ob") or fl.get("f_fvg") or "ARZ" in txt or "TALEP" in txt or "ORDER BLOCK" in txt or "FVG" in txt:
+        return "Arz/Talep Bölgesi"
+    if "FORMASYON" in txt or "PATTERN" in txt or "ÜÇGEN" in txt or "BAYRAK" in txt or "OBEK" in txt:
+        return "Erken Formasyon"
+    if fl.get("f_sweep") or "SWEEP" in txt or "LİKİDİTE" in txt:
+        return "Likidite Süpürmesi"
+    if fl.get("f_ema") or "TREND" in txt or "EMA" in txt:
+        return "Trend Takip"
+    return "Yapısal Kurulum"
+
+def _save_trade_chart(sig_id, sym, direction, entry, sl, tp):
+    """Automated chart screenshot saved to disk at trade close — returns path or None."""
+    if not sig_id:
+        return None
+    try:
+        payload = {"sym": sym, "direction": direction, "price": entry, "sl": sl, "tp": tp}
+        png = _tg_chart_png(payload)
+        if not png:
+            return None
+        path = os.path.join(CHART_DIR, f"trade_{sig_id}.png")
+        with open(path, "wb") as f:
+            f.write(png)
+        return path
+    except Exception:
+        return None
 
 def _build_chart_df(s):
     """Sinyalin kullandığı veriyi DataFrame olarak döner (tutarlılık için)."""
@@ -2640,6 +2679,18 @@ def db_init():
         """)
         for f in ["f_ema","f_rsi","f_macd","f_sweep","f_ob","f_fvg","f_struct","f_cot","f_news"]:
             c.execute("INSERT OR IGNORE INTO weights(feature,mult) VALUES(?,1.0)",(f,))
+        # ── Migration: journaling columns (entry/exit logic, narrative, chart path) ──
+        existing_cols = {r[1] for r in c.execute("PRAGMA table_info(signals)").fetchall()}
+        for col, ddl in [
+            ("narrative",   "ALTER TABLE signals ADD COLUMN narrative TEXT"),
+            ("entry_logic", "ALTER TABLE signals ADD COLUMN entry_logic TEXT"),
+            ("exit_logic",  "ALTER TABLE signals ADD COLUMN exit_logic TEXT"),
+            ("chart_path",  "ALTER TABLE signals ADD COLUMN chart_path TEXT"),
+            ("strategy",    "ALTER TABLE signals ADD COLUMN strategy TEXT"),
+        ]:
+            if col not in existing_cols:
+                try: c.execute(ddl)
+                except Exception: pass
         c.commit()
 
 db_init()
@@ -3857,14 +3908,19 @@ def log_signal(s):
                       (s["score"], s["quality"], s["sl"], s["tp"], s["rr"], sig_id))
             c.commit()
         elif not skip_db:
+            # ── Journaling: capture entry logic + narrative at signal birth ──
+            entry_logic = " · ".join((s.get("reasons") or [])[:6]) or "—"
+            strategy = _derive_strategy(s)
             cur = c.execute("""INSERT INTO signals(sym,quality,direction,entry,sl,tp,
                 rr_t,score,f_ema,f_rsi,f_macd,f_sweep,f_ob,f_fvg,f_struct,f_cot,f_news,
-                status,created) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                status,created,narrative,entry_logic,strategy)
+                VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                 (s["sym"], s["quality"], s["direction"], s["price"], s["sl"],
                  s["tp"], s["rr"], s["score"],
                  fl.get("f_ema",0), fl.get("f_rsi",0), fl.get("f_macd",0), fl.get("f_sweep",0),
                  fl.get("f_ob",0),  fl.get("f_fvg",0),  fl.get("f_struct",0), fl.get("f_cot",0),
-                 fl.get("f_news",0), "OPEN", created))
+                 fl.get("f_news",0), "OPEN", created,
+                 s.get("narrative",""), entry_logic, strategy))
             sig_id = cur.lastrowid
             _last_logged[key] = now
             if sz:
@@ -3989,8 +4045,20 @@ def _check_open():
             except: pass
             if ns:
                 act_rr_val = arr_r if arr_r is not None else (arr or 0)
-                c.execute("UPDATE signals SET status=?,out_price=?,out_at=?,act_rr=? WHERE id=?",
-                          (ns,cur,now,act_rr_val,r["id"]))
+                # ── Journaling: capture exit logic + automated chart screenshot ──
+                if ns == "TP":
+                    exit_logic = f"Take-Profit tetiklendi @ {fp_plain(cur)} — hedef R ({act_rr_val:+.2f}R) gerçekleşti"
+                elif ns == "SL":
+                    missing = [n for f,n in [("f_ema","EMA trend"),("f_struct","yapı kırılımı"),
+                               ("f_sweep","likidite süpürmesi"),("f_ob","order block"),("f_news","haber teyidi")]
+                               if f in r.keys() and not r[f]]
+                    miss_txt = f" — eksik faktörler: {', '.join(missing)}" if missing else ""
+                    exit_logic = f"Stop-Loss tetiklendi @ {fp_plain(cur)} ({act_rr_val:+.2f}R){miss_txt}"
+                else:
+                    exit_logic = f"Süre doldu (7g) @ {fp_plain(cur)} ({act_rr_val:+.2f}R) — pozisyon zaman aşımıyla kapandı"
+                chart_path = _save_trade_chart(r["id"], sym, direction, ep, sl, tp)
+                c.execute("UPDATE signals SET status=?,out_price=?,out_at=?,act_rr=?,exit_logic=?,chart_path=? WHERE id=?",
+                          (ns,cur,now,act_rr_val,exit_logic,chart_path,r["id"]))
                 # Mark as recently closed FIRST — prevents run_analysis re-adding it
                 with _budget_lock:
                     _recently_closed[at_key] = time.time()
