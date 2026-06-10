@@ -2620,7 +2620,7 @@ RECENTLY_CLOSED_TTL = 7200  # 2 hours — matches DEDUP_SEC
 
 # ── £50 Budget Manager ────────────────────────────────────────────────────────
 TRADE_BUDGET      = 50.0    # Total budget to split across trades
-MAX_CONCURRENT    = 3       # Max simultaneous open trades
+MAX_CONCURRENT    = int(os.getenv("TITAN_MAX_TRADES", "6"))   # Max simultaneous open trades
 _budget_lock      = threading.Lock()
 
 # ── Break-even / trade lifecycle state ────────────────────────────────────────
