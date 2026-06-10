@@ -1049,39 +1049,119 @@ function renderMarket(){
   document.getElementById('mkt-tbody').innerHTML=html||'<tr><td colspan="6" class="p-6 text-center text-dim">Piyasa verisi yükleniyor…</td></tr>';
 }
 
+let newsCache = [];
+function toggleNewsDetail(i){
+  const el=document.getElementById('news-detail-'+i);
+  if(!el) return;
+  const open=!el.classList.contains('hidden');
+  document.querySelectorAll('[id^="news-detail-"]').forEach(d=>d.classList.add('hidden'));
+  if(!open){ el.classList.remove('hidden'); el.scrollIntoView({behavior:'smooth',block:'nearest'}); }
+}
+function gucBar(g){
+  return '<span class="text-grn">'+'▮'.repeat(g)+'</span><span class="text-dim">'+'▯'.repeat(5-g)+'</span>';
+}
+function renderNewsDetail(tr, i){
+  if(!tr) return '';
+  const yonClr = tr.yon==='Yükseliş'?'text-grn':tr.yon==='Düşüş'?'text-red':'text-ylw';
+  // Parite etki ızgarası
+  const etkiHtml=(tr.etki||[]).map(e=>{
+    const c=e.ok==='↑'?'text-grn':e.ok==='↓'?'text-red':'text-dim';
+    const bg=e.ok==='↑'?'bg-grn/5 border-grn/20':e.ok==='↓'?'bg-red/5 border-red/20':'bg-border2/20 border-border2';
+    return `<div class="border ${bg} rounded-lg p-3">
+      <div class="flex items-center justify-between mb-1">
+        <span class="font-bold text-xs">${e.pair} <span class="text-dim font-normal">${e.isim}</span></span>
+        <span class="font-bold ${c}">${e.ok} ${e.yon}</span>
+      </div>
+      <div class="flex items-center gap-3 text-[11px] mb-1">
+        <span>Güç: ${gucBar(e.guc)}</span><span class="text-dim">Güven: %${e.guven}</span>
+      </div>
+      <div class="text-[11px] text-dim leading-relaxed">${e.aciklama}</div>
+    </div>`;
+  }).join('');
+  // Geçmiş bloğu
+  let gecmisHtml='';
+  if(tr.gecmis){
+    const mv=(tr.gecmis.hareketler||[]).map(x=>
+      `<span class="px-2 py-0.5 rounded ${x.mv>=0?'bg-grn/15 text-grn':'bg-red/15 text-red'} text-[11px] font-bold">${x.pair} ${x.mv>=0?'+':''}${x.mv}%</span>`).join(' ');
+    gecmisHtml=`<div class="bg-prp/5 border border-prp/20 rounded-lg p-3 mb-3">
+      <div class="text-prp font-bold text-xs mb-2">📜 GEÇMİŞTE NE OLDU? — '${tr.gecmis.tema}' temalı haberler</div>
+      <div class="flex flex-wrap gap-2 mb-2">${mv}</div>
+      <div class="text-[11px] text-dim leading-relaxed">${tr.gecmis.yorum||''}</div>
+    </div>`;
+  }
+  const z=tr.zaman_etkisi||{};
+  return `
+  <div id="news-detail-${i}" class="hidden mt-3 pt-3 border-t border-border2 fade">
+    <div class="bg-border2/20 rounded-lg p-3 mb-3">
+      <div class="font-bold text-xs mb-1">🧠 NE OLDU?</div>
+      <div class="text-xs leading-relaxed">${tr.konu||''}</div>
+      <div class="text-[11px] text-dim mt-2 leading-relaxed">${tr.anlam||''}</div>
+    </div>
+    <div class="flex flex-wrap items-center gap-2 mb-3 text-[11px]">
+      <span class="badge text-dim">${tr.kategori||''}</span>
+      <span class="badge ${yonClr}">Yön: ${tr.yon} (%${tr.guven} güven)</span>
+      <span class="badge text-dim">Etki süresi: ${tr.sure||'—'}</span>
+      <span class="badge text-dim">15dk:${z['15dk']||'—'} · 1s:${z['1saat']||'—'} · 4s:${z['4saat']||'—'} · 24s:${z['24saat']||'—'}</span>
+    </div>
+    <div class="font-bold text-xs mb-2">📊 HANGİ PARİTELER, HANGİ YÖNDE?</div>
+    <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-2 mb-3">${etkiHtml||'<div class="text-dim text-xs">Belirgin parite etkisi yok</div>'}</div>
+    ${gecmisHtml}
+    <div class="bg-grn/5 border border-grn/20 rounded-lg p-3 mb-3">
+      <div class="text-grn font-bold text-xs mb-1">🔮 NE OLABİLİR? (Beklenti)</div>
+      <div class="text-xs leading-relaxed">${tr.beklenti||''}</div>
+    </div>
+    <div class="bg-red/5 border border-red/20 rounded-lg p-3 mb-3">
+      <div class="text-red font-bold text-xs mb-1">⚠️ KARŞI SENARYO</div>
+      <div class="text-xs leading-relaxed">${tr.karsi_senaryo||''}</div>
+    </div>
+    <div class="grid grid-cols-1 md:grid-cols-3 gap-2 mb-3 text-[11px]">
+      <div class="bg-border2/20 rounded-lg p-2"><span class="text-blu font-bold">🏦 Kurumsal:</span> <span class="text-dim">${(tr.psikoloji||{}).kurumsal||''}</span></div>
+      <div class="bg-border2/20 rounded-lg p-2"><span class="text-ylw font-bold">👤 Perakende:</span> <span class="text-dim">${(tr.psikoloji||{}).perakende||''}</span></div>
+      <div class="bg-border2/20 rounded-lg p-2"><span class="text-prp font-bold">🤖 Algoritmik:</span> <span class="text-dim">${(tr.psikoloji||{}).algoritmik||''}</span></div>
+    </div>
+    <div class="bg-blu/5 border border-blu/20 rounded-lg p-3">
+      <div class="text-blu font-bold text-xs mb-1">🏛 SONUÇ — NE YAPMALI?</div>
+      <div class="text-xs leading-relaxed">${tr.sonuc||''}</div>
+    </div>
+  </div>`;
+}
 async function loadNews(){
   try{
+    // Açık Türkçe analiz paneli varsa yenileme — okuma kesilmesin
+    if([...document.querySelectorAll('[id^="news-detail-"]')].some(d=>!d.classList.contains('hidden'))) return;
     const news = await (await fetch(API+'/api/news')).json();
-    document.getElementById('news-list').innerHTML = news.length ? news.map(n=>{
+    newsCache = news;
+    document.getElementById('news-list').innerHTML = news.length ? news.map((n,i)=>{
       const imp = n.importance || 0;
-      const impColor = imp>=80?'#ff3b5c':imp>=60?'#f59e0b':imp>=40?'#3b82f6':'#6b7280';
+      const impColor = imp>=80?'#ff4d6d':imp>=60?'#ffd166':imp>=40?'#22d3ee':'#5e9c78';
       const bar = Math.round(imp/10);
       const barHtml = '█'.repeat(bar) + '░'.repeat(10-bar);
       const biasColor = n.bias_tr==='Yükseliş'?'text-grn':n.bias_tr==='Düşüş'?'text-red':'text-dim';
-      const headlineEl = n.url
-        ? `<a href="${n.url}" target="_blank" class="font-bold hover:text-grn transition">${n.headline}</a>`
-        : `<span class="font-bold">${n.headline}</span>`;
       const impactSyms = Object.entries(n.sym_impacts||{}).slice(0,5)
-        .map(([sym,[dir]])=>`<span class="px-1.5 py-0.5 rounded text-xs ${dir==='↑'?'bg-grn/15 text-grn':'bg-red/15 text-red'}">${sym.replace('USD','').replace('/USD','')} ${dir}</span>`)
+        .map(([sym,v])=>{const dir=Array.isArray(v)?v[0]:v; return `<span class="px-1.5 py-0.5 rounded text-xs ${dir==='↑'?'bg-grn/15 text-grn':'bg-red/15 text-red'}">${sym} ${dir}</span>`;})
         .join(' ');
+      const konu = (n.tr&&n.tr.konu)||'';
       return `
-      <div class="border border-border2 rounded-xl p-4 fade hover:border-border2/80 transition">
+      <div class="border border-border2 rounded-xl p-4 fade hover:border-grn/30 transition cursor-pointer" onclick="toggleNewsDetail(${i})">
         <div class="flex items-start justify-between gap-3 mb-2">
-          <div class="flex-1">${headlineEl}</div>
+          <div class="flex-1">
+            <span class="font-bold">${n.headline}</span>
+            ${konu?`<div class="text-grn text-xs mt-1">${konu}</div>`:''}
+          </div>
           <div class="text-right shrink-0">
             <span class="font-bold text-xs" style="color:${impColor}">${imp}/100</span>
             <div class="text-xs font-mono" style="color:${impColor}">${barHtml}</div>
           </div>
         </div>
-        ${n.summary ? `<div class="text-dim text-xs mb-2 leading-relaxed">${n.summary}</div>` : ''}
-        <div class="flex items-center gap-3 flex-wrap mt-2">
+        <div class="flex items-center gap-3 flex-wrap mt-2" onclick="event.stopPropagation()">
           <span class="text-xs text-dim">📡 ${n.source||'—'}</span>
           <span class="text-xs text-dim">🕐 ${n.age_str||'—'}</span>
           <span class="text-xs px-2 py-0.5 rounded bg-border2 ${biasColor}">${n.bias_tr||'Nötr'}</span>
-          <span class="text-xs bg-border2 px-2 py-0.5 rounded">${n.risk_level||'—'}</span>
           ${impactSyms}
-          ${n.url ? `<a href="${n.url}" target="_blank" class="ml-auto text-xs px-3 py-1 rounded-lg bg-blu/20 text-blu hover:bg-blu/30 transition font-bold">Haberi Oku →</a>` : ''}
+          <button onclick="toggleNewsDetail(${i})" class="text-xs px-3 py-1 rounded-lg bg-grn/15 text-grn hover:bg-grn/25 transition font-bold">🇹🇷 Türkçe Analiz ▾</button>
+          ${n.url ? `<a href="${n.url}" target="_blank" class="ml-auto text-xs px-3 py-1 rounded-lg bg-blu/20 text-blu hover:bg-blu/30 transition font-bold">Kaynak →</a>` : ''}
         </div>
+        ${renderNewsDetail(n.tr, i)}
       </div>`;
     }).join('') : '<div class="text-dim text-xs">Henüz haber yok.</div>';
   }catch(e){ console.error(e); }

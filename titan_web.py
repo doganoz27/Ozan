@@ -294,9 +294,14 @@ def active_trades_live():
         sl = t.get("sl"); tp = t.get("tp"); direction = t.get("direction")
         md = snap.get(sym); cp = (md.price if md and md.price else None) or ep
         ep = ep or 0; sl = sl or 0; tp = tp or 0; cp = cp or ep
-        risk = abs(ep - sl) if (ep and sl) else 1
+        # R/PnL DAİMA orijinal SL'ye göre — BE sonrası sl≈entry olunca risk≈0
+        # olur ve R 50 kat şişerdi (£160 PnL hatası). _orig_sl bunu önler.
+        orig_sl = t.get("_orig_sl") or sl
+        risk = abs(ep - orig_sl) if (ep and orig_sl) else (abs(ep - sl) if (ep and sl) else 1)
+        if not risk: risk = 1
         pnl_pts = (cp - ep) if direction == "LONG" else (ep - cp)
         rr_live = round(pnl_pts / risk, 2) if risk else 0
+        rr_live = max(-3.0, min(15.0, rr_live))   # emniyet kelepçesi
         sz = t.get("sizing", {}) or {}
         exp_loss = sz.get("exp_loss", 0) or sz.get("risk_amt", 0) or 0
         # Fallback: fixed £2 risk per trade
@@ -501,9 +506,24 @@ def merged_active_trades():
             sl = col(r, "sl", 0) or 0
             tp = col(r, "tp", 0) or 0
             md = snap.get(sym); cp = (md.price if md and md.price else None) or ep
-            risk = abs(ep - sl) if (ep and sl) else 1
+            # Orijinal SL'yi shadow_trades'ten al — BE taşınmışsa bile R doğru kalsın
+            orig_sl = sl
+            try:
+                st0 = c2 = None
+                with tf.db() as cc:
+                    c2 = cc.execute(
+                        "SELECT sl FROM shadow_trades WHERE signal_id=? ORDER BY id ASC LIMIT 1",
+                        (col(r, "id", 0),)).fetchone()
+                if c2 and c2["sl"]:
+                    orig_sl = c2["sl"]
+            except Exception:
+                pass
+            be_moved_db = bool(ep and sl and ((sl >= ep) if direction == "LONG" else (sl <= ep)))
+            risk = abs(ep - orig_sl) if (ep and orig_sl) else 1
+            if not risk: risk = 1
             pnl_pts = (cp - ep) if direction == "LONG" else (ep - cp)
             rr_live = round(pnl_pts / risk, 2) if risk else 0
+            rr_live = max(-3.0, min(15.0, rr_live))
             exp_loss = exp_loss_fixed
             tp_dist = abs(tp - ep) if (tp and ep) else 1
             prog = max(0, min(100, round(pnl_pts / tp_dist * 100, 1))) if tp_dist else 0
@@ -514,7 +534,7 @@ def merged_active_trades():
                 "pnl_pct": round(pnl_pts / ep * 100, 3) if ep else 0,
                 "dist_tp": _fp(abs(tp - cp) if (tp and cp) else 0),
                 "dist_sl": _fp(abs(cp - sl) if (sl and cp) else 0),
-                "be_moved": False, "progress": prog, "margin": exp_loss,
+                "be_moved": be_moved_db, "progress": prog, "margin": exp_loss,
                 "exp_loss": exp_loss, "id": col(r, "id", 0), "score": col(r, "score", 0) or 0,
                 "quality": col(r, "quality", "") or "", "_db_only": True,
             })
@@ -621,8 +641,6 @@ def news_data():
     out = []
     for a in arts[:25]:
         m = a.get("macro", {}) or {}
-        impacts = a.get("asset_impacts", {}) or {}
-        ne_anlamaliyiz = a.get("ne_anlamaliyiz", "") or ""
         # Zaman damgası → okunabilir
         ts = a.get("datetime", 0)
         try:
@@ -631,11 +649,16 @@ def news_data():
             elif age_min < 1440: age_str = f"{age_min//60}sa önce"
             else:              age_str = f"{age_min//1440}g önce"
         except: age_str = ""
+        # Tam Türkçe yapılandırılmış analiz (konu/anlam/etki/geçmiş/beklenti/karşı senaryo)
+        try:
+            tr = tf.news_turkish_detail(a)
+        except Exception:
+            tr = None
         out.append({
             "headline":      a.get("headline"),
             "importance":    a.get("importance", 0),
             "risk_level":    a.get("risk_level"),
-            "bias":          m.get("bias_tr"),
+            "bias_tr":       m.get("bias_tr", "Nötr"),
             "bull_pct":      m.get("bull_pct", 0),
             "bear_pct":      m.get("bear_pct", 0),
             "neut_pct":      m.get("neut_pct", 0),
@@ -644,11 +667,11 @@ def news_data():
             "caution":       m.get("caution"),
             "datetime":      ts,
             "age_str":       age_str,
-            "impacts":       impacts,
-            "ne_anlamaliyiz":ne_anlamaliyiz,
+            "sym_impacts":   a.get("sym_impacts", {}) or {},
             "url":           a.get("url",""),
             "source":        a.get("source",""),
             "summary":       (a.get("summary","") or "")[:300],
+            "tr":            tr,
         })
     out.sort(key=lambda x: -x.get("importance", 0))
     return out

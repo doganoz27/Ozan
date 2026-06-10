@@ -2067,19 +2067,12 @@ def _titan_local_analysis(article: dict) -> str:
     sirket_blok = ("\n".join(f"• {c} — habere doğrudan maruz" for c in companies)
                    if companies else "Doğrudan şirket etkisi tespit edilmedi.")
 
-    # ── Piyasa psikolojisi ──
-    if bias_tr == "Yükseliş":
-        kurumsal = "Kurumlar kademeli alım yapabilir, risk iştahı pozisyonları artabilir."
-        perakende = "Perakende FOMO ile geç alım yapma eğiliminde — tepe riski."
-        algo = "Momentum algoları yukarı yönlü tetiklenebilir."
-    elif bias_tr == "Düşüş":
-        kurumsal = "Kurumlar riski azaltır, güvenli liman (altın/yen/CHF) talebi artabilir."
-        perakende = "Perakende panik satışı yapabilir, dip yakalama denemeleri riskli."
-        algo = "Stop-avı ve satış algoları aşağı yönlü hızlandırabilir."
-    else:
-        kurumsal = "Kurumlar büyük ölçüde beklemede — net konum almıyor."
-        perakende = "Perakende kararsız, volatilite tuzağına dikkat."
-        algo = "Algoritmik tepki sınırlı — net tetik yok."
+    # ── HABERE ÖZEL dinamik metinler (sabit şablon yok) ──
+    # Kategori + yön + en güçlü etkilenen varlıklar + geçmiş istatistikler
+    # cümlelere işlenir; varyant başlık hash'inden seçilir.
+    _top = [(a, dd[0]) for a, dd in sorted(ad.items(), key=lambda kv: -(kv[1][1] or 0)) if dd[0] != "→"][:3]
+    beklenti_txt, _gecmis_yorum, karsi, (kurumsal, perakende, algo), sonuc = _dyn_news_texts(
+        cat, bias_tr, imp, conf, _top, hist_key, hist_match, h, m.get("dur", "1h"))
 
     # ── Zaman dilimi ──
     tf15 = m.get("tf15m","—"); tf1h = m.get("tf1h","—")
@@ -2091,25 +2084,10 @@ def _titan_local_analysis(article: dict) -> str:
         hist_blok = f"\n📜 Geçmişte '{hist_key.upper()}' olduğunda:\n"
         for asym, mv in list(hist_match.items())[:4]:
             e = "📈" if mv > 0 else "📉"
-            hist_blok += f"  {e} {asym}: ort. {'+' if mv>0 else ''}{mv:.1f}%\n"
-
-    # ── Karşı senaryo ──
-    if bias_tr == "Yükseliş":
-        karsi = "Haber zaten fiyatlanmış olabilir (buy the rumor, sell the news). Beklenenden zayıf veri gelmesi veya kâr satışı yönü tersine çevirebilir."
-    elif bias_tr == "Düşüş":
-        karsi = "Aşırı satım sonrası teknik tepki gelebilir. Merkez bankası/hükümet müdahalesi veya pozisyon kapatma toparlanma yaratabilir."
-    else:
-        karsi = "Belirsiz görünüm aldatıcı olabilir — gizli bir katalizör tek yöne sert hareket başlatabilir."
-
-    # ── Sonuç ──
-    if derece in ("A+", "A"):
-        sonuc = f"Yüksek öncelikli haber. {bias_tr} yönü {conf}/100 güvenle destekleniyor. Açık pozisyonları gözden geçir, ilgili varlıklarda kurulum ara."
-    elif derece == "B+":
-        sonuc = f"Önemli ama tek başına işlem açtırmaz. {bias_tr} eğilimi izlenmeli, teknik teyit beklenmeli."
-    elif derece == "WATCHLIST":
-        sonuc = "İzleme listesine al. Şu an aksiyon gerektirmiyor, gelişmeleri takip et."
-    else:
-        sonuc = "Düşük etki — piyasalar büyük ihtimalle umursamayacak. Beklemek daha akıllıca."
+            nm = ASSET_TR.get(asym, (asym, asym))[0]
+            hist_blok += f"  {e} {nm}: ort. {'+' if mv>0 else ''}{mv:.1f}%\n"
+        if _gecmis_yorum:
+            hist_blok += f"  <i>{_gecmis_yorum[:200]}</i>\n"
 
     msg = (
         f"━━━━━━━━━━━━━━━━━━━━━━\n"
@@ -2161,6 +2139,11 @@ def _titan_local_analysis(article: dict) -> str:
         f"  4 Saat: {tf4h}\n"
         f"  1 Gün: {tf24h}\n"
         f"{hist_blok}\n"
+
+        f"━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"🔮 <b>BEKLENTİ</b>\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"{beklenti_txt}\n\n"
 
         f"━━━━━━━━━━━━━━━━━━━━━━\n"
         f"⚠️ <b>KARŞI SENARYO</b>\n"
@@ -2423,6 +2406,204 @@ def _macro_analysis(article):
     }
 
 
+# ═══════════════════════════════════════════════════════════════
+# TÜRKÇE HABER İSTİHBARATI — yapılandırılmış detay + habere özel metin
+# ═══════════════════════════════════════════════════════════════
+ASSET_TR = {
+    "XAUUSD": ("XAU/USD", "Altın"),       "BTCUSD": ("BTC/USD", "Bitcoin"),
+    "ETHUSD": ("ETH/USD", "Ethereum"),    "NAS100": ("NASDAQ", "Teknoloji Endeksi"),
+    "SPX500": ("S&P 500", "Hisse Endeksi"),"USOIL":  ("WTI", "Ham Petrol"),
+    "EURUSD": ("EUR/USD", "Euro"),        "GBPUSD": ("GBP/USD", "Sterlin"),
+    "USDJPY": ("USD/JPY", "Dolar/Yen"),   "DXY":    ("DXY", "Dolar Endeksi"),
+}
+
+def _news_kategori(text: str) -> str:
+    if any(w in text for w in ["fed","fomc","ecb","boe","boj","rate","faiz","central bank"]): return "Merkez Bankası / Para Politikası"
+    if any(w in text for w in ["cpi","inflation","pce","enflasyon"]): return "Enflasyon Verisi"
+    if any(w in text for w in ["nfp","payroll","jobs","unemployment","istihdam"]): return "İstihdam Verisi"
+    if any(w in text for w in ["gdp","growth","büyüme"]): return "Büyüme (GSYİH)"
+    if any(w in text for w in ["war","military","strike","attack","savaş","missile","iran","israel"]): return "Jeopolitik / Askeri"
+    if any(w in text for w in ["opec","oil","crude","petrol","brent"]): return "Enerji / Emtia"
+    if any(w in text for w in ["earnings","revenue","eps","bilanço","quarterly"]): return "Şirket / Bilanço"
+    if any(w in text for w in ["tariff","trade war","gümrük","ticaret savaş"]): return "Ticaret / Tarife"
+    if any(w in text for w in ["bitcoin","crypto","ethereum","etf"]): return "Kripto / Dijital Varlık"
+    if any(w in text for w in ["bank","banking","default","credit","debt"]): return "Bankacılık / Kredi"
+    return "Genel Piyasa"
+
+def _dyn_news_texts(cat, bias_tr, imp, conf, top_assets, hist_key, hist_match, headline, dur):
+    """
+    Habere ÖZEL beklenti / karşı senaryo / psikoloji / sonuç metinleri üretir.
+    Sabit şablon yok: kategori + yön + en güçlü etkilenen varlıklar + geçmiş
+    istatistikler + önem skoru cümlelere dokunur; varyant seçimi başlığın
+    hash'inden gelir, böylece her haber farklı ama deterministik metin alır.
+    """
+    h = abs(hash(headline)) if headline else 0
+    dur_tr = {"Multi-day":"birkaç gün","4h":"4 saat","1h":"1 saat","15m":"15 dakika"}.get(dur, "birkaç saat")
+    a_txt = lambda a: f"{ASSET_TR.get(a[0], (a[0],a[0]))[0]} ({'yukarı' if a[1]=='↑' else 'aşağı' if a[1]=='↓' else 'yatay'})"
+    tops = [a_txt(a) for a in top_assets[:3]]
+    top_str = ", ".join(tops) if tops else "ana pariteler"
+    a1 = ASSET_TR.get(top_assets[0][0], (top_assets[0][0],""))[0] if top_assets else "piyasa geneli"
+    a1_yon = ("yükseliş" if top_assets[0][1]=="↑" else "düşüş" if top_assets[0][1]=="↓" else "yatay seyir") if top_assets else "dalgalanma"
+
+    # ── BEKLENTİ (ne olabilir + hangi yönde) ──
+    if bias_tr == "Yükseliş":
+        bek_v = [
+            f"Önümüzdeki {dur_tr} içinde en belirgin tepki {top_str} tarafında beklenir. Risk iştahı arttıkça {a1} üzerindeki {a1_yon} baskısı güçlenebilir; %{conf} güvenle alıcılı seyir öne çıkıyor.",
+            f"Bu gelişme {dur_tr} boyunca fiyatlamada kalabilir. {a1} öncü gösterge olarak izlenmeli — {a1_yon} teyit edilirse {top_str} aynı yönde takip edebilir.",
+            f"Piyasanın ilk tepkisi alım yönlü olmaya aday (%{conf} güven). Özellikle {top_str} pozisyonlanmasında hareketlilik beklenir; ilk {dur_tr} kritik.",
+        ]
+    elif bias_tr == "Düşüş":
+        bek_v = [
+            f"Önümüzdeki {dur_tr} içinde satış baskısının en çok {top_str} üzerinde hissedilmesi beklenir. {a1} {a1_yon} yönünde kırılırsa hareket hızlanabilir (%{conf} güven).",
+            f"Risk-off fiyatlaması {dur_tr} sürebilir. Güvenli liman talebi artarken {top_str} cephesinde sert dalgalanma olasılığı yüksek; stop seviyeleri yakın tutulmalı.",
+            f"İlk tepkide {a1} öncülüğünde aşağı yönlü baskı beklenir (%{conf} güven). {top_str} izleme listesine alınmalı — {dur_tr} içinde yön netleşir.",
+        ]
+    else:
+        bek_v = [
+            f"Yön henüz net değil — piyasa haberi sindirirken {top_str} üzerinde iki yönlü dalgalanma görülebilir. Teyit gelmeden pozisyon büyütmek riskli; {dur_tr} içinde netleşme beklenir.",
+            f"Karışık sinyal: alıcı ve satıcı dengede. {a1} hangi yöne kırarsa kısa vadeli momentum o tarafa döner; ilk {dur_tr} izleme modunda geçirilmeli.",
+            f"Belirsiz etki — önem skoru {imp}/100 ama yön teyidi zayıf. {top_str} üzerinde volatilite artışı muhtemel, trend dönüşü için ek katalizör gerekir.",
+        ]
+    beklenti = bek_v[h % len(bek_v)]
+
+    # ── GEÇMİŞ yorumu (gerçek istatistiklerle) ──
+    gecmis_txt = None
+    if hist_key and hist_match:
+        parts = []
+        for asym, mv in list(hist_match.items())[:4]:
+            nm = ASSET_TR.get(asym, (asym, asym))[0]
+            parts.append(f"{nm} ort. {'+' if mv>0 else ''}{mv:.1f}%")
+        gecmis_txt = (f"Geçmişte '{hist_key}' temalı haberlerin ardından tipik hareketler: "
+                      + ", ".join(parts) + ". Benzer tepkinin tekrarı için ilk saatler belirleyicidir.")
+
+    # ── KARŞI SENARYO (kategoriye ve yöne özel) ──
+    karsi_map = {
+        "Merkez Bankası / Para Politikası": [
+            "Karar zaten fiyatlanmış olabilir — 'sat söylentiyi, al haberi' tersine dönüş riski var. Basın toplantısındaki tek bir cümle yönü çevirebilir.",
+            "Piyasa sözlü yönlendirmeye (forward guidance) karardan daha sert tepki verebilir; ilk hareket yanıltıcı olabilir.",
+        ],
+        "Enflasyon Verisi": [
+            "Çekirdek enflasyon manşetten farklı yöndeyse ilk tepki tersine dönebilir. Revizyonlar ikinci dalga oynaklık yaratabilir.",
+            "Veri tek başına trend değiştirmez — Fed'in tepki fonksiyonu önemli. Beklenti zaten fiyatlandıysa hareket sınırlı kalır.",
+        ],
+        "Jeopolitik / Askeri": [
+            "Gerginlik hızla yatışırsa güvenli liman primi aynı hızla geri verilir — altın ve petrolde sert geri çekilme görülebilir.",
+            "Diplomatik açıklama tek seferde tüm hareketi silebilir; jeopolitik haberlerde fiyat tepkisi genelde abartılı başlar, sonra normalleşir.",
+        ],
+        "Enerji / Emtia": [
+            "Stok verileri veya talep endişesi üretim haberini gölgede bırakabilir — petrol kararın tersine hareket edebilir.",
+            "OPEC kararlarına uyum tarihsel olarak eksik kalır; gerçek arz etkisi haftalar sonra netleşir.",
+        ],
+        "Kripto / Dijital Varlık": [
+            "Kaldıraçlı pozisyonların tasfiyesi (liquidation) haberden bağımsız ters harekete yol açabilir.",
+            "Düzenleyici tek bir açıklama tüm pozitif fiyatlamayı tersine çevirebilir — kripto haber duyarlılığı çift yönlüdür.",
+        ],
+    }
+    karsi_v = karsi_map.get(cat, [
+        "Haber zaten fiyatların içindeyse tepki sönük kalır; ters yönlü pozisyon kapatmaları kısa vadeli sahte hareket yaratabilir.",
+        "Daha büyük bir katalizör (veri/karar) yaklaşıyorsa piyasa bu haberi görmezden gelebilir — teyitsiz işlem açılmamalı.",
+    ])
+    karsi = karsi_v[h % len(karsi_v)]
+
+    # ── PSİKOLOJİ (kategori + varlık dokunuşlu) ──
+    if bias_tr == "Yükseliş":
+        kur_v = [f"Kurumlar {a1} tarafında kademeli alım kurgular; agresif kovalamak yerine geri çekilmeleri bekler.",
+                 f"Akıllı para bu tip haberde önce likidite avlar — {a1} üzerinde ilk sıçramada satıp düşüşte toplama görülebilir."]
+        per_v = ["Perakende FOMO ile geç giriş yapma eğiliminde — tepe alımı riski yüksek.",
+                 "Bireysel yatırımcı haber sonrası ilk yeşil muma atlar; kurumların dağıtım yaptığı bölge olabilir."]
+        alg_v = [f"Momentum algoritmaları {a1} kırılımında yukarı tetiklenebilir; hacim teyidi şart.",
+                 "Haber-okuyan algolar ilk saniyelerde pozisyon aldı bile — geç kalan manuel girişler kayma (slippage) öder."]
+    elif bias_tr == "Düşüş":
+        kur_v = [f"Kurumlar riski azaltır; {a1} üzerinden hedge pozisyonları ve güvenli liman rotasyonu öne çıkar.",
+                 "Akıllı para panik satışın dibinde alıcı olur — kapitülasyon mumu dönüş sinyali olabilir."]
+        per_v = ["Perakende panikle satar veya 'dip yakalama' hevesiyle erken girer — iki uç da tehlikeli.",
+                 "Bireysel taraf stop'ların avlandığı bölgede tasfiye olur; sabırlı olan ikinci dibi bekler."]
+        alg_v = [f"Satış algoritmaları {a1} destek kırılımında hızlanabilir — kademeli stop bölgeleri domino etkisi yaratır.",
+                 "Volatilite hedefli fonlar pozisyon küçültür; bu mekanik satış haberden bağımsız ek baskı üretir."]
+    else:
+        kur_v = ["Kurumlar net pozisyon almıyor — opsiyon piyasasında volatilite alımıyla bekliyorlar."]
+        per_v = ["Perakende kararsız; iki yönlü sahte kırılımlar küçük hesapları törpüler."]
+        alg_v = ["Algoritmik tepki sınırlı — belirgin tetik yok, ortalama-dönüş stratejileri baskın."]
+    psiko = (kur_v[h % len(kur_v)], per_v[h % len(per_v)], alg_v[h % len(alg_v)])
+
+    # ── SONUÇ (önem + varlık + kategoriye özel aksiyon) ──
+    if imp >= 80:
+        son_v = [f"Yüksek öncelik: {cat.lower()} kaynaklı bu gelişme {top_str} üzerinde işlem fırsatı yaratabilir. Açık pozisyonların stop seviyeleri hemen gözden geçirilmeli.",
+                 f"Kritik haber — {a1} başta olmak üzere etkilenen paritelerde kurulum aranmalı; ilk {dur_tr} içinde teyitli giriş planı yapılmalı."]
+    elif imp >= 60:
+        son_v = [f"Önemli ama tek başına işlem açtırmaz: {a1} cephesinde teknik teyit (kırılım/geri test) beklenmeli.",
+                 f"{top_str} izleme listesine alınmalı; {dur_tr} içinde fiyat haberi onaylarsa pozisyon değerlendirilebilir."]
+    elif imp >= 40:
+        son_v = [f"Orta etki — mevcut pozisyonlar için risk değil, ama {a1} kısa vadeli oynaklık gösterebilir.",
+                 "İzlemeye değer; tek başına aksiyon gerektirmiyor, diğer katalizörlerle birleşirse anlam kazanır."]
+    else:
+        son_v = ["Düşük etki — piyasanın gündeminde kalması beklenmiyor. Beklemek en akıllıca seçenek.",
+                 "Gürültü seviyesinde haber; işlem kararlarını etkilememeli."]
+    sonuc = son_v[h % len(son_v)]
+
+    return beklenti, gecmis_txt, karsi, psiko, sonuc
+
+def news_turkish_detail(article: dict) -> dict:
+    """Web paneli için yapılandırılmış TAM TÜRKÇE haber analizi."""
+    h_line  = article.get("headline", "")
+    summary = (article.get("summary", "") or "")[:400]
+    imp     = article.get("importance", 0)
+    m       = article.get("macro", {}) or {}
+    bias_tr = m.get("bias_tr", "Nötr")
+    conf    = m.get("conf", 50)
+    dur     = m.get("dur", "1h")
+    ad      = m.get("asset_dirs", {}) or {}
+    hist_key   = m.get("hist_key")
+    hist_match = m.get("hist_match") or {}
+    text    = (h_line + " " + summary).lower()
+
+    kategori = _news_kategori(text)
+    konu, anlam = _turkce_aciklama(h_line, summary, imp, bias_tr, hist_key)
+
+    # ── Parite etki listesi (yön + güç + güven + açıklama) ──
+    etki = []
+    for asym, (d, strength) in ad.items():
+        pair, isim = ASSET_TR.get(asym, (asym, asym))
+        if d == "→":
+            guc = 0; guven = max(20, 40 - imp // 5)
+        else:
+            guc = max(1, min(5, round(strength) if strength and strength <= 5 else round((strength or 2) / 20) or 2))
+            guven = min(95, conf)
+        exp = _ASSET_IMPACT.get(asym, {}).get(d, "")
+        if not exp:
+            exp = (f"{isim} bu haberle yukarı yönlü baskı altında." if d == "↑"
+                   else f"{isim} bu haberle aşağı yönlü baskı altında." if d == "↓"
+                   else f"{isim} bu haberden belirgin şekilde etkilenmiyor.")
+        etki.append({"pair": pair, "isim": isim,
+                     "yon": "Yükseliş" if d == "↑" else "Düşüş" if d == "↓" else "Nötr",
+                     "ok": d, "guc": guc, "guven": guven, "aciklama": exp[:180]})
+    etki.sort(key=lambda x: -x["guc"])
+
+    top_assets = [(a, dd[0]) for a, dd in sorted(ad.items(), key=lambda kv: -(kv[1][1] or 0)) if dd[0] != "→"][:3]
+    beklenti, gecmis_txt, karsi, psiko, sonuc = _dyn_news_texts(
+        kategori, bias_tr, imp, conf, top_assets, hist_key, hist_match, h_line, dur)
+
+    gecmis = None
+    if hist_key and hist_match:
+        gecmis = {"tema": hist_key.upper(), "yorum": gecmis_txt,
+                  "hareketler": [{"pair": ASSET_TR.get(a, (a, a))[0], "mv": mv}
+                                 for a, mv in list(hist_match.items())[:5]]}
+
+    return {
+        "konu": konu, "anlam": anlam,
+        "kategori": kategori, "yon": bias_tr, "guven": conf,
+        "etki": etki[:9],
+        "gecmis": gecmis,
+        "beklenti": beklenti,
+        "karsi_senaryo": karsi,
+        "psikoloji": {"kurumsal": psiko[0], "perakende": psiko[1], "algoritmik": psiko[2]},
+        "sonuc": sonuc,
+        "sure": {"Multi-day": "Birkaç gün", "4h": "≈4 saat", "1h": "≈1 saat", "15m": "≈15 dk"}.get(dur, dur),
+        "zaman_etkisi": {"15dk": m.get("tf15m", "—"), "1saat": m.get("tf1h", "—"),
+                          "4saat": m.get("tf4h", "—"), "24saat": m.get("tf24h", "—")},
+    }
+
+
 class MD:
     def __init__(self, sym):
         self.sym     = sym
@@ -2556,6 +2737,7 @@ def enter_trade(key):
     if not s: return False
     now=datetime.now()
     active_trades[key]={**s,
+        "_orig_sl":s.get("sl"),   # orijinal SL — BE sonrası R hesabı bozulmasın
         "_trade_entered":now,
         "_trade_status":"OPEN",
         "_trade_entry_price":market.get(s["sym"],MD(s["sym"])).price or s["price"],
@@ -3897,6 +4079,11 @@ def _load_open_to_active():
                         "risk_pct":   round(risk_amt / ACCOUNT["balance"] * 100, 2),
                         "risk_amt":   risk_amt,
                     }
+                # Orijinal SL shadow_trades'ten gelir (BE taşınmış olsa bile sabit)
+                orig_sl = (st["sl"] if st and st["sl"] else None) or r["sl"]
+                ep0 = r["entry"] or 0
+                be_flag = bool(ep0 and r["sl"] and (
+                    (r["sl"] >= ep0) if r["direction"]=="LONG" else (r["sl"] <= ep0)))
                 with lock:
                     if at_key not in active_trades:
                         active_trades[at_key] = {
@@ -3904,11 +4091,14 @@ def _load_open_to_active():
                             "quality": r["quality"], "score": r["score"],
                             "price": r["entry"], "el": r["entry"], "eh": r["entry"],
                             "sl": r["sl"], "tp": r["tp"], "rr": r["rr_t"],
+                            "_orig_sl": orig_sl, "_be_moved": be_flag,
                             "db_id": r["id"], "sizing": sizing,
                             "_trade_entered": datetime.now(),
                             "_trade_status": "OPEN",
                             "_trade_entry_price": r["entry"],
                         }
+                if be_flag:
+                    with _budget_lock: _be_moved[at_key] = True
     except Exception:
         pass
 
@@ -3929,9 +4119,14 @@ def log_signal(s):
 
         if existing:
             sig_id = existing["id"]
-            # Skor iyileştiyse güncelle
-            c.execute("UPDATE signals SET score=?,quality=?,sl=?,tp=?,rr_t=? WHERE id=?",
-                      (s["score"], s["quality"], s["sl"], s["tp"], s["rr"], sig_id))
+            # Skor iyileştiyse güncelle — ama BE'ye çekilmiş SL'yi ASLA geri ezme
+            with _budget_lock: be_locked = _be_moved.get(key, False)
+            if be_locked:
+                c.execute("UPDATE signals SET score=?,quality=?,tp=?,rr_t=? WHERE id=?",
+                          (s["score"], s["quality"], s["tp"], s["rr"], sig_id))
+            else:
+                c.execute("UPDATE signals SET score=?,quality=?,sl=?,tp=?,rr_t=? WHERE id=?",
+                          (s["score"], s["quality"], s["sl"], s["tp"], s["rr"], sig_id))
             c.commit()
         elif not skip_db:
             # ── Journaling: capture entry logic + narrative at signal birth ──
@@ -3982,17 +4177,20 @@ def log_signal(s):
             pass  # Bu sinyal az önce TP/SL oldu — run_analysis tekrar ekleyemez
         elif at_key in active_trades:
             if active_trades[at_key].get("_trade_status") == "OPEN":
-                active_trades[at_key].update({
-                    "score": s["score"], "quality": s["quality"],
-                    "sl": s["sl"], "tp": s["tp"], "rr": s["rr"],
-                    "db_id": sig_id,
-                })
+                upd = {"score": s["score"], "quality": s["quality"],
+                       "tp": s["tp"], "rr": s["rr"], "db_id": sig_id}
+                # SL'yi yalnız BE'ye çekilmemişse güncelle (BE'yi geri alma!)
+                if not active_trades[at_key].get("_be_moved"):
+                    upd["sl"] = s["sl"]
+                active_trades[at_key].update(upd)
+                active_trades[at_key].setdefault("_orig_sl", s["sl"])
         else:
             open_count = len(active_trades)
             if open_count < MAX_CONCURRENT and sig_id and sig_id > 0:
                 active_trades[at_key] = {
                     **s,
                     "db_id": sig_id,
+                    "_orig_sl": s["sl"],   # orijinal SL — R/PnL hep buna göre
                     "_trade_entered": datetime.now(),
                     "_trade_status": "OPEN",
                     "_trade_entry_price": s["price"],
@@ -4028,6 +4226,19 @@ def _check_open():
             if risk==0: continue
             at_key = f"{sym}_{direction}"
 
+            # ── ORİJİNAL risk: shadow_trades ilk SL'yi saklar (BE taşınsa bile).
+            #    R ve PnL hesapları DAİMA orijinal riske göre yapılır — BE sonrası
+            #    risk≈0 olunca R'nin 50 kat şişmesi (örn. £160 PnL) bu şekilde önlenir.
+            orig_sl = sl
+            try:
+                st0 = c.execute("SELECT sl FROM shadow_trades WHERE signal_id=? ORDER BY id ASC LIMIT 1",
+                                (r["id"],)).fetchone()
+                if st0 and st0["sl"]:
+                    orig_sl = st0["sl"]
+            except Exception:
+                pass
+            orig_risk = abs(ep - orig_sl) or risk
+
             # ── BREAK-EVEN: +1R'ye ulaşınca SL'yi girişe çek (risksiz pozisyon) ──
             with _budget_lock: be_done = _be_moved.get(at_key, False)
             # Restart sonrası: SL zaten kâr tarafındaysa BE'yi işaretli say (tekrar uyarma)
@@ -4037,11 +4248,11 @@ def _check_open():
                     with _budget_lock: _be_moved[at_key] = True
                     be_done = True
             if not be_done and ep and sl != ep:
-                # Mevcut kâr (R cinsinden)
-                cur_r = (cur-ep)/risk if direction=="LONG" else (ep-cur)/risk
+                # Mevcut kâr (R cinsinden — orijinal riske göre)
+                cur_r = (cur-ep)/orig_risk if direction=="LONG" else (ep-cur)/orig_risk
                 if cur_r >= BE_TRIGGER_R:
                     # SL'yi girişe çek (çok küçük tampon ile masraf/komisyon koruması)
-                    buf = risk * 0.02
+                    buf = orig_risk * 0.02
                     new_sl = round(ep + buf, 8) if direction=="LONG" else round(ep - buf, 8)
                     c.execute("UPDATE signals SET sl=? WHERE id=?", (new_sl, r["id"]))
                     sl = new_sl  # bu döngüde de yeni SL kullanılsın
@@ -4050,30 +4261,41 @@ def _check_open():
                         if at_key in active_trades:
                             active_trades[at_key]["sl"] = new_sl
                             active_trades[at_key]["_be_moved"] = True
+                            active_trades[at_key].setdefault("_orig_sl", orig_sl)
                     try: tg_breakeven_alert(sym, direction, ep, cur, new_sl, at_key)
                     except: pass
-                    risk = abs(ep - sl) or risk
 
             ns=None; arr=None; arr_r=None
+            # Kapanış R'si HER ZAMAN orijinal riske göre ölçülür:
+            #  - normal SL → ≈ -1.0R (−£2)
+            #  - BE-stop   → ≈  0.0R (≈£0, risksiz kapanış)
+            #  - TP        → ≈ hedef R (1:2'de +2R → +£4)
             if direction=="LONG":
-                if cur<=sl:    ns="SL";  arr_r=-1.0; arr=round(-risk/ep*100,3) if ep else -1.0
-                elif cur>=tp:  ns="TP";  arr_r=round(r["rr_t"] or 1.0,2); arr=round((cur-ep)/ep*100,3) if ep else arr_r
+                if cur<=sl:    ns="SL";  arr_r=round((cur-ep)/orig_risk,2); arr=round((cur-ep)/ep*100,3) if ep else arr_r
+                elif cur>=tp:  ns="TP";  arr_r=round((cur-ep)/orig_risk,2); arr=round((cur-ep)/ep*100,3) if ep else arr_r
             else:
-                if cur>=sl:    ns="SL";  arr_r=-1.0; arr=round(-risk/ep*100,3) if ep else -1.0
-                elif cur<=tp:  ns="TP";  arr_r=round(r["rr_t"] or 1.0,2); arr=round((ep-cur)/ep*100,3) if ep else arr_r
+                if cur>=sl:    ns="SL";  arr_r=round((ep-cur)/orig_risk,2); arr=round((ep-cur)/ep*100,3) if ep else arr_r
+                elif cur<=tp:  ns="TP";  arr_r=round((ep-cur)/orig_risk,2); arr=round((ep-cur)/ep*100,3) if ep else arr_r
+            # Aşırı uç değerlere karşı emniyet (gap/veri hatası): -3R..+15R aralığına kıstır
+            if arr_r is not None:
+                arr_r = max(-3.0, min(15.0, arr_r))
             # Auto-expire after 7 days
             try:
                 age=(datetime.utcnow()-datetime.fromisoformat(r["created"])).days
                 if age>=7 and ns is None:
                     ns="EXPIRED"
-                    arr_r=round((cur-ep)/risk,2) if direction=="LONG" else round((ep-cur)/risk,2)
+                    arr_r=round((cur-ep)/orig_risk,2) if direction=="LONG" else round((ep-cur)/orig_risk,2)
+                    arr_r=max(-3.0, min(15.0, arr_r))
                     arr=arr_r
             except: pass
             if ns:
                 act_rr_val = arr_r if arr_r is not None else (arr or 0)
+                with _budget_lock: was_be = _be_moved.get(at_key, False)
                 # ── Journaling: capture exit logic + automated chart screenshot ──
                 if ns == "TP":
                     exit_logic = f"Take-Profit tetiklendi @ {fp_plain(cur)} — hedef R ({act_rr_val:+.2f}R) gerçekleşti"
+                elif ns == "SL" and was_be and abs(act_rr_val) <= 0.25:
+                    exit_logic = f"Break-even stop @ {fp_plain(cur)} ({act_rr_val:+.2f}R) — SL girişe çekilmişti, pozisyon risksiz kapandı"
                 elif ns == "SL":
                     missing = [n for f,n in [("f_ema","EMA trend"),("f_struct","yapı kırılımı"),
                                ("f_sweep","likidite süpürmesi"),("f_ob","order block"),("f_news","haber teyidi")]
