@@ -474,6 +474,51 @@ def journal_analytics():
         out["error"] = str(e)
     return out
 
+def merged_active_trades():
+    """Single source of truth for open positions: in-memory active_trades
+    merged with any DB OPEN signal that isn't tracked in memory, all with
+    live P&L. Guarantees nothing 'falls through the cracks'."""
+    live = active_trades_live()
+    seen = {f"{t['sym']}_{t['direction']}" for t in live}
+    try:
+        with tf.db() as c:
+            rows = c.execute(
+                "SELECT id,sym,quality,direction,entry,sl,tp,rr_t,score,created "
+                "FROM signals WHERE status='OPEN' ORDER BY id DESC"
+            ).fetchall()
+        with tf.lock:
+            snap = dict(tf.market)
+        bal = tf.portfolio_state.get("shadow_balance", tf.ACCOUNT.get("balance", 50))
+        risk_pct = tf.ACCOUNT.get("risk_pct", 0.025)
+        for r in rows:
+            key = f"{r['sym']}_{r['direction']}"
+            if key in seen:
+                continue
+            seen.add(key)
+            sym = r["sym"]; ep = r["entry"] or 0; sl = r["sl"] or 0; tp = r["tp"] or 0
+            direction = r["direction"]
+            md = snap.get(sym); cp = (md.price if md and md.price else None) or ep
+            risk = abs(ep - sl) if (ep and sl) else 1
+            pnl_pts = (cp - ep) if direction == "LONG" else (ep - cp)
+            rr_live = round(pnl_pts / risk, 2) if risk else 0
+            exp_loss = round(bal * risk_pct, 2)
+            tp_dist = abs(tp - ep) if (tp and ep) else 1
+            prog = max(0, min(100, round(pnl_pts / tp_dist * 100, 1))) if tp_dist else 0
+            live.append({
+                "sym": sym, "direction": direction, "entry": _fp(ep), "current": _fp(cp),
+                "sl": _fp(sl), "tp": _fp(tp), "rr_live": rr_live,
+                "pnl_gbp": round(rr_live * exp_loss, 2),
+                "pnl_pct": round(pnl_pts / ep * 100, 3) if ep else 0,
+                "dist_tp": _fp(abs(tp - cp) if (tp and cp) else 0),
+                "dist_sl": _fp(abs(cp - sl) if (sl and cp) else 0),
+                "be_moved": False, "progress": prog, "margin": exp_loss,
+                "exp_loss": exp_loss, "id": r["id"], "score": r["score"] or 0,
+                "quality": r["quality"] or "", "_db_only": True,
+            })
+    except Exception as e:
+        _log(f"merged_active_trades hata: {e}", "WARN")
+    return live
+
 def journal_data():
     try:
         with tf.db() as c:
@@ -697,7 +742,7 @@ def api_snapshot():
         "market": market_snapshot(),
         "regime": regime_now(),
         "analytics": analytics_data(),
-        "active_trades": active_trades_live(),
+        "active_trades": merged_active_trades(),
         "heatmap": heatmap_data(),
     })
 
@@ -707,7 +752,7 @@ def api_signals():
 
 @app.get("/api/trades")
 def api_trades():
-    return JSONResponse(active_trades_live())
+    return JSONResponse(merged_active_trades())
 
 @app.get("/api/journal")
 def api_journal():
@@ -851,7 +896,7 @@ def _refresh_ws_cache():
                 "market": market_snapshot(),
                 "regime": regime_now(),
                 "signals": live_signals(),
-                "active_trades": active_trades_live(),
+                "active_trades": merged_active_trades(),
                 "analytics": analytics_data(),
                 "heatmap": heatmap_data(),
                 "news": news_data()[:10],
