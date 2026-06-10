@@ -482,21 +482,27 @@ def merged_active_trades():
     seen = {f"{t['sym']}_{t['direction']}" for t in live}
     try:
         with tf.db() as c:
-            rows = c.execute(
-                "SELECT id,sym,quality,direction,entry,sl,tp,rr_t,score,created "
-                "FROM signals WHERE status='OPEN' ORDER BY id DESC"
-            ).fetchall()
+            rows = c.execute("SELECT * FROM signals WHERE status='OPEN' ORDER BY id DESC").fetchall()
         with tf.lock:
             snap = dict(tf.market)
         bal = tf.portfolio_state.get("shadow_balance", tf.ACCOUNT.get("balance", 50))
         risk_pct = tf.ACCOUNT.get("risk_pct", 0.025)
+        def col(r, name, default=None):
+            try:
+                return r[name] if name in r.keys() else default
+            except Exception:
+                return default
         for r in rows:
-            key = f"{r['sym']}_{r['direction']}"
+            sym = col(r, "sym"); direction = col(r, "direction")
+            if not sym or not direction:
+                continue
+            key = f"{sym}_{direction}"
             if key in seen:
                 continue
             seen.add(key)
-            sym = r["sym"]; ep = r["entry"] or 0; sl = r["sl"] or 0; tp = r["tp"] or 0
-            direction = r["direction"]
+            ep = col(r, "entry", 0) or 0
+            sl = col(r, "sl", 0) or 0
+            tp = col(r, "tp", 0) or 0
             md = snap.get(sym); cp = (md.price if md and md.price else None) or ep
             risk = abs(ep - sl) if (ep and sl) else 1
             pnl_pts = (cp - ep) if direction == "LONG" else (ep - cp)
@@ -512,8 +518,8 @@ def merged_active_trades():
                 "dist_tp": _fp(abs(tp - cp) if (tp and cp) else 0),
                 "dist_sl": _fp(abs(cp - sl) if (sl and cp) else 0),
                 "be_moved": False, "progress": prog, "margin": exp_loss,
-                "exp_loss": exp_loss, "id": r["id"], "score": r["score"] or 0,
-                "quality": r["quality"] or "", "_db_only": True,
+                "exp_loss": exp_loss, "id": col(r, "id", 0), "score": col(r, "score", 0) or 0,
+                "quality": col(r, "quality", "") or "", "_db_only": True,
             })
     except Exception as e:
         _log(f"merged_active_trades hata: {e}", "WARN")

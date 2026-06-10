@@ -2679,9 +2679,32 @@ def db_init():
         """)
         for f in ["f_ema","f_rsi","f_macd","f_sweep","f_ob","f_fvg","f_struct","f_cot","f_news"]:
             c.execute("INSERT OR IGNORE INTO weights(feature,mult) VALUES(?,1.0)",(f,))
-        # ── Migration: journaling columns (entry/exit logic, narrative, chart path) ──
+        # ── Migration: ensure every expected column exists (upgrades very old DBs) ──
         existing_cols = {r[1] for r in c.execute("PRAGMA table_info(signals)").fetchall()}
         for col, ddl in [
+            # Core trading columns — only missing on ancient/corrupt schemas
+            ("quality",     "ALTER TABLE signals ADD COLUMN quality TEXT"),
+            ("direction",   "ALTER TABLE signals ADD COLUMN direction TEXT"),
+            ("entry",       "ALTER TABLE signals ADD COLUMN entry REAL"),
+            ("sl",          "ALTER TABLE signals ADD COLUMN sl REAL"),
+            ("tp",          "ALTER TABLE signals ADD COLUMN tp REAL"),
+            ("rr_t",        "ALTER TABLE signals ADD COLUMN rr_t REAL"),
+            ("score",       "ALTER TABLE signals ADD COLUMN score INTEGER"),
+            ("status",      "ALTER TABLE signals ADD COLUMN status TEXT DEFAULT 'OPEN'"),
+            ("out_price",   "ALTER TABLE signals ADD COLUMN out_price REAL"),
+            ("out_at",      "ALTER TABLE signals ADD COLUMN out_at TEXT"),
+            ("act_rr",      "ALTER TABLE signals ADD COLUMN act_rr REAL"),
+            ("created",     "ALTER TABLE signals ADD COLUMN created TEXT"),
+            ("f_ema","ALTER TABLE signals ADD COLUMN f_ema INTEGER DEFAULT 0"),
+            ("f_rsi","ALTER TABLE signals ADD COLUMN f_rsi INTEGER DEFAULT 0"),
+            ("f_macd","ALTER TABLE signals ADD COLUMN f_macd INTEGER DEFAULT 0"),
+            ("f_sweep","ALTER TABLE signals ADD COLUMN f_sweep INTEGER DEFAULT 0"),
+            ("f_ob","ALTER TABLE signals ADD COLUMN f_ob INTEGER DEFAULT 0"),
+            ("f_fvg","ALTER TABLE signals ADD COLUMN f_fvg INTEGER DEFAULT 0"),
+            ("f_struct","ALTER TABLE signals ADD COLUMN f_struct INTEGER DEFAULT 0"),
+            ("f_cot","ALTER TABLE signals ADD COLUMN f_cot INTEGER DEFAULT 0"),
+            ("f_news","ALTER TABLE signals ADD COLUMN f_news INTEGER DEFAULT 0"),
+            # Journaling columns
             ("narrative",   "ALTER TABLE signals ADD COLUMN narrative TEXT"),
             ("entry_logic", "ALTER TABLE signals ADD COLUMN entry_logic TEXT"),
             ("exit_logic",  "ALTER TABLE signals ADD COLUMN exit_logic TEXT"),
