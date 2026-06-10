@@ -298,7 +298,12 @@ def active_trades_live():
         pnl_pts = (cp - ep) if direction == "LONG" else (ep - cp)
         rr_live = round(pnl_pts / risk, 2) if risk else 0
         sz = t.get("sizing", {}) or {}
-        exp_loss = sz.get("exp_loss", 0) or 0
+        exp_loss = sz.get("exp_loss", 0) or sz.get("risk_amt", 0) or 0
+        # Fallback: account risk% × balance × rr_live
+        if not exp_loss:
+            bal = tf.portfolio_state.get("shadow_balance", tf.ACCOUNT.get("balance", 50))
+            risk_pct = tf.ACCOUNT.get("risk_pct", 0.025)
+            exp_loss = round(bal * risk_pct, 2)
         pnl_gbp = round(rr_live * exp_loss, 2)
         tp_dist = abs(tp - ep) if (tp and ep) else 1
         prog = max(0, min(100, round(pnl_pts / tp_dist * 100, 1))) if tp_dist else 0

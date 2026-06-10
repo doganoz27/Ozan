@@ -443,11 +443,13 @@ document.querySelectorAll('.nav-item').forEach(el=>{
     document.querySelector(`[data-view="${page}"]`).classList.remove('hidden');
     document.getElementById('sidebar').classList.remove('open');
     animateIn(page);
-    if(page==='journal'){ if(jTab==='analytics') loadJournalAnalytics(); else loadJournal(); }
-    if(page==='news') loadNews();
+    if(page==='journal')     { if(jTab==='analytics') loadJournalAnalytics(); else loadJournal(); }
+    if(page==='news')        loadNews();
     if(page==='performance') loadPerformance();
-    if(page==='insights') loadInsights();
-    if(page==='system') loadHealth();
+    if(page==='insights')    loadInsights();
+    if(page==='system')      loadHealth();
+    if(page==='trades')      refreshTrades();
+    if(page==='signals')     { fetch(API+'/api/signals').then(r=>r.json()).then(s=>{lastData.signals=s;renderSignals();}).catch(()=>{}); }
     render();
   };
 });
@@ -494,6 +496,11 @@ function animateIn(view){
   }catch(e){ /* glitch-free fallback: CSS fade already applied */ }
 }
 
+// ── Active view helper ──
+function activeView(){
+  return ([...document.querySelectorAll('.view')].find(v=>!v.classList.contains('hidden'))?.dataset.view)||'dashboard';
+}
+
 // ── Render ──
 function render(){
   if(!lastData.analytics) return;
@@ -511,10 +518,10 @@ function render(){
   const errs=h.feed_errors||0; fe.textContent= errs>0? `⚠ ${errs}`:'● Feed OK';
   fe.className='px-3 py-1 rounded-full text-xs '+(errs>0?'bg-ylw/15 text-ylw':'bg-grn/15 text-grn');
 
-  const view=[...document.querySelectorAll('.view')].find(v=>!v.classList.contains('hidden'))?.dataset.view;
+  const view=activeView();
   if(view==='dashboard') renderDashboard();
   else if(view==='signals') renderSignals();
-  else if(view==='trades') renderTrades();
+  else if(view==='trades') renderTrades();   // WS verisiyle anlık güncelle
   else if(view==='analytics') renderAnalytics();
   else if(view==='heatmap') renderHeatmap();
   else if(view==='market') renderMarket();
@@ -632,12 +639,17 @@ function renderDashboard(){
 const FOREX_SYMS = ['EUR/USD','GBP/USD','USD/JPY','USD/CHF','AUD/USD','USD/CAD','NZD/USD','EUR/GBP','EUR/JPY','GBP/JPY','EUR/CHF','AUD/JPY','GBP/CHF'];
 const STOCK_SYMS = ['NVDA','AAPL','SPY','QQQ','MSFT','TSLA','AMZN','META','GOOGL','JPM'];
 const COMM_SYMS  = ['XAU/USD','XAG/USD','WTI','BRENT'];
+// "APPROVED" butonu tıklandığında — sadece status=APPROVED olanları göster
+// Diğer filtreler sembol grubuna göre filtrele, tüm status değerlerini kapsasın
 function renderSignals(){
-  let sigs=lastData.signals||[];
-  if(sigFilter==='FOREX') sigs=sigs.filter(s=>FOREX_SYMS.includes(s.sym));
+  let sigs=(lastData.signals||[]).slice(); // tam kopya
+  if(sigFilter==='APPROVED') sigs=sigs.filter(s=>s.status==='APPROVED');
+  else if(sigFilter==='WATCHLIST') sigs=sigs.filter(s=>s.status==='WATCHLIST');
+  else if(sigFilter==='FOREX')  sigs=sigs.filter(s=>FOREX_SYMS.includes(s.sym));
   else if(sigFilter==='STOCKS') sigs=sigs.filter(s=>STOCK_SYMS.includes(s.sym));
   else if(sigFilter==='COMMODITIES') sigs=sigs.filter(s=>COMM_SYMS.includes(s.sym));
-  else if(sigFilter!=='ALL') sigs=sigs.filter(s=>s.status===sigFilter);
+  // ALL — tümünü göster, skor sıralı
+  sigs.sort((a,b)=>(b.score||0)-(a.score||0));
   document.getElementById('sig-tbody').innerHTML = sigs.length? sigs.map((s,i)=>`
     <tr class="border-t border-border2 hover:bg-border2/30 cursor-pointer" onclick="showDetail(${i})">
       <td class="p-3 font-bold">${s.sym}</td>
@@ -664,11 +676,13 @@ function aiBar(label,val){
 }
 
 function showDetail(i){
-  let sigs=lastData.signals||[];
-  if(sigFilter==='FOREX') sigs=sigs.filter(s=>FOREX_SYMS.includes(s.sym));
+  let sigs=(lastData.signals||[]).slice();
+  if(sigFilter==='APPROVED') sigs=sigs.filter(s=>s.status==='APPROVED');
+  else if(sigFilter==='WATCHLIST') sigs=sigs.filter(s=>s.status==='WATCHLIST');
+  else if(sigFilter==='FOREX')  sigs=sigs.filter(s=>FOREX_SYMS.includes(s.sym));
   else if(sigFilter==='STOCKS') sigs=sigs.filter(s=>STOCK_SYMS.includes(s.sym));
   else if(sigFilter==='COMMODITIES') sigs=sigs.filter(s=>COMM_SYMS.includes(s.sym));
-  else if(sigFilter!=='ALL') sigs=sigs.filter(s=>s.status===sigFilter);
+  sigs.sort((a,b)=>(b.score||0)-(a.score||0));
   const s=sigs[i]; if(!s) return;
   const ai=s.ai_scores||{};
   const aiHtml=Object.keys(ai).map(k=>aiBar(k,ai[k])).join('');
@@ -739,8 +753,42 @@ function showDetail(i){
   document.getElementById('sig-detail').scrollIntoView({behavior:'smooth',block:'nearest'});
 }
 
+// Trades sayfasını API'den de tazele (WS yoksa da çalışsın)
+async function refreshTrades(){
+  try{
+    const ts=await (await fetch(API+'/api/trades')).json();
+    lastData.active_trades=ts;
+  }catch(e){}
+  renderTrades();
+}
 function renderTrades(){
   const tr=lastData.active_trades||[];
+  if(!tr.length){
+    // Hiç aktif işlem yoksa — DB'deki OPEN kayıtları da göster
+    fetch(API+'/api/journal').then(r=>r.json()).then(d=>{
+      const open=d.open||[];
+      document.getElementById('trade-kpi').innerHTML=
+        kpi('Açık Pozisyon',0,'aktif işlem')+kpi('Floating P&L','£0.00','yok')+
+        kpi('Toplam Exposure','£0.00','')+kpi('Hesap Riski','£0.00','');
+      document.getElementById('trades-list').innerHTML=open.length?open.map(r=>`
+        <div class="border border-border2 rounded-lg p-4 fade">
+          <div class="flex items-center justify-between mb-2">
+            <div class="flex items-center gap-3"><span class="font-bold">${r.sym}</span>${dirBadge(r.direction)}
+            <span class="${gradeColor(r.quality)} text-xs font-bold">${r.quality||''}</span>
+            <span class="text-dim text-xs">#${r.id}</span></div>
+            <span class="badge text-dim">DB'de AÇIK</span>
+          </div>
+          <div class="grid grid-cols-4 gap-3 text-xs">
+            <div><div class="text-dim">Giriş</div><div class="font-bold">${fmt(r.entry)}</div></div>
+            <div><div class="text-dim">SL</div><div class="font-bold text-red">${fmt(r.sl)}</div></div>
+            <div><div class="text-dim">TP</div><div class="font-bold text-grn">${fmt(r.tp)}</div></div>
+            <div><div class="text-dim">Skor</div><div class="font-bold">${r.score}</div></div>
+          </div>
+        </div>`).join('')
+        :'<div class="text-dim text-sm p-4">Aktif açık pozisyon yok. Sistem fırsat tarıyor.</div>';
+    }).catch(()=>{ document.getElementById('trades-list').innerHTML='<div class="text-dim text-sm p-4">Veri bekleniyor…</div>'; });
+    return;
+  }
   const totPnl=tr.reduce((a,t)=>a+(t.pnl_gbp||0),0);
   const totMargin=tr.reduce((a,t)=>a+(t.margin||0),0);
   const totRisk=tr.reduce((a,t)=>a+(t.exp_loss||0),0);
@@ -750,30 +798,35 @@ function renderTrades(){
     kpi('Floating P&L',money(totPnl),'toplam yüzen',totPnl>=0?'text-grn':'text-red')+
     kpi('Toplam Exposure',money(totMargin),'kullanılan marj','text-blu')+
     kpi('Hesap Riski',money(totRisk),`%${(totRisk/bal*100||0).toFixed(1)} risk`,'text-ylw');
-  document.getElementById('trades-list').innerHTML = tr.length? tr.map(t=>`
-    <div class="border border-border2 rounded-lg p-4 ${t.pnl_gbp>=0?'glow-grn':'glow-red'} fade">
+  document.getElementById('trades-list').innerHTML=tr.map(t=>{
+    const rr=t.rr_live||0; const pp=t.pnl_gbp||0;
+    return `
+    <div class="border border-border2 rounded-lg p-4 ${pp>=0?'glow-grn':'glow-red'} fade">
       <div class="flex items-center justify-between mb-3 flex-wrap gap-2">
         <div class="flex items-center gap-3"><span class="font-bold text-base">${t.sym}</span>${dirBadge(t.direction)}
         <span class="${gradeColor(t.quality)} text-xs font-bold">${t.quality||''}</span>
-        ${t.be_moved?'<span class="px-2 py-0.5 rounded bg-blu/20 text-blu text-xs font-bold">🛡 BREAK-EVEN</span>':''}
+        ${t.be_moved?'<span class="px-2 py-0.5 rounded bg-blu/20 text-blu text-xs font-bold">🛡 BE</span>':''}
         <span class="text-dim text-xs">#${t.id||'—'}</span></div>
-        <div class="text-right"><div class="font-bold text-lg ${t.pnl_gbp>=0?'text-grn':'text-red'}">${money(t.pnl_gbp)}</div>
-        <div class="text-xs ${t.rr_live>=0?'text-grn':'text-red'}">${(t.rr_live>=0?'+':'')}${t.rr_live}R · ${(t.pnl_pct>=0?'+':'')}${t.pnl_pct}%</div></div>
+        <div class="text-right">
+          <div class="font-bold text-lg ${pp>=0?'text-grn':'text-red'}">${money(pp)}</div>
+          <div class="text-xs ${rr>=0?'text-grn':'text-red'}">${rr>=0?'+':''}${rr}R · ${(t.pnl_pct>=0?'+':'')}${(t.pnl_pct||0).toFixed(3)}%</div>
+        </div>
       </div>
       <div class="grid grid-cols-4 gap-3 text-xs mb-3">
         <div><div class="text-dim">Giriş</div><div class="font-bold">${fmt(t.entry)}</div></div>
         <div><div class="text-dim">Şu an</div><div class="font-bold">${fmt(t.current)}</div></div>
-        <div><div class="text-dim">SL ${t.be_moved?'🛡':''}</div><div class="font-bold text-red">${fmt(t.sl)}</div></div>
+        <div><div class="text-dim">SL${t.be_moved?' 🛡':''}</div><div class="font-bold text-red">${fmt(t.sl)}</div></div>
         <div><div class="text-dim">TP</div><div class="font-bold text-grn">${fmt(t.tp)}</div></div>
       </div>
-      <div class="h-2 bg-border2 rounded overflow-hidden"><div class="h-full ${t.pnl_gbp>=0?'bg-grn':'bg-red'} transition-all" style="width:${Math.abs(t.progress)}%"></div></div>
+      <div class="h-2 bg-border2 rounded overflow-hidden"><div class="h-full ${pp>=0?'bg-grn':'bg-red'} transition-all" style="width:${Math.min(100,Math.abs(t.progress||0))}%"></div></div>
       <div class="flex justify-between flex-wrap gap-x-3 text-xs text-dim mt-1">
-        <span>TP'ye ilerleme: ${t.progress}%</span>
+        <span>İlerleme: ${t.progress||0}%</span>
         <span class="text-grn">TP mesafe: ${fmt(t.dist_tp)}</span>
         <span class="text-red">SL mesafe: ${fmt(t.dist_sl)}</span>
         <span>Marj ${money(t.margin)}</span>
       </div>
-    </div>`).join('') : '<div class="text-dim text-sm">Aktif açık pozisyon yok.</div>';
+    </div>`;
+  }).join('')||'<div class="text-dim text-sm p-4">Yükleniyor…</div>';
 }
 
 async function loadPerformance(){
@@ -1071,14 +1124,44 @@ setInterval(()=>{document.getElementById('clock').textContent=new Date().toLocal
 connectWS();
 setTimeout(()=>animateIn('dashboard'),350);
 document.addEventListener('keydown',e=>{ if(e.key==='Escape') closeTradeChart(); });
-fetch(API+'/api/snapshot').then(r=>r.json()).then(d=>{lastData={...d,signals:[],active_trades:d.active_trades};
-  fetch(API+'/api/signals').then(r=>r.json()).then(s=>{lastData.signals=s;render();});});
-loadJournalAnalytics(); loadNews();
-setInterval(()=>{const v=[...document.querySelectorAll('.view')].find(x=>!x.classList.contains('hidden'))?.dataset.view;
-  if(v==='journal'){ if(jTab==='analytics') loadJournalAnalytics(); else loadJournal(); }
-  if(v==='news')loadNews(); if(v==='performance')loadPerformance();
-  if(v==='insights')loadInsights(); if(v==='system')loadHealth();},8000);
-setInterval(()=>{ if(document.querySelector('[data-view="news"]')&&!document.querySelector('[data-view="news"]').classList.contains('hidden')) loadNews(); }, 60000);
+
+// İlk yükleme — snapshot + sinyaller + işlemler
+fetch(API+'/api/snapshot').then(r=>r.json()).then(d=>{
+  lastData={...d, signals:[], active_trades: d.active_trades||[]};
+  render();
+  // Sinyalleri ayrıca çek — snapshot'ta olmayabilir
+  fetch(API+'/api/signals').then(r=>r.json()).then(s=>{
+    lastData.signals=s; render();
+  }).catch(()=>{});
+  // İşlemleri ayrıca çek
+  fetch(API+'/api/trades').then(r=>r.json()).then(tr=>{
+    lastData.active_trades=tr; render();
+  }).catch(()=>{});
+}).catch(()=>{});
+
+loadNews();
+
+// ── Periyodik yenileme (8s) — aktif sayfaya göre ──
+setInterval(()=>{
+  const v=activeView();
+  // Sinyal + işlem verisi WS üzerinden geliyor ama WS kopuksa fallback
+  if(!WS || WS.readyState!==1){
+    fetch(API+'/api/signals').then(r=>r.json()).then(s=>{lastData.signals=s;if(v==='signals')renderSignals();}).catch(()=>{});
+    fetch(API+'/api/trades').then(r=>r.json()).then(tr=>{lastData.active_trades=tr;if(v==='trades')renderTrades();}).catch(()=>{});
+  }
+  if(v==='trades')   refreshTrades();
+  if(v==='journal')  { if(jTab==='analytics') loadJournalAnalytics(); else loadJournal(); }
+  if(v==='news')     loadNews();
+  if(v==='performance') loadPerformance();
+  if(v==='analytics')   {} // WS ile güncelleniyor
+  if(v==='insights') loadInsights();
+  if(v==='system')   loadHealth();
+}, 8000);
+
+// Performance sayfası — tab geçişinde yüklenmiyorsa 30s'de bir de yenile
+setInterval(()=>{
+  if(activeView()==='performance') loadPerformance();
+}, 30000);
 </script>
 </body>
 </html>
