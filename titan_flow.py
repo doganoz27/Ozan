@@ -3172,8 +3172,9 @@ def historical_var(returns, conf=0.95):
     return round(sorted(returns)[int((1-conf)*len(returns))],4)
 
 def kelly_pct(wr, avg_win, avg_loss):
-    if avg_loss==0: return 0
+    if avg_loss==0 or avg_win==0: return 0
     b=abs(avg_win/avg_loss); p=wr/100; q=1-p
+    if b==0: return 0
     k=(b*p-q)/b
     return round(max(0,min(k*100,25)),1)
 
@@ -4584,12 +4585,15 @@ def compute_stats():
         loss_rr=[abs(r.get("act_rr")) for r in losses if r.get("act_rr")]
         avg_win=round(sum(wins_rr)/len(wins_rr),2) if wins_rr else 0
         avg_loss=round(sum(loss_rr)/len(loss_rr),2) if loss_rr else 1
-        sharpe=sharpe_ratio(trade_rets)
-        sortino=sortino_ratio(trade_rets)
-        mdd=max_drawdown_pct(equity)
-        var95=historical_var(trade_rets)
-        kelly=kelly_pct(wr,avg_win,avg_loss)
-        calmar=round(avg_rr/mdd,2) if mdd>0 else None
+        def _safe(fn, default=None):
+            try: return fn()
+            except Exception: return default
+        sharpe=_safe(lambda: sharpe_ratio(trade_rets))
+        sortino=_safe(lambda: sortino_ratio(trade_rets))
+        mdd=_safe(lambda: max_drawdown_pct(equity), 0)
+        var95=_safe(lambda: historical_var(trade_rets))
+        kelly=_safe(lambda: kelly_pct(wr,avg_win,avg_loss), 0)
+        calmar=_safe(lambda: round(avg_rr/mdd,2) if mdd and mdd>0 else None)
 
         # Monte Carlo
         mc=None
