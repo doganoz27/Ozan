@@ -1500,32 +1500,41 @@ def _turkce_aciklama(headline, summary, imp, bias_tr, hist_key):
     else:
         konu = f"📋 Makroekonomik gelişme — piyasalar etkilenebilir"
 
-    # ── Piyasa anlamı (net, doğrudan) ────────────────────────────────────
-    anlam_parts = []
+    # ── Piyasa anlamı — akıcı, tutarlı paragraf ──────────────────────────
+    h = abs(hash(headline)) if headline else 0
     if bias_tr == "Yükseliş":
-        anlam_parts.append("✅ Bu haber piyasalar için OLUMLU — risk iştahı artıyor, alım baskısı gelebilir")
-        if imp >= 80:
-            anlam_parts.append("🔥 Etki BÜYÜK ve HIZLI olabilir — ani fiyat sıçramaları bekleniyor")
-        elif imp >= 60:
-            anlam_parts.append("📈 Orta-güçlü etki — saatler içinde fiyatlar tepki verecek")
+        ana_v = [
+            "Bu gelişme piyasalar için olumlu okunuyor: risk iştahı artar, sermaye güvenli limanlardan riskli varlıklara doğru kayar ve alım baskısı oluşur.",
+            "Haber piyasa lehine: yatırımcı güveni desteklenir, hisse ve riskli para birimlerine talep artarken güvenli liman varlıkları baskılanabilir.",
+            "Olumlu bir katalizör: fiyatlamada iyimserlik öne çıkar, düşüşler alım fırsatı olarak görülmeye başlanabilir.",
+        ]
     elif bias_tr == "Düşüş":
-        anlam_parts.append("❌ Bu haber piyasalar için OLUMSUZ — satış baskısı ve panik alımlar gelebilir")
-        if imp >= 80:
-            anlam_parts.append("💥 SERT etki bekleniyor — stop seviyeleri kontrol et, pozisyon boyutunu düşür")
-        elif imp >= 60:
-            anlam_parts.append("📉 Risk-off modu — güvenli limanlara (altın, yen, CHF) talep artabilir")
+        ana_v = [
+            "Bu gelişme piyasalar için olumsuz okunuyor: risk iştahı düşer, satış baskısı oluşur ve sermaye altın, yen ve CHF gibi güvenli limanlara yönelebilir.",
+            "Haber piyasa aleyhine: belirsizlik arttıkça yatırımcılar pozisyon küçültür, riskli varlıklarda kâr realizasyonu ve stop tetiklenmeleri hızlanabilir.",
+            "Negatif bir katalizör: ilk tepkide satış dalgası beklenir; panik derinleşirse hareket teknik seviyelerin ötesine taşabilir.",
+        ]
     else:
-        anlam_parts.append("➡️ Etki henüz belirsiz — piyasalar haberi sindiriyor, volatilite artabilir")
+        ana_v = [
+            "Etki şu an iki yönlü: piyasa haberi sindirirken net bir yön oluşmadı, ancak volatilite artışı muhtemel — sahte kırılımlara karşı dikkatli olunmalı.",
+            "Yön belirsiz: alıcılar ve satıcılar dengede, kesin sinyal için ek veri veya teyit gerekiyor. Bu aşamada izlemek pozisyon almaktan daha güvenli.",
+        ]
+    cumleler = [ana_v[h % len(ana_v)]]
+
+    # Şiddet + zaman çerçevesi (önem skoruna göre tek tutarlı cümle)
+    if imp >= 80:
+        cumleler.append("Önem skoru çok yüksek (%d/100): tepki dakikalar içinde ve sert olabilir — açık pozisyonların stop seviyeleri hemen gözden geçirilmeli, pozisyon boyutu küçültülmeli." % imp)
+    elif imp >= 60:
+        cumleler.append("Önem skoru yüksek (%d/100): fiyatların saatler içinde tepki vermesi beklenir — yeni pozisyon açmadan önce bu gelişme mutlaka hesaba katılmalı." % imp)
+    elif imp >= 40:
+        cumleler.append("Orta düzey önem (%d/100): tek başına trend değiştirmez ama mevcut harekete ivme katabilir veya kısa vadeli oynaklık üretebilir." % imp)
+    else:
+        cumleler.append("Düşük önem (%d/100): piyasa genelinde kalıcı iz bırakması beklenmiyor, bilgi amaçlı izlenmeli." % imp)
 
     if hist_key:
-        anlam_parts.append(f"📜 Geçmişte '{hist_key}' haberleri sonrası piyasalarda belirgin hareketler yaşandı")
+        cumleler.append(f"Geçmişte '{hist_key}' temalı benzer haberler sonrası piyasalarda ölçülebilir hareketler yaşandı — aşağıdaki geçmiş analiz bölümü tipik tepkileri gösteriyor.")
 
-    if imp >= 80:
-        anlam_parts.append("🔴 ACİL: Açık pozisyon varsa stop seviyelerini hemen gözden geçir!")
-    elif imp >= 60:
-        anlam_parts.append("🟡 Dikkat: Yeni pozisyon açmadan önce bu gelişmeyi değerlendir")
-
-    return konu, " | ".join(anlam_parts)
+    return konu, " ".join(cumleler)
 
 # Detailed per-asset Turkish impact explanation
 _ASSET_IMPACT = {
@@ -2445,24 +2454,39 @@ def _dyn_news_texts(cat, bias_tr, imp, conf, top_assets, hist_key, hist_match, h
     a1 = ASSET_TR.get(top_assets[0][0], (top_assets[0][0],""))[0] if top_assets else "piyasa geneli"
     a1_yon = ("yükseliş" if top_assets[0][1]=="↑" else "düşüş" if top_assets[0][1]=="↓" else "yatay seyir") if top_assets else "dalgalanma"
 
-    # ── BEKLENTİ (ne olabilir + hangi yönde) ──
+    # ── Kategoriye özel etki mekanizması (beklentiye dokunan tek cümle) ──
+    mekanizma_map = {
+        "Merkez Bankası / Para Politikası": "Faiz patikası değiştikçe tahvil getirileri ve dolar endeksi yeniden fiyatlanır; bu da tüm majör pariteleri zincirleme etkiler.",
+        "Enflasyon Verisi": "Enflasyon sürprizi, merkez bankasının bir sonraki faiz kararına dair beklentileri anında değiştirir — getiri eğrisi ve dolar ilk tepkiyi verir.",
+        "İstihdam Verisi": "Güçlü istihdam ekonomiyi destekler ama faiz indirim umudunu zayıflatır; zayıf veri ise tam tersini yapar — bu yüzden ilk tepki çift katmanlıdır.",
+        "Büyüme (GSYİH)": "Büyüme verisi resesyon/yumuşak iniş tartışmasını besler; beklenti sapması büyükse hisse endeksleri ve döviz aynı anda hareket eder.",
+        "Jeopolitik / Askeri": "Jeopolitik risk arttıkça sermaye altın, petrol ve güvenli liman dövizlerine kaçar; gerilim yatıştıkça bu prim hızla geri verilir.",
+        "Enerji / Emtia": "Arz-talep dengesi değiştikçe petrol fiyatı, oradan enflasyon beklentileri ve emtia para birimleri (CAD, NOK) etkilenir.",
+        "Şirket / Bilanço": "Büyük şirket bilançoları endeks ağırlığı üzerinden sektör ve genel piyasa duyarlılığını şekillendirir.",
+        "Ticaret / Tarife": "Tarife haberleri küresel tedarik zinciri ve büyüme beklentilerini etkiler; ihracatçı ülke para birimleri ve endeksler ilk tepkiyi verir.",
+        "Kripto / Dijital Varlık": "Kripto akışları risk iştahının uç göstergesidir; düzenleyici haber ve ETF akımları fiyatı likidite üzerinden hızla hareket ettirir.",
+        "Bankacılık / Kredi": "Kredi stresi sinyali bankacılık hisselerinden başlayıp finansman koşulları üzerinden tüm piyasaya yayılabilir — sistemik risk fiyatlaması hızlıdır.",
+    }
+    mek = mekanizma_map.get(cat, "Bu tür haberler genel risk iştahı kanalıyla fiyatlara yansır; etki, mevcut piyasa pozisyonlanmasının yönüne göre güçlenir veya sönümlenir.")
+
+    # ── BEKLENTİ (mekanizma + yön + varlık + zaman) ──
     if bias_tr == "Yükseliş":
         bek_v = [
-            f"Önümüzdeki {dur_tr} içinde en belirgin tepki {top_str} tarafında beklenir. Risk iştahı arttıkça {a1} üzerindeki {a1_yon} baskısı güçlenebilir; %{conf} güvenle alıcılı seyir öne çıkıyor.",
-            f"Bu gelişme {dur_tr} boyunca fiyatlamada kalabilir. {a1} öncü gösterge olarak izlenmeli — {a1_yon} teyit edilirse {top_str} aynı yönde takip edebilir.",
-            f"Piyasanın ilk tepkisi alım yönlü olmaya aday (%{conf} güven). Özellikle {top_str} pozisyonlanmasında hareketlilik beklenir; ilk {dur_tr} kritik.",
+            f"{mek} Önümüzdeki {dur_tr} içinde en belirgin tepki {top_str} tarafında beklenir: risk iştahı arttıkça {a1} üzerindeki {a1_yon} baskısı güçlenebilir. Model güveni %{conf} — alıcılı seyir baz senaryo.",
+            f"{mek} Bu fiyatlamanın {dur_tr} boyunca sürmesi muhtemel. {a1} öncü gösterge olarak izlenmeli: {a1_yon} hacimle teyit edilirse {top_str} aynı yönde takip eder. Geri çekilmeler alım bölgesi olarak değerlendirilebilir (%{conf} güven).",
+            f"{mek} İlk tepkinin alım yönlü olması bekleniyor (%{conf} güven). {top_str} pozisyonlanmasında hareketlilik öngörülüyor; ilk {dur_tr} yön açısından belirleyici — bu pencerede momentum oturmazsa hareket sönümlenebilir.",
         ]
     elif bias_tr == "Düşüş":
         bek_v = [
-            f"Önümüzdeki {dur_tr} içinde satış baskısının en çok {top_str} üzerinde hissedilmesi beklenir. {a1} {a1_yon} yönünde kırılırsa hareket hızlanabilir (%{conf} güven).",
-            f"Risk-off fiyatlaması {dur_tr} sürebilir. Güvenli liman talebi artarken {top_str} cephesinde sert dalgalanma olasılığı yüksek; stop seviyeleri yakın tutulmalı.",
-            f"İlk tepkide {a1} öncülüğünde aşağı yönlü baskı beklenir (%{conf} güven). {top_str} izleme listesine alınmalı — {dur_tr} içinde yön netleşir.",
+            f"{mek} Önümüzdeki {dur_tr} içinde satış baskısının en çok {top_str} üzerinde hissedilmesi beklenir. {a1} kritik desteğini {a1_yon} yönünde kırarsa stop tetiklenmeleriyle hareket ivmelenebilir (%{conf} güven).",
+            f"{mek} Risk-off fiyatlaması {dur_tr} sürebilir: güvenli liman talebi artarken {top_str} cephesinde sert dalgalanma olasılığı yüksek. Mevcut pozisyonlarda stop seviyeleri yakına çekilmeli, yeni giriş için teyit beklenmeli.",
+            f"{mek} İlk dalgada {a1} öncülüğünde aşağı yönlü baskı bekleniyor (%{conf} güven). {top_str} izleme listesine alınmalı — ilk {dur_tr} içinde yön netleşir; panik satışın dibi kısa vadeli dönüş fırsatı da üretebilir.",
         ]
     else:
         bek_v = [
-            f"Yön henüz net değil — piyasa haberi sindirirken {top_str} üzerinde iki yönlü dalgalanma görülebilir. Teyit gelmeden pozisyon büyütmek riskli; {dur_tr} içinde netleşme beklenir.",
-            f"Karışık sinyal: alıcı ve satıcı dengede. {a1} hangi yöne kırarsa kısa vadeli momentum o tarafa döner; ilk {dur_tr} izleme modunda geçirilmeli.",
-            f"Belirsiz etki — önem skoru {imp}/100 ama yön teyidi zayıf. {top_str} üzerinde volatilite artışı muhtemel, trend dönüşü için ek katalizör gerekir.",
+            f"{mek} Yön henüz net değil: piyasa haberi sindirirken {top_str} üzerinde iki yönlü dalgalanma görülebilir. Teyit gelmeden pozisyon büyütmek riskli — {dur_tr} içinde tablo netleşene kadar izleme modu önerilir.",
+            f"{mek} Karışık sinyal: alıcı ve satıcı dengede. {a1} hangi yöne hacimle kırarsa kısa vadeli momentum o tarafa döner; ilk {dur_tr} boyunca sahte kırılım riski yüksek, kademeli giriş daha güvenli.",
+            f"{mek} Önem skoru {imp}/100 ancak yön teyidi zayıf — {top_str} üzerinde volatilite artışı muhtemel ama kalıcı trend için ek katalizör (veri, karar, açıklama) gerekiyor.",
         ]
     beklenti = bek_v[h % len(bek_v)]
 
@@ -2497,6 +2521,26 @@ def _dyn_news_texts(cat, bias_tr, imp, conf, top_assets, hist_key, hist_match, h
         "Kripto / Dijital Varlık": [
             "Kaldıraçlı pozisyonların tasfiyesi (liquidation) haberden bağımsız ters harekete yol açabilir.",
             "Düzenleyici tek bir açıklama tüm pozitif fiyatlamayı tersine çevirebilir — kripto haber duyarlılığı çift yönlüdür.",
+        ],
+        "İstihdam Verisi": [
+            "Manşet rakam güçlü görünse de ücret artışı ve katılım oranı zayıfsa piyasa veriyi tam tersi yorumlayabilir — alt kalemler manşetten önemlidir.",
+            "Önceki ayın revizyonu mevcut veriyi gölgede bırakabilir; revize edilmiş seri ters yönde sürpriz içeriyorsa ilk tepki dönebilir.",
+        ],
+        "Büyüme (GSYİH)": [
+            "Geriye dönük bir veri olduğu için piyasa çoğunu fiyatlamış olabilir; ileriye dönük PMI gibi öncü göstergeler ters sinyal veriyorsa hareket kısa ömürlü kalır.",
+            "Zayıf büyüme 'kötü haber = iyi haber' (faiz indirimi umudu) şeklinde de fiyatlanabilir — tepkinin yönü merkez bankası beklentisine bağlıdır.",
+        ],
+        "Ticaret / Tarife": [
+            "Tarife açıklamaları sıkça müzakere taktiğidir; geri adım veya muafiyet haberi tüm hareketi tek seansda silebilir.",
+            "Karşı ülkenin misilleme kararı ikinci dalga oynaklık üretir — ilk fiyatlama eksik kalabilir.",
+        ],
+        "Şirket / Bilanço": [
+            "Kazanç rakamı beklentiyi aşsa bile zayıf ileriye dönük rehberlik (guidance) hisseyi ters yöne çevirebilir — rakamdan çok rehberlik fiyatlanır.",
+            "Tek şirket verisi sektör geneline yanlış genellenebilir; endeks etkisi şirketin ağırlığıyla sınırlıdır.",
+        ],
+        "Bankacılık / Kredi": [
+            "Otorite müdahalesi (mevduat garantisi, likidite penceresi) panik fiyatlamasını saatler içinde tersine çevirebilir.",
+            "Tek bir kurumun sorunu sistemik krize genellenirse aşırı satış oluşur — netleşince sert toparlanma görülebilir.",
         ],
     }
     karsi_v = karsi_map.get(cat, [
