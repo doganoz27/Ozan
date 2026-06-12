@@ -4509,15 +4509,17 @@ def compute_stats():
     with db() as c:
         # Use only signals from last 90 days for relevance
         cutoff=(datetime.utcnow()-__import__('datetime').timedelta(days=90)).isoformat(timespec="seconds")
-        all_closed=c.execute("SELECT * FROM signals WHERE status!='OPEN'").fetchall()
-        closed=[r for r in all_closed if (r["created"] or "")>=cutoff] or all_closed
+        # dict'e çevir — eski DB'de eksik kolon olursa IndexError yerine .get() ile güvenli erişim
+        all_closed=[dict(r) for r in c.execute(
+            "SELECT * FROM signals WHERE status IN ('TP','SL','EXPIRED')").fetchall()]
+        closed=[r for r in all_closed if (r.get("created") or "")>=cutoff] or all_closed
         if not closed: return
         total=len(closed)
         wins=[r for r in closed if r["status"]=="TP"]
         losses=[r for r in closed if r["status"]=="SL"]
         expired=[r for r in closed if r["status"]=="EXPIRED"]
         wr=round(len(wins)/total*100,1)
-        rrs=[r["act_rr"] for r in closed if r["act_rr"] is not None]
+        rrs=[r.get("act_rr") for r in closed if r.get("act_rr") is not None]
         avg_rr=round(sum(rrs)/len(rrs),2) if rrs else 0
         gw=sum(r for r in rrs if r>0); gl=abs(sum(r for r in rrs if r<0))
         pf=round(gw/gl,2) if gl else 99.0
@@ -4525,7 +4527,7 @@ def compute_stats():
         # Quality breakdown
         bq={}
         for q in ("A+","A","B+"):
-            qr=[r for r in closed if r["quality"]==q]
+            qr=[r for r in closed if r.get("quality")==q]
             qw=[r for r in qr if r["status"]=="TP"]
             bq[q]={"t":len(qr),"w":len(qw),"wr":round(len(qw)/len(qr)*100,1) if qr else 0}
 
@@ -4535,7 +4537,7 @@ def compute_stats():
         # Recency-weighted öğrenme: son işlemler 2x ağırlıklı (closed eskiden->yeniye)
         n_closed=len(closed)
         for f in feats:
-            fr=[r for r in closed if r[f]==1]
+            fr=[r for r in closed if r.get(f)==1]
             fw=[r for r in fr if r["status"]=="TP"]
             # Düz win-rate
             fwr=round(len(fw)/len(fr)*100,1) if fr else None
@@ -4560,11 +4562,11 @@ def compute_stats():
         # Best symbols (top 5 by win rate, min 2 trades)
         sym_perf={}
         for r in closed:
-            s=r["sym"]
+            s=r.get("sym","?")
             sym_perf.setdefault(s,{"t":0,"w":0,"rr":[]})
             sym_perf[s]["t"]+=1
             if r["status"]=="TP": sym_perf[s]["w"]+=1
-            if r["act_rr"]: sym_perf[s]["rr"].append(r["act_rr"])
+            if r.get("act_rr"): sym_perf[s]["rr"].append(r["act_rr"])
         for s in sym_perf:
             d=sym_perf[s]
             d["wr"]=round(d["w"]/d["t"]*100,1) if d["t"] else 0
@@ -4575,11 +4577,11 @@ def compute_stats():
         recent=c.execute("SELECT sym,quality,direction,status,act_rr,rr_t,entry,created FROM signals ORDER BY id DESC LIMIT 20").fetchall()
 
         # Quant metrics
-        trade_rets=[r["act_rr"]*0.01 for r in closed if r["act_rr"] is not None]
+        trade_rets=[r.get("act_rr")*0.01 for r in closed if r.get("act_rr") is not None]
         equity=[ACCOUNT["balance"]]
         for rt in trade_rets: equity.append(equity[-1]*(1+rt))
-        wins_rr=[r["act_rr"] for r in wins if r["act_rr"]]
-        loss_rr=[abs(r["act_rr"]) for r in losses if r["act_rr"]]
+        wins_rr=[r.get("act_rr") for r in wins if r.get("act_rr")]
+        loss_rr=[abs(r.get("act_rr")) for r in losses if r.get("act_rr")]
         avg_win=round(sum(wins_rr)/len(wins_rr),2) if wins_rr else 0
         avg_loss=round(sum(loss_rr)/len(loss_rr),2) if loss_rr else 1
         sharpe=sharpe_ratio(trade_rets)
@@ -4648,13 +4650,28 @@ def ai_coach_insights() -> list:
     Örn: 'GBPUSD altından daha iyi performans gösteriyor', 'Londra seansı NY'den üstün'.
     """
     with lock: sc = dict(stats_cache)
-    # İlk açılışta stats_cache boşsa senkron hesapla (max 2s bekle)
+    # İlk açılışta stats_cache boşsa senkron hesapla
+    calc_err = None
     if not sc or sc.get("total", 0) == 0:
         try: compute_stats()
-        except: pass
+        except Exception as e: calc_err = str(e)
         with lock: sc = dict(stats_cache)
     out = []
     total = sc.get("total", 0)
+    # Yedek: istatistik motoru başarısızsa DB'den doğrudan say
+    if total == 0:
+        try:
+            with db() as c:
+                db_total = c.execute(
+                    "SELECT COUNT(*) AS n FROM signals WHERE status IN ('TP','SL','EXPIRED')"
+                ).fetchone()["n"]
+            if db_total > 0:
+                total = db_total
+                out.append({"type":"warn","icon":"🔧",
+                    "text":f"Veritabanında <b>{db_total} kapanmış işlem</b> var ama istatistik motoru "
+                           f"henüz işleyemedi{(' (hata: ' + calc_err + ')') if calc_err else ''}. "
+                           f"Birkaç saniye sonra sayfayı yenile — sorun sürerse sistem loglarına bak."})
+        except: pass
 
     # ── SL mesafesi analizi (DB'den) ─────────────────────────────────────
     try:
