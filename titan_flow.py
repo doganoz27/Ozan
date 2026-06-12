@@ -3191,30 +3191,29 @@ def swing_highs(candles, lb=5):
 def structural_sl(candles, direction, price, av):
     """
     SL based on market structure (swing high/low) + ATR buffer.
-    Not random — placed beyond the nearest significant swing level.
+    Capped at 1.5×ATR to prevent wide stops that over-expose the trade.
     """
     if len(candles)<20 or not av: return None
     recent=candles[-40:]
+    MAX_ATR_MULT = 1.5   # hard cap — tighter SL, smaller risk per pip
     if direction=="LONG":
         sl_levels=swing_lows(recent,lb=3)
-        # Use the highest swing low below current price
         candidates=[s for s in sl_levels if s < price - av*0.1]
         if candidates:
             swing=max(candidates)
-            sl=swing - av*0.25      # buffer below swing low
+            sl=swing - av*0.2      # tight buffer below swing low
         else:
-            sl=price - av*2.0       # fallback: 2 ATR
-        # Don't let SL be more than 3 ATR away (over-exposed)
-        sl=max(sl, price - av*3.0)
+            sl=price - av*1.2      # fallback: 1.2 ATR
+        sl=max(sl, price - av*MAX_ATR_MULT)
     else:
         sl_levels=swing_highs(recent,lb=3)
         candidates=[s for s in sl_levels if s > price + av*0.1]
         if candidates:
             swing=min(candidates)
-            sl=swing + av*0.25
+            sl=swing + av*0.2
         else:
-            sl=price + av*2.0
-        sl=min(sl, price + av*3.0)
+            sl=price + av*1.2
+        sl=min(sl, price + av*MAX_ATR_MULT)
     return round(sl, 8)
 
 def structural_tp(candles, direction, price, sl, min_rr=1.8):
@@ -4345,7 +4344,35 @@ def _check_open():
                 # Trigger adaptive learning immediately after each close
                 try: compute_stats()
                 except: pass
+                # Extra adaptive nudge on SL: downweight factors present in this losing trade
+                if ns == "SL" and not was_be:
+                    try:
+                        _adapt_on_sl(r)
+                    except: pass
         c.commit()
+
+def _adapt_on_sl(db_row):
+    """SL kapanışta aktif faktörlerin ağırlığını anında hafifçe düşür (hızlı negatif geri bildirim)."""
+    feats = ["f_ema","f_rsi","f_macd","f_sweep","f_ob","f_fvg","f_struct","f_cot","f_news"]
+    decay = 0.08   # her SL'de aktif faktör %8 düşer (min 0.3)
+    updates = {}
+    for f in feats:
+        try:
+            if db_row[f] == 1:
+                cur = adap_weights.get(f, 1.0)
+                nw = round(max(0.3, cur - decay), 3)
+                adap_weights[f] = nw
+                updates[f] = nw
+        except: pass
+    if updates:
+        try:
+            with db() as c:
+                for f, nw in updates.items():
+                    c.execute("UPDATE weights SET mult=?,updated=? WHERE feature=?",
+                              (nw, datetime.utcnow().isoformat(timespec="seconds"), f))
+                c.commit()
+        except: pass
+
 
 def _post_trade_analysis(sym, direction, status, entry, out_price, act_rr, db_row):
     """Detaylı trade sonrası kendini analiz et + Telegram'a gönder."""
@@ -4577,11 +4604,58 @@ def ai_coach_insights() -> list:
     Örn: 'GBPUSD altından daha iyi performans gösteriyor', 'Londra seansı NY'den üstün'.
     """
     with lock: sc = dict(stats_cache)
+    # İlk açılışta stats_cache boşsa senkron hesapla (max 2s bekle)
+    if not sc or sc.get("total", 0) == 0:
+        try: compute_stats()
+        except: pass
+        with lock: sc = dict(stats_cache)
     out = []
     total = sc.get("total", 0)
+
+    # ── SL mesafesi analizi (DB'den) ─────────────────────────────────────
+    try:
+        with db() as c:
+            sl_rows = c.execute(
+                "SELECT sym, entry, sl, tp, status, act_rr FROM signals "
+                "WHERE status IN ('SL','TP') AND entry IS NOT NULL AND sl IS NOT NULL "
+                "ORDER BY id DESC LIMIT 100"
+            ).fetchall()
+        if sl_rows:
+            sl_pcts = []          # SL distance as % of entry
+            wide_sl_count = 0
+            total_sl_hits = 0
+            for r in sl_rows:
+                try:
+                    ep = float(r["entry"]); sl_v = float(r["sl"])
+                    if ep > 0:
+                        dist_pct = abs(ep - sl_v) / ep * 100
+                        sl_pcts.append((dist_pct, r["status"]))
+                        if r["status"] == "SL":
+                            total_sl_hits += 1
+                        # Wide: >0.5% of price (covers forex pips and gold)
+                        if dist_pct > 0.5:
+                            wide_sl_count += 1
+                except: pass
+            if sl_pcts:
+                avg_pct = round(sum(p for p,_ in sl_pcts) / len(sl_pcts), 3)
+                wide_ratio = round(wide_sl_count / len(sl_pcts) * 100, 0)
+                sl_hit_rate = round(total_sl_hits / len(sl_pcts) * 100, 0)
+                if wide_ratio >= 40:
+                    out.append({"type":"warn","icon":"📏",
+                        "text":f"<b>Stop mesafeleri çok geniş!</b> Son {len(sl_pcts)} işlemin "
+                               f"{wide_ratio:.0f}%'inde SL giriş fiyatının 0.5%+ uzağında. "
+                               f"Ortalama SL uzaklığı <b>%{avg_pct:.3f}</b>. "
+                               f"Stop oranı: {sl_hit_rate:.0f}%. Sistem SL kaplarını daraltıyor."})
+                elif sl_hit_rate >= 55:
+                    out.append({"type":"warn","icon":"🎯",
+                        "text":f"Stop oranı <b>{sl_hit_rate:.0f}%</b> — işlemlerin yarısından fazlası SL'e çarpıyor. "
+                               f"Sadece en net (A+/A) setup'larda işlem aç."})
+    except: pass
+
     if total < 5:
-        return [{"type":"info","icon":"🌱",
-                 "text":f"Henüz {total} işlem var. Anlamlı koçluk için en az 5 işlem gerekiyor — sistem öğrenmeye devam ediyor."}]
+        out.append({"type":"info","icon":"🌱",
+                    "text":f"Henüz {total} işlem var. Anlamlı koçluk için en az 5 işlem gerekiyor — sistem öğrenmeye devam ediyor."})
+        return out
 
     # ── Sembol karşılaştırması (en iyi vs en kötü) ──
     sym_perf = sc.get("sym_perf", {})
@@ -4639,6 +4713,15 @@ def ai_coach_insights() -> list:
                 "text":f"En güçlü faktörün <b>{fnames.get(bf[0],bf[0])}</b> "
                        f"(%{bf[1]['wr']:.0f} WR, {bf[1]['n']} işlem). Bu faktör olan setupları öncele."})
 
+    # ── En zayıf faktör ──
+    if valid_f:
+        wf = min(valid_f, key=lambda x: x[1]["wr"])
+        if wf[1]["wr"] <= 40 and wf[1]["n"] >= 3:
+            out.append({"type":"warn","icon":"🔻",
+                "text":f"En zayıf faktörün <b>{fnames.get(wf[0],wf[0])}</b> "
+                       f"(%{wf[1]['wr']:.0f} WR, {wf[1]['n']} işlem). "
+                       f"Sistem bu faktörün ağırlığını düşürüyor — bu faktöre güvenme."})
+
     # ── Streak uyarısı ──
     streak = sc.get("streak", 0); st_type = sc.get("streak_type", "")
     if st_type == "SL" and streak >= 3:
@@ -4649,6 +4732,21 @@ def ai_coach_insights() -> list:
         out.append({"type":"edge","icon":"🔥",
             "text":f"<b>{streak} ardışık kazanç</b>! Momentum iyi ama aşırı güvene kapılma — "
                    f"risk yönetimini aynı tut."})
+
+    # ── Adaptif öğrenme durumu ──
+    if adap_weights:
+        boosted = [(f, w) for f, w in adap_weights.items() if w >= 1.4]
+        penalized = [(f, w) for f, w in adap_weights.items() if w <= 0.6]
+        wnames = {"f_ema":"EMA","f_rsi":"RSI","f_macd":"MACD","f_sweep":"Sweep",
+                  "f_ob":"OB","f_fvg":"FVG","f_struct":"Yapı","f_cot":"COT","f_news":"Haber"}
+        parts = []
+        if boosted:
+            parts.append("Güçlü: " + ", ".join(f"{wnames.get(f,f)} ({w:.2f})" for f,w in boosted[:3]))
+        if penalized:
+            parts.append("Zayıf: " + ", ".join(f"{wnames.get(f,f)} ({w:.2f})" for f,w in penalized[:3]))
+        if parts:
+            out.append({"type":"session","icon":"🤖",
+                "text":f"Adaptif Öğrenme aktif ({total} işlemden öğrenildi). " + " | ".join(parts)})
 
     if not out:
         out.append({"type":"info","icon":"📊",
