@@ -1,0 +1,82 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600;700&display=swap');
+
+:root {
+  --bg: #0a0b0e;
+  --card: #111318;
+  --border: #1e2028;
+  --accent-green: #00ff88;
+  --accent-red: #ff3b5c;
+  --accent-blue: #3b82f6;
+  --accent-yellow: #f59e0b;
+  --text-primary: #e8eaf0;
+  --text-dim: #6b7280;
+}
+
+* {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+}
+
+html, body {
+  background-color: var(--bg);
+  color: var(--text-primary);
+  font-family: 'Inter', system-ui, sans-serif;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+/* Scrollbar */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+::-webkit-scrollbar-track {
+  background: var(--bg);
+}
+::-webkit-scrollbar-thumb {
+  background: #2a2d35;
+  border-radius: 3px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: #363940;
+}
+
+/* Selection */
+::selection {
+  background-color: rgba(59, 130, 246, 0.3);
+  color: var(--text-primary);
+}
+
+/* Custom utilities */
+.glow-green {
+  box-shadow: 0 0 20px rgba(0, 255, 136, 0.15);
+}
+.glow-red {
+  box-shadow: 0 0 20px rgba(255, 59, 92, 0.15);
+}
+.glow-blue {
+  box-shadow: 0 0 20px rgba(59, 130, 246, 0.15);
+}
+
+/* Animated price update */
+@keyframes priceFlash {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.6; }
+}
+.price-flash {
+  animation: priceFlash 0.5s ease-in-out;
+}
+
+/* Table styles */
+table {
+  border-collapse: collapse;
+}
+
+pre {
+  font-family: 'JetBrains Mono', monospace;
+}
