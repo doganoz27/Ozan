@@ -17,7 +17,7 @@ tailwind.config = {
     // ── Monochrome phosphor-green cyberpunk palette ──
     bg: '#040806', card: 'rgba(9,20,13,0.55)', border2: 'rgba(255,255,255,0.10)',
     grn: '#00ff9c', red: '#ff4d6d', blu: '#22d3ee', ylw: '#ffd166', prp: '#7cffb2',
-    txt: '#c8ffe0', dim: '#5e9c78'
+    cyn: '#38e8ff', txt: '#c8ffe0', dim: '#5e9c78'
   }, fontFamily: { mono: ['JetBrains Mono','ui-monospace','SFMono-Regular','Menlo','monospace'] } } }
 }
 </script>
@@ -739,6 +739,19 @@ function showDetail(i){
     ${s.story?`<div class="mt-4 bg-prp/5 border border-prp/30 rounded-lg p-4">
       <div class="font-bold text-xs mb-2 text-prp">📖 PİYASA HİKAYESİ — ne oldu · ne oluyor · sırada ne var · neden</div>
       <div class="text-sm text-dim leading-relaxed">${s.story}</div>
+    </div>`:''}
+    ${(s.chart_read&&s.chart_read.length)?`<div class="mt-4 bg-cyn/5 border border-cyn/30 rounded-lg p-4">
+      <div class="font-bold text-xs mb-3 text-cyn">📊 PROFESYONEL GRAFİK OKUMA — kurumsal teknik analiz</div>
+      <div class="grid grid-cols-1 md:grid-cols-2 gap-x-6">
+        ${s.chart_read.map(l=>`<div class="text-xs text-dim mb-1 leading-relaxed">${l}</div>`).join('')}
+      </div>
+      ${s.chart_data?`<div class="grid grid-cols-3 md:grid-cols-6 gap-2 mt-3">
+        ${s.chart_data.adx!=null?`<div class="bg-border2/30 rounded p-2 text-center"><div class="text-dim text-[10px]">ADX</div><div class="font-bold text-sm ${s.chart_data.adx>=25?'text-grn':'text-dim'}">${s.chart_data.adx}</div></div>`:''}
+        ${s.chart_data.stoch_k!=null?`<div class="bg-border2/30 rounded p-2 text-center"><div class="text-dim text-[10px]">Stoch %K</div><div class="font-bold text-sm">${s.chart_data.stoch_k}</div></div>`:''}
+        ${s.chart_data.cci!=null?`<div class="bg-border2/30 rounded p-2 text-center"><div class="text-dim text-[10px]">CCI</div><div class="font-bold text-sm">${s.chart_data.cci}</div></div>`:''}
+        ${s.chart_data.divergence?`<div class="bg-border2/30 rounded p-2 text-center"><div class="text-dim text-[10px]">Divergence</div><div class="font-bold text-sm ${s.chart_data.divergence==='BULL'?'text-grn':'text-red'}">${s.chart_data.divergence}</div></div>`:''}
+        ${s.chart_data.chart_pattern?`<div class="bg-border2/30 rounded p-2 text-center col-span-2"><div class="text-dim text-[10px]">Formasyon</div><div class="font-bold text-xs text-prp">${s.chart_data.chart_pattern}</div></div>`:''}
+      </div>`:''}
     </div>`:''}
     ${s.replay?`<div class="mt-4 bg-blu/5 border border-blu/30 rounded-lg p-4">
       <div class="font-bold text-xs mb-3 text-blu">🔁 GEÇMİŞ KARŞILAŞTIRMA — "${s.setup_type||''}" kurulumu</div>

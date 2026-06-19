@@ -275,6 +275,8 @@ def _signal_to_dict(s):
         "in_session": s.get("in_session"), "counter_trend_veto": s.get("counter_trend_veto"),
         "timing_label": s.get("timing_label"), "timing_bonus": s.get("timing_bonus"),
         "late_entry": s.get("late_entry"),
+        "chart_read": s.get("chart_read", []), "chart_data": s.get("chart_data", {}),
+        "chart_bonus": s.get("chart_bonus"),
         "margin": sz.get("margin"), "exp_loss": sz.get("exp_loss"),
         "exp_profit": sz.get("exp_profit"), "leverage": sz.get("leverage"),
         "risk_pct": sz.get("risk_pct"), "notional": sz.get("notional"),

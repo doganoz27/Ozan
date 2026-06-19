@@ -3710,6 +3710,247 @@ def _market_story(sym, direction, price, sw, bOB, beOB, bFVG, st, regime_tech,
     return " ".join(parts)
 
 
+# ═══════════════════════════════════════════════════════════════
+# PROFESYONEL TEKNİK ANALİZ & GRAFİK OKUMA MOTORU
+# Kurumsal seviye: ADX, Stochastic, CCI, RSI Divergence, Mum Formasyonları,
+# Destek/Direnç haritası, Grafik Formasyonları (çift tepe/dip, üçgen, OBO)
+# ═══════════════════════════════════════════════════════════════
+def sma(p, n):
+    if len(p) < n: return None
+    return sum(p[-n:]) / n
+
+def stochastic(candles, k=14, d=3):
+    """Stochastic %K / %D. Döner: (k_val, d_val) 0-100 | (None,None)"""
+    if len(candles) < k + d: return None, None
+    ks = []
+    for j in range(len(candles)-d, len(candles)):
+        win = candles[j-k+1:j+1]
+        hh = max(c[2] for c in win); ll = min(c[3] for c in win)
+        cl = candles[j][4]
+        ks.append(100*(cl-ll)/(hh-ll) if hh != ll else 50)
+    kv = ks[-1]; dv = sum(ks)/len(ks)
+    return round(kv,1), round(dv,1)
+
+def adx(candles, n=14):
+    """Ortalama Yön İndeksi — trend gücü (0-100). >25 güçlü trend, <20 zayıf/range."""
+    if len(candles) < n*2: return None
+    plus_dm=[]; minus_dm=[]; trs=[]
+    for i in range(1, len(candles)):
+        up = candles[i][2]-candles[i-1][2]
+        dn = candles[i-1][3]-candles[i][3]
+        plus_dm.append(up if (up>dn and up>0) else 0)
+        minus_dm.append(dn if (dn>up and dn>0) else 0)
+        trs.append(max(candles[i][2]-candles[i][3],
+                       abs(candles[i][2]-candles[i-1][4]),
+                       abs(candles[i][3]-candles[i-1][4])))
+    def _smooth(arr):
+        s=sum(arr[:n]); out=[s]
+        for x in arr[n:]: s=s-s/n+x; out.append(s)
+        return out
+    if len(trs) < n: return None
+    str_=_smooth(trs); sp=_smooth(plus_dm); sm=_smooth(minus_dm)
+    dx=[]
+    for i in range(len(str_)):
+        if str_[i]==0: continue
+        pdi=100*sp[i]/str_[i]; mdi=100*sm[i]/str_[i]
+        dsum=pdi+mdi
+        dx.append(100*abs(pdi-mdi)/dsum if dsum else 0)
+    if len(dx) < n: return round(sum(dx)/len(dx),1) if dx else None
+    return round(sum(dx[-n:])/n, 1)
+
+def cci(candles, n=20):
+    """Commodity Channel Index. >+100 aşırı alım, <-100 aşırı satım."""
+    if len(candles) < n: return None
+    tp=[(c[2]+c[3]+c[4])/3 for c in candles[-n:]]
+    ma=sum(tp)/n
+    md=sum(abs(x-ma) for x in tp)/n
+    return round((tp[-1]-ma)/(0.015*md), 1) if md else 0
+
+def rsi_divergence(candles, lookback=40):
+    """
+    RSI Uyumsuzluğu (divergence) — en güçlü dönüş sinyali.
+    Boğa: fiyat daha düşük dip, RSI daha yüksek dip → dönüş yukarı
+    Ayı:  fiyat daha yüksek tepe, RSI daha düşük tepe → dönüş aşağı
+    Döner: "BULL" | "BEAR" | None, detay_str
+    """
+    if len(candles) < lookback: return None, ""
+    seg = candles[-lookback:]
+    cl = [c[4] for c in candles]
+    # RSI serisi (her bar için)
+    rsis=[]
+    for i in range(lookback):
+        idx = len(candles)-lookback+i
+        sub = cl[max(0,idx-30):idx+1]
+        rv = rsi(sub) if len(sub) >= 15 else None
+        rsis.append(rv)
+    lows=[c[3] for c in seg]; highs=[c[2] for c in seg]
+    # iki en belirgin dip / tepe
+    def _two_pivots(vals, kind):
+        piv=[]
+        for i in range(3, len(vals)-3):
+            w=vals[i-3:i+4]
+            if kind=="low" and vals[i]==min(w): piv.append(i)
+            if kind=="high" and vals[i]==max(w): piv.append(i)
+        return piv
+    low_p=_two_pivots(lows,"low"); high_p=_two_pivots(highs,"high")
+    if len(low_p)>=2:
+        a,b=low_p[-2],low_p[-1]
+        if rsis[a] and rsis[b] and lows[b]<lows[a] and rsis[b]>rsis[a]+2:
+            return "BULL", f"Boğa uyumsuzluğu: fiyat düşük dip, RSI yüksek dip ({rsis[a]:.0f}→{rsis[b]:.0f})"
+    if len(high_p)>=2:
+        a,b=high_p[-2],high_p[-1]
+        if rsis[a] and rsis[b] and highs[b]>highs[a] and rsis[b]<rsis[a]-2:
+            return "BEAR", f"Ayı uyumsuzluğu: fiyat yüksek tepe, RSI düşük tepe ({rsis[a]:.0f}→{rsis[b]:.0f})"
+    return None, ""
+
+def candle_patterns(candles):
+    """Son mumlardaki kurumsal mum formasyonları. Döner: [(isim, yön, açıklama)]"""
+    if len(candles) < 3: return []
+    out=[]
+    o,h,l,c = candles[-1][1],candles[-1][2],candles[-1][3],candles[-1][4]
+    po,ph,pl,pc = candles[-2][1],candles[-2][2],candles[-2][3],candles[-2][4]
+    body=abs(c-o); rng=(h-l) or 1e-9
+    up_w=h-max(o,c); dn_w=min(o,c)-l
+    # Pin bar / hammer / shooting star
+    if dn_w>body*2 and up_w<body and body>0:
+        out.append(("Çekiç (Hammer)","BULL","Uzun alt fitil — alıcılar dipte devraldı"))
+    if up_w>body*2 and dn_w<body and body>0:
+        out.append(("Kayan Yıldız","BEAR","Uzun üst fitil — satıcılar tepede bastırdı"))
+    # Doji
+    if body < rng*0.1:
+        out.append(("Doji","NEUTRAL","Kararsızlık — dönüş veya devam öncesi denge"))
+    # Engulfing
+    if c>o and pc<po and c>=po and o<=pc and body>abs(pc-po):
+        out.append(("Boğa Yutan (Engulfing)","BULL","Önceki kırmızı mum tamamen yutuldu"))
+    if c<o and pc>po and c<=po and o>=pc and body>abs(pc-po):
+        out.append(("Ayı Yutan (Engulfing)","BEAR","Önceki yeşil mum tamamen yutuldu"))
+    # Morning/Evening star (3 candle)
+    if len(candles)>=3:
+        o2,c2=candles[-3][1],candles[-3][4]
+        mid_body=abs(pc-po)
+        if c2<o2 and mid_body<abs(o2-c2)*0.5 and c>o and c>(o2+c2)/2:
+            out.append(("Sabah Yıldızı","BULL","3 mumlu dip dönüş formasyonu"))
+        if c2>o2 and mid_body<abs(o2-c2)*0.5 and c<o and c<(o2+c2)/2:
+            out.append(("Akşam Yıldızı","BEAR","3 mumlu tepe dönüş formasyonu"))
+    return out
+
+def support_resistance(candles, price, av, n=80):
+    """Anlamlı destek/direnç seviyeleri + en yakınlara mesafe (ATR cinsinden)."""
+    recent=candles[-n:] if len(candles)>=n else candles
+    highs=swing_highs(recent,lb=3); lows=swing_lows(recent,lb=3)
+    res=sorted(set(round(h,8) for h in highs if h>price))
+    sup=sorted(set(round(l,8) for l in lows if l<price), reverse=True)
+    nearest_res=res[0] if res else None
+    nearest_sup=sup[0] if sup else None
+    d_res=round((nearest_res-price)/av,2) if (nearest_res and av) else None
+    d_sup=round((price-nearest_sup)/av,2) if (nearest_sup and av) else None
+    return {"resistance":res[:3],"support":sup[:3],
+            "nearest_res":nearest_res,"nearest_sup":nearest_sup,
+            "dist_res_atr":d_res,"dist_sup_atr":d_sup}
+
+def chart_pattern(candles):
+    """Grafik formasyonu tanıma: çift tepe/dip, daralan üçgen. Döner: (isim,yön,açıklama)|(None,..)"""
+    if len(candles) < 30: return None, None, ""
+    seg=candles[-50:] if len(candles)>=50 else candles
+    highs=[c[2] for c in seg]; lows=[c[3] for c in seg]
+    sh=swing_highs(seg,lb=3); sl=swing_lows(seg,lb=3)
+    # Çift tepe: iki yakın tepe + arada belirgin dip
+    if len(sh)>=2:
+        a,b=sh[-2],sh[-1]
+        if abs(a-b)/((a+b)/2) < 0.005:
+            return "Çift Tepe","BEAR","İki eşit tepe — yukarı ivme tükendi, dönüş aşağı olabilir"
+    if len(sl)>=2:
+        a,b=sl[-2],sl[-1]
+        if abs(a-b)/((a+b)/2) < 0.005:
+            return "Çift Dip","BULL","İki eşit dip — aşağı ivme tükendi, dönüş yukarı olabilir"
+    # Daralan üçgen: tepeler düşüyor, dipler yükseliyor
+    if len(sh)>=2 and len(sl)>=2:
+        if sh[-1]<sh[-2] and sl[-1]>sl[-2]:
+            return "Daralan Üçgen","NEUTRAL","Sıkışma — güçlü kırılım yakın, yön bekle"
+        if sh[-1]>sh[-2] and sl[-1]>sl[-2]:
+            return "Yükselen Kanal","BULL","Yükselen tepeler+dipler — boğa trendi"
+        if sh[-1]<sh[-2] and sl[-1]<sl[-2]:
+            return "Alçalan Kanal","BEAR","Alçalan tepeler+dipler — ayı trendi"
+    return None, None, ""
+
+def read_chart(candles, direction, price, av, rv=None):
+    """
+    PROFESYONEL GRAFİK OKUMA — tüm TA katmanlarını birleştirip
+    okunabilir bir teknik okuma + konfluans bonusu üretir.
+    Döner: {"bonus":int, "lines":[okunabilir satırlar], "data":{ham veriler}}
+    """
+    lines=[]; bonus=0; data={}
+    cl=[c[4] for c in candles]
+
+    # ADX — trend gücü
+    adx_v=adx(candles); data["adx"]=adx_v
+    if adx_v is not None:
+        if adx_v>=40: lines.append(f"💪 ADX {adx_v:.0f} — çok güçlü trend, momentum yüksek"); bonus+=3
+        elif adx_v>=25: lines.append(f"📈 ADX {adx_v:.0f} — sağlıklı trend gücü"); bonus+=2
+        elif adx_v<20: lines.append(f"😴 ADX {adx_v:.0f} — zayıf trend / yatay piyasa"); bonus-=2
+
+    # Stochastic
+    kv,dv=stochastic(candles); data["stoch_k"]=kv; data["stoch_d"]=dv
+    if kv is not None:
+        if direction=="LONG" and kv<25 and kv>dv:
+            lines.append(f"🟢 Stochastic {kv:.0f} aşırı satımdan yukarı kesişti — alım teyidi"); bonus+=3
+        elif direction=="SHORT" and kv>75 and kv<dv:
+            lines.append(f"🔴 Stochastic {kv:.0f} aşırı alımdan aşağı kesişti — satış teyidi"); bonus+=3
+        elif (direction=="LONG" and kv>80) or (direction=="SHORT" and kv<20):
+            lines.append(f"⚠️ Stochastic {kv:.0f} — yönle ters aşırı bölge, dikkat"); bonus-=2
+
+    # CCI
+    cci_v=cci(candles); data["cci"]=cci_v
+    if cci_v is not None:
+        if direction=="LONG" and cci_v>100: lines.append(f"CCI {cci_v:.0f} — güçlü boğa momentumu")
+        elif direction=="SHORT" and cci_v<-100: lines.append(f"CCI {cci_v:.0f} — güçlü ayı momentumu")
+
+    # RSI Divergence — en değerli sinyal
+    div, div_txt=rsi_divergence(candles); data["divergence"]=div
+    if div:
+        if div==direction.replace("LONG","BULL").replace("SHORT","BEAR"):
+            lines.append(f"⭐ {div_txt} — yönle UYUMLU, yüksek olasılıklı dönüş"); bonus+=8
+        else:
+            lines.append(f"⚠️ {div_txt} — yöne TERS uyumsuzluk, dönüş riski"); bonus-=6
+
+    # Mum formasyonları
+    cps=candle_patterns(candles); data["candles"]=[p[0] for p in cps]
+    for name,pdir,desc in cps:
+        if pdir=="NEUTRAL":
+            lines.append(f"🕯️ {name}: {desc}")
+        elif pdir==direction.replace("LONG","BULL").replace("SHORT","BEAR"):
+            lines.append(f"🕯️ {name} ✅: {desc}"); bonus+=3
+        else:
+            lines.append(f"🕯️ {name} ⚠️ (ters): {desc}"); bonus-=2
+
+    # Destek/Direnç
+    sr=support_resistance(candles, price, av); data["sr"]=sr
+    if direction=="LONG" and sr["dist_res_atr"] is not None:
+        if sr["dist_res_atr"]<0.8:
+            lines.append(f"🧱 Direnç çok yakın ({sr['dist_res_atr']:.1f} ATR) — yukarı alan dar"); bonus-=3
+        elif sr["dist_res_atr"]>2.5:
+            lines.append(f"🚀 Üstte {sr['dist_res_atr']:.1f} ATR açık alan — hedefe yol var"); bonus+=2
+    if direction=="SHORT" and sr["dist_sup_atr"] is not None:
+        if sr["dist_sup_atr"]<0.8:
+            lines.append(f"🧱 Destek çok yakın ({sr['dist_sup_atr']:.1f} ATR) — aşağı alan dar"); bonus-=3
+        elif sr["dist_sup_atr"]>2.5:
+            lines.append(f"🚀 Altta {sr['dist_sup_atr']:.1f} ATR açık alan — hedefe yol var"); bonus+=2
+
+    # Grafik formasyonu
+    cp_name,cp_dir,cp_desc=chart_pattern(candles)
+    data["chart_pattern"]=cp_name
+    if cp_name:
+        if cp_dir=="NEUTRAL":
+            lines.append(f"📐 {cp_name}: {cp_desc}")
+        elif cp_dir==direction.replace("LONG","BULL").replace("SHORT","BEAR"):
+            lines.append(f"📐 {cp_name} ✅: {cp_desc}"); bonus+=4
+        else:
+            lines.append(f"📐 {cp_name} ⚠️ (ters): {cp_desc}"); bonus-=4
+
+    bonus=max(-15, min(15, bonus))
+    return {"bonus":bonus, "lines":lines, "data":data}
+
+
 def score_setup(sym, candles, price, news_items=None):
     if len(candles) < 40: return None
     cl=[c[4] for c in candles]
@@ -4031,6 +4272,14 @@ def score_setup(sym, candles, price, news_items=None):
     for tn in timing_notes:
         (reasons if tn.startswith("✅") else neg_factors).append(tn)
 
+    # ── Profesyonel grafik okuma motoru ──────────────────────────
+    # ADX, Stochastic, CCI, RSI Divergence, mum & grafik formasyonları, S/R
+    chart = read_chart(candles, direction, price, av, rv)
+    chart_bonus = chart["bonus"]
+    for ln in chart["lines"]:
+        (reasons if ("✅" in ln or "⭐" in ln or "💪" in ln or "🚀" in ln or "🟢" in ln or "🔴" in ln)
+         else neg_factors).append(ln)
+
     # ── Yapısal karşı-trend cezası ────────────────────────────────
     # Yapı + MTF tamamen karşı yöndeyse ek skor düşüşü
     counter_struct_penalty = 0
@@ -4043,7 +4292,7 @@ def score_setup(sym, candles, price, news_items=None):
 
     # ── Normalise to 100 then blend all modifiers ────────────────
     score_100=round(min(max(
-        raw/MAX_RAW*85 + rr_bonus + eq_bonus + conf_bonus + timing_bonus
+        raw/MAX_RAW*85 + rr_bonus + eq_bonus + conf_bonus + timing_bonus + chart_bonus
         + replay_bonus - news_penalty - heat_penalty - rr_penalty - counter_struct_penalty, 0), 100), 1)
 
     # ── Expected hold time (TP distance ÷ ATR = hours) ───────────
@@ -4144,6 +4393,7 @@ def score_setup(sym, candles, price, news_items=None):
         "auto_ok":auto_ok, "low_rr":low_rr,
         "in_session":in_session, "counter_trend_veto":counter_trend_veto,
         "timing_label":timing_label, "timing_bonus":timing_bonus, "late_entry":late_entry,
+        "chart_read":chart["lines"], "chart_data":chart["data"], "chart_bonus":chart_bonus,
         "time":datetime.now().strftime("%H:%M:%S"),
         "narrative": _narrative(sym,direction,price,el,eh,sl,tp,rr,av,rv,mh,st,sw,bOB,beOB,bFVG,beFVG,cot,news_rl+news_rs,news_score),
     }
