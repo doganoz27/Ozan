@@ -2860,6 +2860,14 @@ _budget_lock      = threading.Lock()
 AUTO_TRADE_MIN_SCORE = float(os.getenv("TITAN_AUTO_MIN", "72"))  # auto-exec eşiği
 # Yeni not sistemi (TRADERCLK): A+ 95-100 · A 90-94 · B+ 80-89 · B 70-79
 #                                C 60-69 · WATCHLIST 50-59 · <50 Düşük Olasılık
+
+def _in_trading_session():
+    """London (07-16 UTC) veya New York (13-22 UTC) seansında mı? Overlap en güçlü."""
+    h = datetime.now(timezone.utc).hour
+    london = 7 <= h < 16
+    ny     = 13 <= h < 22
+    return london or ny
+
 def _grade_from_score(sc):
     if sc >= 95: return "A+"
     if sc >= 90: return "A"
@@ -3265,24 +3273,24 @@ def structural_sl(candles, direction, price, av):
     """
     if len(candles)<20 or not av: return None
     recent=candles[-40:]
-    MAX_ATR_MULT = 1.5   # hard cap — tighter SL, smaller risk per pip
+    MAX_ATR_MULT = 2.0   # hard cap — £2 fixed risk; wider SL = smaller lot, same loss
     if direction=="LONG":
         sl_levels=swing_lows(recent,lb=3)
         candidates=[s for s in sl_levels if s < price - av*0.1]
         if candidates:
             swing=max(candidates)
-            sl=swing - av*0.2      # tight buffer below swing low
+            sl=swing - av*0.3      # ATR buffer below swing low
         else:
-            sl=price - av*1.2      # fallback: 1.2 ATR
+            sl=price - av*1.5      # fallback: 1.5 ATR
         sl=max(sl, price - av*MAX_ATR_MULT)
     else:
         sl_levels=swing_highs(recent,lb=3)
         candidates=[s for s in sl_levels if s > price + av*0.1]
         if candidates:
             swing=min(candidates)
-            sl=swing + av*0.2
+            sl=swing + av*0.3
         else:
-            sl=price + av*1.2
+            sl=price + av*1.5
         sl=min(sl, price + av*MAX_ATR_MULT)
     return round(sl, 8)
 
@@ -3947,10 +3955,20 @@ def score_setup(sym, candles, price, news_items=None):
         rr_penalty = 8
         neg_factors.append(f"RR 1:{rr} — 1:2 hedefinin altında, güven düşürüldü (auto-trade dışı)")
 
+    # ── Yapısal karşı-trend cezası ────────────────────────────────
+    # Yapı + MTF tamamen karşı yöndeyse ek skor düşüşü
+    counter_struct_penalty = 0
+    if direction == "LONG" and st == "BEAR" and not sweep_confirmed:
+        counter_struct_penalty = 10
+        neg_factors.append("📉 BEAR yapısında süpürme olmadan LONG — karşı trend riski yüksek")
+    elif direction == "SHORT" and st == "BULL" and not sweep_confirmed:
+        counter_struct_penalty = 10
+        neg_factors.append("📈 BULL yapısında süpürme olmadan SHORT — karşı trend riski yüksek")
+
     # ── Normalise to 100 then blend all modifiers ────────────────
     score_100=round(min(max(
         raw/MAX_RAW*85 + rr_bonus + eq_bonus + conf_bonus
-        + replay_bonus - news_penalty - heat_penalty - rr_penalty, 0), 100), 1)
+        + replay_bonus - news_penalty - heat_penalty - rr_penalty - counter_struct_penalty, 0), 100), 1)
 
     # ── Expected hold time (TP distance ÷ ATR = hours) ───────────
     hold_h=round(abs(tp-price)/av,1) if av else 8.0
@@ -3970,7 +3988,25 @@ def score_setup(sym, candles, price, news_items=None):
     # ── Status / auto-trade eligibility ──────────────────────────
     # Geçmişi kanıtlanmış kötü olan arketip (wr<=35, n>=5) auto-trade DIŞI tutulur.
     hist_bad = bool(replay and replay.get("n",0) >= 5 and replay.get("wr",100) <= 35)
-    auto_ok  = (score_100 >= AUTO_TRADE_MIN_SCORE) and (not low_rr) and (not hist_bad)
+
+    # Counter-trend veto: HTF'lerin tamamı karşı yöndeyse asla otomatik işlem yok
+    counter_trend_veto = (mtf_total >= 2 and mtf_aligned == 0)
+    if counter_trend_veto:
+        neg_factors.append("⛔ Tüm üst zaman dilimleri karşı yönde — otomatik işlem iptal")
+
+    # Seans filtresi: London veya New York dışında minimum skor 80 olmalı
+    in_session = _in_trading_session()
+    session_ok = in_session or (score_100 >= 80)
+    if not in_session and score_100 < 80:
+        neg_factors.append("🌙 Aktif seans dışı (Tokyo/off-hours) ve skor <80 — otomatik işlem iptal")
+
+    auto_ok = (
+        score_100 >= AUTO_TRADE_MIN_SCORE
+        and (not low_rr)
+        and (not hist_bad)
+        and (not counter_trend_veto)
+        and session_ok
+    )
     if auto_ok:
         status="APPROVED"          # yüksek güven + sağlam RR + kötü geçmiş yok → işleme aday
     elif score_100>=50:
@@ -4024,6 +4060,7 @@ def score_setup(sym, candles, price, news_items=None):
         # ── TRADERCLK v3.0 alanları ──
         "setup_type":setup_type, "replay":replay, "story":story,
         "auto_ok":auto_ok, "low_rr":low_rr,
+        "in_session":in_session, "counter_trend_veto":counter_trend_veto,
         "time":datetime.now().strftime("%H:%M:%S"),
         "narrative": _narrative(sym,direction,price,el,eh,sl,tp,rr,av,rv,mh,st,sw,bOB,beOB,bFVG,beFVG,cot,news_rl+news_rs,news_score),
     }
