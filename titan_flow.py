@@ -670,7 +670,10 @@ def _build_chart_df(s):
 
 
 def _tg_chart1(s, df, tf_label):
-    """Kurumsal analiz grafiği — EMA, RSI paneli, VWAP, formasyon, TP/SL, sinyal faktörleri."""
+    """
+    Kurumsal analiz grafiği — geniş perspektif, tüm analiz katmanları görsel.
+    Paneller: Fiyat | Hacim | RSI+Divergence | Stochastic | ADX
+    """
     try:
         import mplfinance as mpf, matplotlib
         matplotlib.use("Agg")
@@ -680,61 +683,105 @@ def _tg_chart1(s, df, tf_label):
         import io as _io
 
         d = s if isinstance(s, dict) else {}
-        direction = d.get("direction", "")
-        sym = d.get("sym", "")
-        score = d.get("score", 0); grade = d.get("quality", "")
-        rr = d.get("rr", ""); prob = signal_probability(d) if d else 0
-        entry = d.get("el") or d.get("price")
-        arrow = "▲ LONG" if direction == "LONG" else "▼ SHORT" if direction == "SHORT" else ""
+        direction  = d.get("direction", "")
+        sym        = d.get("sym", "")
+        score      = d.get("score", 0)
+        grade      = d.get("quality", "")
+        rr         = d.get("rr", "")
+        prob       = signal_probability(d) if d else 0
+        entry      = d.get("el") or d.get("price")
+        setup_type = d.get("setup_type", "")
+        timing_lbl = d.get("timing_label", "")
+        in_sess    = d.get("in_session", True)
+        chart_data = d.get("chart_data") or {}
+        replay     = d.get("replay")
+        arrow      = "▲ LONG" if direction == "LONG" else "▼ SHORT"
+        is_long    = direction == "LONG"
 
-        # ── EMA & VWAP ──────────────────────────────────────────────────────
+        # ── İndikatörler ────────────────────────────────────────────────────
         df["EMA9"]  = df["Close"].ewm(span=9,  adjust=False).mean()
         df["EMA20"] = df["Close"].ewm(span=20, adjust=False).mean()
         df["EMA50"] = df["Close"].ewm(span=50, adjust=False).mean()
         try:
-            tp_vwap = (df["Close"] + df["High"] + df["Low"]) / 3
+            tp3 = (df["Close"] + df["High"] + df["Low"]) / 3
             vol = df["Volume"].replace(0, 1)
-            df["VWAP"] = (tp_vwap * vol).cumsum() / vol.cumsum()
+            df["VWAP"] = (tp3 * vol).cumsum() / vol.cumsum()
         except: df["VWAP"] = df["Close"]
 
-        # ── RSI (14) ────────────────────────────────────────────────────────
-        import pandas as _pd
+        # RSI
         delta = df["Close"].diff()
-        gain = delta.clip(lower=0).ewm(span=14, adjust=False).mean()
-        loss = (-delta.clip(upper=0)).ewm(span=14, adjust=False).mean()
-        rs = gain / loss.replace(0, float("nan"))
-        df["RSI"] = (100 - 100 / (1 + rs)).fillna(50)
+        gain  = delta.clip(lower=0).ewm(span=14, adjust=False).mean()
+        loss  = (-delta.clip(upper=0)).ewm(span=14, adjust=False).mean()
+        df["RSI"] = (100 - 100 / (1 + gain / loss.replace(0, float("nan")))).fillna(50)
 
+        # Stochastic %K / %D
+        lo14 = df["Low"].rolling(14).min()
+        hi14 = df["High"].rolling(14).max()
+        _rng = (hi14 - lo14).replace(0, float("nan"))
+        df["STOCH_K"] = ((df["Close"] - lo14) / _rng * 100).fillna(50)
+        df["STOCH_D"] = df["STOCH_K"].rolling(3).mean().fillna(50)
+
+        # ADX
+        try:
+            hi = df["High"]; lo = df["Low"]; cl = df["Close"]
+            up_m  = hi.diff().clip(lower=0)
+            dn_m  = (-lo.diff()).clip(lower=0)
+            plus_dm  = _np.where(up_m > dn_m, up_m, 0.0)
+            minus_dm = _np.where(dn_m > up_m, dn_m, 0.0)
+            tr = _np.maximum(hi - lo,
+                   _np.maximum(abs(hi - cl.shift(1)), abs(lo - cl.shift(1))))
+            import pandas as _pd
+            n14 = 14
+            atr14   = _pd.Series(tr).ewm(span=n14, adjust=False).mean()
+            pdi     = 100 * _pd.Series(plus_dm).ewm(span=n14, adjust=False).mean() / atr14.replace(0, float("nan"))
+            mdi     = 100 * _pd.Series(minus_dm).ewm(span=n14, adjust=False).mean() / atr14.replace(0, float("nan"))
+            dx      = (abs(pdi - mdi) / (pdi + mdi).replace(0, float("nan")) * 100).fillna(0)
+            df["ADX"]  = dx.ewm(span=n14, adjust=False).mean().fillna(0)
+            df["+DI"]  = pdi.fillna(0)
+            df["-DI"]  = mdi.fillna(0)
+        except:
+            df["ADX"] = 25; df["+DI"] = 25; df["-DI"] = 25
+
+        # ── Stil ────────────────────────────────────────────────────────────
         mc = mpf.make_marketcolors(up="#26a69a", down="#ef5350", wick="inherit",
                                    edge="inherit", volume="#2a2e39")
         st = mpf.make_mpf_style(marketcolors=mc, facecolor="#0d1017", figcolor="#0d1017",
                                 gridcolor="#181b24", gridstyle="-",
-                                rc={"axes.labelcolor":"#787b86", "axes.edgecolor":"#181b24",
-                                    "xtick.color":"#787b86","ytick.color":"#787b86","font.size":9})
+                                rc={"axes.labelcolor":"#787b86","axes.edgecolor":"#181b24",
+                                    "xtick.color":"#787b86","ytick.color":"#787b86","font.size":8.5})
 
         aps = [
-            mpf.make_addplot(df["EMA9"],  color="#2962ff", width=1.0),
-            mpf.make_addplot(df["EMA20"], color="#ff9800", width=1.0),
-            mpf.make_addplot(df["EMA50"], color="#ab47bc", width=1.3),
-            mpf.make_addplot(df["VWAP"],  color="#e040fb", width=1.1, linestyle="--"),
-            mpf.make_addplot(df["RSI"],   color="#29b6f6", width=1.1, panel=2,
-                             ylabel="RSI", ylim=(0, 100)),
+            mpf.make_addplot(df["EMA9"],    color="#2962ff", width=1.0),
+            mpf.make_addplot(df["EMA20"],   color="#ff9800", width=1.0),
+            mpf.make_addplot(df["EMA50"],   color="#ab47bc", width=1.3),
+            mpf.make_addplot(df["VWAP"],    color="#e040fb", width=1.1, linestyle="--"),
+            # RSI panel
+            mpf.make_addplot(df["RSI"],     color="#29b6f6", width=1.2, panel=2, ylabel="RSI"),
+            # Stochastic panel
+            mpf.make_addplot(df["STOCH_K"], color="#f48fb1", width=1.1, panel=3, ylabel="Stoch"),
+            mpf.make_addplot(df["STOCH_D"], color="#fff176", width=0.9, panel=3),
+            # ADX panel
+            mpf.make_addplot(df["ADX"],     color="#ff7043", width=1.3, panel=4, ylabel="ADX"),
+            mpf.make_addplot(df["+DI"],     color="#26a69a", width=0.8, panel=4),
+            mpf.make_addplot(df["-DI"],     color="#ef5350", width=0.8, panel=4),
         ]
 
+        # TP/SL yatay çizgiler
         hl_prices, hl_colors, hl_styles = [], [], []
         def _add(p, col, sty="-"):
             if p is None: return
             try: hl_prices.append(float(p)); hl_colors.append(col); hl_styles.append(sty)
             except: pass
-        _add(entry,        "#d1d4dc", "-")
-        _add(d.get("sl"),  "#ef5350", "--")
-        _add(d.get("tp"),  "#26a69a", "--")
+        _add(entry,       "#d1d4dc", "-")
+        _add(d.get("sl"), "#ef5350", "--")
+        _add(d.get("tp"), "#26a69a", "--")
 
-        title = f"\n{sym}   {arrow}   ·   {grade} {score:.0f}/100   ·   1:{rr} R:R   ·   Olasılık %{prob:.0f}"
+        title = (f"\n{sym}   {arrow}   {grade} {score:.0f}/100   1:{rr} R:R   "
+                 f"Olasılık %{prob:.0f}   {setup_type}")
         kw = dict(type="candle", style=st, addplot=aps, volume=True,
-                  title=title, figratio=(22,11), figscale=1.4, returnfig=True,
-                  tight_layout=True, panel_ratios=(6, 1.5, 2),
-                  scale_padding={"left":0.4,"right":1.6,"top":1.0,"bottom":0.6})
+                  title=title, figratio=(24, 14), figscale=1.35, returnfig=True,
+                  tight_layout=True, panel_ratios=(6, 1.5, 2, 1.5, 1.5),
+                  scale_padding={"left":0.4,"right":1.8,"top":1.0,"bottom":0.6})
         if hl_prices:
             kw["hlines"] = dict(hlines=hl_prices, colors=hl_colors,
                                 linestyle=hl_styles, linewidths=1.2)
@@ -748,29 +795,29 @@ def _tg_chart1(s, df, tf_label):
         except: pass
 
         fig, axl = mpf.plot(df, **kw)
-        ax = axl[0]
-        ax_rsi = axl[3] if len(axl) > 3 else (axl[2] if len(axl) > 2 else None)
+        ax      = axl[0]
+        ax_rsi  = axl[3] if len(axl) > 3 else None
+        ax_sto  = axl[4] if len(axl) > 4 else None
+        ax_adx  = axl[5] if len(axl) > 5 else None
 
-        n = len(df)
-        xr = n - 1
-        highs = df["High"].values; lows = df["Low"].values
-        opens = df["Open"].values; closes = df["Close"].values
+        n   = len(df)
+        xr  = n - 1
+        highs  = df["High"].values;  lows   = df["Low"].values
+        opens  = df["Open"].values;  closes = df["Close"].values
         hi_data = float(df["High"].max()); lo_data = float(df["Low"].min())
 
-        # ── Expand y-axis so TP/SL labels are ALWAYS visible ──────────────
+        # y-limit: TP/SL her zaman görünür
         prices_to_include = [hi_data, lo_data]
         for pv in [entry, d.get("sl"), d.get("tp")]:
             try: prices_to_include.append(float(pv))
             except: pass
         y_lo = min(prices_to_include); y_hi = max(prices_to_include)
-        pad = (y_hi - y_lo) * 0.12 or y_hi * 0.005
+        pad  = (y_hi - y_lo) * 0.12 or y_hi * 0.005
         ax.set_ylim(y_lo - pad, y_hi + pad)
-        rng = (y_hi - y_lo) or 1
+        rng  = (y_hi - y_lo) or 1
+        ax.set_xlim(-1, n + 14)
 
-        # Sağ tarafta etiketler için boşluk
-        ax.set_xlim(-1, n + 12)
-
-        # ── RSI panel — overbought/oversold lines ──────────────────────────
+        # ── RSI paneli ───────────────────────────────────────────────────────
         if ax_rsi is not None:
             ax_rsi.axhline(70, color="#ef5350", lw=0.8, linestyle="--", alpha=0.6)
             ax_rsi.axhline(30, color="#26a69a", lw=0.8, linestyle="--", alpha=0.6)
@@ -780,76 +827,124 @@ def _tg_chart1(s, df, tf_label):
             ax_rsi.fill_between(range(n), df["RSI"].values, 30,
                                 where=(df["RSI"].values <= 30), alpha=0.15, color="#26a69a")
             cur_rsi = float(df["RSI"].iloc[-1])
-            rsi_col = "#ef5350" if cur_rsi >= 70 else "#26a69a" if cur_rsi <= 30 else "#29b6f6"
+            rsi_col = "#ef5350" if cur_rsi>=70 else "#26a69a" if cur_rsi<=30 else "#29b6f6"
             ax_rsi.text(0.01, 0.82, f"RSI {cur_rsi:.1f}", transform=ax_rsi.transAxes,
                         fontsize=8, color=rsi_col, fontweight="bold",
                         bbox=dict(boxstyle="round,pad=0.3", fc="#131722", ec="none", alpha=0.9))
-            ax_rsi.set_xlim(-1, n + 12)
+            # RSI Divergence işareti
+            div = (d.get("chart_data") or {}).get("divergence")
+            if div:
+                div_col = "#26a69a" if div == "BULL" else "#ef5350"
+                ax_rsi.text(0.99, 0.82, f"▲ {div} DIV" if div=="BULL" else f"▼ {div} DIV",
+                            transform=ax_rsi.transAxes, ha="right",
+                            fontsize=7.5, color=div_col, fontweight="bold",
+                            bbox=dict(boxstyle="round,pad=0.3", fc="#131722", ec=div_col+"55", alpha=0.95))
+            ax_rsi.set_xlim(-1, n + 14)
 
-        # ── Trend kanalı ───────────────────────────────────────────────────
+        # ── Stochastic paneli ────────────────────────────────────────────────
+        if ax_sto is not None:
+            ax_sto.axhline(80, color="#ef5350", lw=0.7, linestyle="--", alpha=0.5)
+            ax_sto.axhline(20, color="#26a69a", lw=0.7, linestyle="--", alpha=0.5)
+            ax_sto.fill_between(range(n), df["STOCH_K"].values, 80,
+                                where=(df["STOCH_K"].values >= 80), alpha=0.12, color="#ef5350")
+            ax_sto.fill_between(range(n), df["STOCH_K"].values, 20,
+                                where=(df["STOCH_K"].values <= 20), alpha=0.12, color="#26a69a")
+            cur_k = float(df["STOCH_K"].iloc[-1]); cur_d = float(df["STOCH_D"].iloc[-1])
+            sto_col = "#ef5350" if cur_k>80 else "#26a69a" if cur_k<20 else "#f48fb1"
+            ax_sto.text(0.01, 0.78, f"Stoch  %K {cur_k:.0f}  %D {cur_d:.0f}",
+                        transform=ax_sto.transAxes, fontsize=7.5, color=sto_col, fontweight="bold",
+                        bbox=dict(boxstyle="round,pad=0.3", fc="#131722", ec="none", alpha=0.9))
+            ax_sto.set_xlim(-1, n + 14); ax_sto.set_ylim(-5, 105)
+
+        # ── ADX paneli ───────────────────────────────────────────────────────
+        if ax_adx is not None:
+            ax_adx.axhline(25, color="#787b86", lw=0.7, linestyle=":", alpha=0.5)
+            ax_adx.axhline(40, color="#ff7043", lw=0.7, linestyle=":", alpha=0.5)
+            cur_adx = float(df["ADX"].iloc[-1])
+            adx_col = "#ff7043" if cur_adx>=40 else "#26a69a" if cur_adx>=25 else "#787b86"
+            adx_lbl = "Güçlü Trend" if cur_adx>=40 else "Trend" if cur_adx>=25 else "Zayıf/Range"
+            ax_adx.text(0.01, 0.78, f"ADX {cur_adx:.0f}  ({adx_lbl})",
+                        transform=ax_adx.transAxes, fontsize=7.5, color=adx_col, fontweight="bold",
+                        bbox=dict(boxstyle="round,pad=0.3", fc="#131722", ec="none", alpha=0.9))
+            ax_adx.set_xlim(-1, n + 14)
+
+        # ── Trend kanalı ─────────────────────────────────────────────────────
         def _pivots(arr, kind, lw=3, rw=3):
             out = []
-            for i in range(lw, len(arr) - rw):
+            for i in range(lw, len(arr)-rw):
                 w = arr[i-lw:i+rw+1]
-                if kind == "high" and arr[i] == max(w): out.append(i)
-                if kind == "low"  and arr[i] == min(w): out.append(i)
+                if kind=="high" and arr[i]==max(w): out.append(i)
+                if kind=="low"  and arr[i]==min(w): out.append(i)
             return out
         def _trendline(idxs, vals, kind, color):
             if len(idxs) < 2: return None
-            half = len(idxs) // 2
-            left, right = idxs[:half] or idxs[:1], idxs[half:] or idxs[-1:]
-            if kind == "low":
-                i1 = min(left, key=lambda i: vals[i]); i2 = min(right, key=lambda i: vals[i])
-            else:
-                i1 = max(left, key=lambda i: vals[i]); i2 = max(right, key=lambda i: vals[i])
+            half = len(idxs)//2
+            left = idxs[:half] or idxs[:1]; right = idxs[half:] or idxs[-1:]
+            i1 = (min if kind=="low" else max)(left, key=lambda i: vals[i])
+            i2 = (min if kind=="low" else max)(right, key=lambda i: vals[i])
             if i2 == i1: return None
             y1, y2 = vals[i1], vals[i2]
-            slope = (y2 - y1) / (i2 - i1)
-            x0 = max(0, i1-2); y0 = y1 + slope*(x0 - i1)
+            slope   = (y2-y1)/(i2-i1)
+            x0 = max(0, i1-2); y0 = y1+slope*(x0-i1)
             ax.plot([x0, xr], [y0, y1+slope*(xr-i1)],
                     color=color, lw=1.4, alpha=0.55, linestyle="-", solid_capstyle="round")
             return slope
-        ph = _pivots(highs, "high"); pl = _pivots(lows, "low")
+        ph = _pivots(highs,"high"); pl = _pivots(lows,"low")
         sl_slope = _trendline(pl, lows,  "low",  "#26a69a")
         sr_slope = _trendline(ph, highs, "high", "#ef5350")
         ch_label = ""
         if sl_slope is not None and sr_slope is not None:
-            if sl_slope > 0 and sr_slope > 0:   ch_label = "↗ Yükselen Kanal"
-            elif sl_slope < 0 and sr_slope < 0: ch_label = "↘ Düşen Kanal"
-            elif sl_slope > 0 and sr_slope < 0: ch_label = "◁▷ Daralan Üçgen"
+            if sl_slope>0 and sr_slope>0:   ch_label = "↗ Yükselen Kanal"
+            elif sl_slope<0 and sr_slope<0: ch_label = "↘ Düşen Kanal"
+            elif sl_slope>0 and sr_slope<0: ch_label = "◁▷ Daralan Üçgen"
             else: ch_label = "▭ Yatay Kanal"
 
-        # ── Kilit Destek/Direnç ────────────────────────────────────────────
+        # ── Destek / Direnç seviyeleri ───────────────────────────────────────
+        sr = d.get("chart_data", {}).get("sr") or {}
+        res_levels = sr.get("resistance", [])
+        sup_levels = sr.get("support", [])
+        # Swing extremes
         swing_hi = float(df["High"].tail(min(n, 100)).max())
         swing_lo = float(df["Low"].tail(min(n, 100)).min())
-        ax.axhline(y=swing_hi, color="#787b86", lw=0.8, linestyle=":", alpha=0.45)
-        ax.axhline(y=swing_lo, color="#787b86", lw=0.8, linestyle=":", alpha=0.45)
-        ax.text(0.5, swing_hi, "  Direnç", fontsize=7.5, color="#787b86",
-                va="bottom", ha="left", alpha=0.7)
-        ax.text(0.5, swing_lo, "  Destek", fontsize=7.5, color="#787b86",
-                va="top", ha="left", alpha=0.7)
+        all_res = sorted(set([swing_hi] + list(res_levels)))[:4]
+        all_sup = sorted(set([swing_lo] + list(sup_levels)), reverse=True)[:4]
+        for r_lv in all_res:
+            ax.axhline(y=r_lv, color="#ef535066", lw=0.9, linestyle=":")
+            ax.text(0.5, r_lv, f"  Direnç {fp_plain(r_lv)}", fontsize=7,
+                    color="#ef5350", va="bottom", alpha=0.75)
+        for s_lv in all_sup:
+            ax.axhline(y=s_lv, color="#26a69a66", lw=0.9, linestyle=":")
+            ax.text(0.5, s_lv, f"  Destek {fp_plain(s_lv)}", fontsize=7,
+                    color="#26a69a", va="top", alpha=0.75)
 
-        # ── Order Block zonu ───────────────────────────────────────────────
+        # ── Giriş zonu şeridi ────────────────────────────────────────────────
+        el = d.get("el"); eh = d.get("eh")
+        if el and eh:
+            try:
+                ax.axhspan(float(el), float(eh), alpha=0.08,
+                           color="#26a69a" if is_long else "#ef5350", lw=0)
+                mid = (float(el)+float(eh))/2
+                ax.text(3, mid, "  GİRİŞ ZONU", fontsize=7, color="#d1d4dc",
+                        va="center", alpha=0.7, style="italic")
+            except: pass
+
+        # ── Order Block ──────────────────────────────────────────────────────
         obs = _find_obs(highs, lows, opens, closes, direction)
         if obs:
-            ob = obs[-1]
-            idx = ob["idx"]; top = ob["top"]; bot = ob["bot"]
-            w = xr - idx + 1
-            is_bull = ob["type"] == "bull_ob"
-            col = "#26a69a" if is_bull else "#ef5350"
-            rect = mpatches.Rectangle((idx-0.4, bot), w, top-bot,
-                facecolor=col, alpha=0.10, edgecolor=col, lw=1.0, linestyle="-")
+            ob  = obs[-1]; idx = ob["idx"]; top = ob["top"]; bot = ob["bot"]
+            col = "#26a69a" if ob["type"]=="bull_ob" else "#ef5350"
+            rect = mpatches.Rectangle((idx-0.4, bot), xr-idx+1, top-bot,
+                facecolor=col, alpha=0.10, edgecolor=col, lw=1.0)
             ax.add_patch(rect)
-            ax.text(idx+0.3, (top if not is_bull else bot) + (rng*0.006 if not is_bull else -rng*0.014),
-                    "Talep Bölgesi" if is_bull else "Arz Bölgesi",
-                    fontsize=7, color=col, fontweight="bold", alpha=0.85)
+            lbl = "Talep (Bull OB)" if ob["type"]=="bull_ob" else "Arz (Bear OB)"
+            ax.text(idx+0.4, bot + (top-bot)*0.1, lbl, fontsize=7.5,
+                    color=col, fontweight="bold", alpha=0.9)
 
-        # ── Formasyon tespiti ──────────────────────────────────────────────
+        # ── Formasyon ────────────────────────────────────────────────────────
         form_name, form_desc = _detect_formation(highs, lows, closes)
+        cp_name = (d.get("chart_data") or {}).get("chart_pattern") or form_name
 
-        # ── TP / SL / Giriş etiketleri — AXES-FRACTION X, DATA Y ──────────
-        # xycoords=('axes fraction','data') → x sabit sağ kenar, y fiyat bazlı
-        # Bu sayede y-limit dışına çıksa bile asla kliplenmiyor
+        # ── TP / SL / Giriş etiketleri (sağda sabit) ────────────────────────
         sl_p = d.get("sl"); tp_p = d.get("tp")
         def _dist(a, b):
             try: return abs(float(a)-float(b))/float(a)*100
@@ -861,110 +956,116 @@ def _tg_chart1(s, df, tf_label):
             if price is None: return
             try: price = float(price)
             except: return
-            # Fiyat veri aralığında mı?
             cur_ylim = ax.get_ylim()
-            y_frac = (price - cur_ylim[0]) / (cur_ylim[1] - cur_ylim[0])
-            y_frac = max(0.02, min(0.98, y_frac))  # ekran içinde tut
+            y_frac = (price-cur_ylim[0])/(cur_ylim[1]-cur_ylim[0])
+            y_frac = max(0.02, min(0.98, y_frac))
             ax.annotate(main_txt,
-                        xy=(1.0, y_frac), xycoords=("axes fraction", "axes fraction"),
-                        xytext=(4, 0), textcoords="offset points",
+                        xy=(1.0, y_frac), xycoords=("axes fraction","axes fraction"),
+                        xytext=(4,0), textcoords="offset points",
                         va="center", ha="left", fontsize=9.0, fontweight="bold",
                         color="#ffffff",
                         bbox=dict(boxstyle="round,pad=0.4", fc=color, ec="none", alpha=0.97),
                         annotation_clip=False)
-            ax.annotate(sub_txt,
-                        xy=(1.0, y_frac), xycoords=("axes fraction", "axes fraction"),
-                        xytext=(4, -12), textcoords="offset points",
-                        va="center", ha="left", fontsize=6.5, color=color, alpha=0.9,
-                        annotation_clip=False)
-            # Fiyata yatay bağlantı çizgisi
+            if sub_txt:
+                ax.annotate(sub_txt,
+                            xy=(1.0, y_frac), xycoords=("axes fraction","axes fraction"),
+                            xytext=(4,-13), textcoords="offset points",
+                            va="center", ha="left", fontsize=6.5, color=color, alpha=0.9,
+                            annotation_clip=False)
             ax.axhline(y=price, color=color, lw=0.6, linestyle=":", alpha=0.35)
 
-        _zone_label(tp_p, "#26a69a",
-                    f"▲ TP  {fp_plain(tp_p)}",
-                    f"+%{tp_pct:.2f}  kar hedefi")
-        _zone_label(entry, "#d1d4dc",
-                    f"◉ GIRIS  {fp_plain(entry)}", "")
-        _zone_label(sl_p, "#ef5350",
-                    f"■ SL  {fp_plain(sl_p)}",
-                    f"-%{sl_pct:.2f}  risk")
+        _zone_label(tp_p, "#26a69a", f"▲ TP  {fp_plain(tp_p)}", f"+%{tp_pct:.2f}  kar hedefi")
+        _zone_label(entry, "#d1d4dc", f"◉ GİRİŞ  {fp_plain(entry)}", "")
+        _zone_label(sl_p, "#ef5350", f"■ SL  {fp_plain(sl_p)}", f"-%{sl_pct:.2f}  risk")
 
-        # ── Yön oku ────────────────────────────────────────────────────────
+        # ── Yön oku ──────────────────────────────────────────────────────────
         if entry:
-            up = direction == "LONG"
-            ay = float(entry) + (rng*0.16)*(-1 if up else 1)
+            up = is_long
+            ay = float(entry) + (rng*0.18)*(-1 if up else 1)
             ax.annotate("AL  ▲" if up else "SAT  ▼",
-                        xy=(xr-1, float(entry)), xytext=(xr-14, ay),
+                        xy=(xr-1, float(entry)), xytext=(xr-15, ay),
                         fontsize=12, fontweight="bold",
                         color="#26a69a" if up else "#ef5350",
                         arrowprops=dict(arrowstyle="-|>", lw=2.4,
                                         color="#26a69a" if up else "#ef5350"))
 
-        # ── Sinyal faktörleri kutusu (sol üst) ─────────────────────────────
+        # ── Ana bilgi kutusu (sol üst) ───────────────────────────────────────
         flags = d.get("flags") or {}
         factor_map = [
-            ("f_ema",    "EMA Yığın",    flags.get("f_ema",0)),
-            ("f_rsi",    "RSI Aşırı",    flags.get("f_rsi",0)),
-            ("f_macd",   "MACD Kesişim", flags.get("f_macd",0)),
-            ("f_ob",     "Order Block",  flags.get("f_ob",0)),
-            ("f_struct", "Yapı Kırılım", flags.get("f_struct",0)),
-            ("f_sweep",  "Likidite",     flags.get("f_sweep",0)),
-            ("f_news",   "Haber Desteği",flags.get("f_news",0)),
+            ("f_ema",    "EMA Yığın",     flags.get("f_ema",0)),
+            ("f_rsi",    "RSI Aşırı",     flags.get("f_rsi",0)),
+            ("f_macd",   "MACD",          flags.get("f_macd",0)),
+            ("f_sweep",  "Liq Sweep",     flags.get("f_sweep",0)),
+            ("f_ob",     "Order Block",   flags.get("f_ob",0)),
+            ("f_fvg",    "FVG",           flags.get("f_fvg",0)),
+            ("f_struct", "Yapı",          flags.get("f_struct",0)),
+            ("f_news",   "Haber",         flags.get("f_news",0)),
         ]
-        factor_lines = []
-        for _k, label, val in factor_map:
-            dot = "●" if val else "○"
-            factor_lines.append(f"{dot} {label}")
-
-        bias = "Yükseliş yapısı" if direction == "LONG" else "Düşüş yapısı"
-        reasons = (d.get("reasons") or [])[:2]
+        factor_lines = [f"{'●' if v else '○'} {lbl}" for _,lbl,v in factor_map]
+        replay_txt = ""
+        if replay and replay.get("n",0) >= 3:
+            replay_txt = (f"║ Geçmiş: {replay['n']} işlem  WR %{replay['wr']:.0f}"
+                          f"  RR {replay.get('avg_rr',0):+.1f}R  PF {replay.get('pf',0):.1f}")
+        timing_txt = f"  {timing_lbl}" if timing_lbl else ""
+        sess_txt   = "  ✓ Aktif Seans" if in_sess else "  ⚠ Seans Dışı"
+        chart_lines_short = [(d.get("chart_read") or [])[:3]]
         info_lines = [
-            f"╔ {sym}  {arrow}  {bias}",
-            f"║ Skor: {score:.0f}/100   Kalite: {grade}   R:R 1:{rr}   Olasılık: %{prob:.0f}",
-            f"║ Formasyon: {form_name}" + (f"  {ch_label}" if ch_label else ""),
+            f"╔ {sym}  {arrow}",
+            f"║ {grade} {score:.0f}/100   R:R 1:{rr}   Olasılık %{prob:.0f}",
+            f"║ Kurulum: {setup_type}" + (f"  |  {ch_label}" if ch_label else ""),
+            f"║ Formasyon: {cp_name or form_name}",
         ]
-        for rsn in reasons:
-            info_lines.append(f"║ • {str(rsn)[:52]}")
-        info_lines.append("╠ Aktif Faktörler:")
-        # 2 sütun: ilk 4 sol, son 3 sağ
+        if replay_txt: info_lines.append(replay_txt)
+        for rsn in (d.get("reasons") or [])[:2]:
+            info_lines.append(f"║ + {str(rsn)[:55]}")
+        info_lines.append(f"║ {timing_txt}{sess_txt}")
+        info_lines.append("╠ Faktörler:")
         for i in range(0, len(factor_lines), 2):
-            left = factor_lines[i]
+            left  = factor_lines[i]
             right = factor_lines[i+1] if i+1 < len(factor_lines) else ""
-            info_lines.append(f"║  {left:<26}{right}")
+            info_lines.append(f"║  {left:<24}{right}")
 
         ax.text(0.010, 0.978, "\n".join(info_lines), transform=ax.transAxes,
-                va="top", ha="left", fontsize=8.2, color="#d1d4dc", linespacing=1.55,
+                va="top", ha="left", fontsize=8.0, color="#d1d4dc", linespacing=1.55,
                 fontfamily="monospace",
                 bbox=dict(boxstyle="round,pad=0.6", fc="#131722", ec="#2a2e39", alpha=0.96))
 
-        # ── Formasyon açıklaması (sol alt) ────────────────────────────────
-        ax.text(0.010, 0.038,
-                f"◆ {form_name}: {form_desc}",
-                transform=ax.transAxes, va="bottom", ha="left",
-                fontsize=7.6, color="#b2b5be", linespacing=1.4,
-                bbox=dict(boxstyle="round,pad=0.5", fc="#131722", ec="#ff980055", alpha=0.92))
+        # ── Grafik okuma özeti (sol alt — chart_read satırları) ──────────────
+        cr_lines = (d.get("chart_read") or [])[:5]
+        if cr_lines:
+            ax.text(0.010, 0.042, "\n".join(f"  {l}" for l in cr_lines),
+                    transform=ax.transAxes, va="bottom", ha="left",
+                    fontsize=7.2, color="#b2b5be", linespacing=1.45,
+                    bbox=dict(boxstyle="round,pad=0.5", fc="#131722", ec="#29b6f655", alpha=0.92))
+        elif form_name:
+            ax.text(0.010, 0.038, f"◆ {form_name}: {form_desc}",
+                    transform=ax.transAxes, va="bottom", ha="left",
+                    fontsize=7.6, color="#b2b5be",
+                    bbox=dict(boxstyle="round,pad=0.5", fc="#131722", ec="#ff980055", alpha=0.92))
 
-        # ── Timeframe + Legend (sağ üst) ───────────────────────────────────
+        # ── Timeframe + Lejant (sağ üst) ─────────────────────────────────────
         ax.text(0.985, 0.978, tf_label, transform=ax.transAxes,
                 va="top", ha="right", fontsize=9.5, fontweight="bold",
                 color="#ff9800", alpha=0.95,
                 bbox=dict(boxstyle="round,pad=0.35", fc="#131722", ec="#ff980055", alpha=0.92))
-        legend = ("━ EMA9 (mavi)  ━ EMA20 (turuncu)  ━ EMA50 (mor)  ┅ VWAP (pembe)\n"
-                  "▦ Talep/Arz Bölgesi   ┈ Destek/Direnç   ╱ Trend Kanalı")
+        legend = ("━ EMA9  ━ EMA20  ━ EMA50  ┅ VWAP\n"
+                  "▦ OB/FVG  ┈ Destek/Direnç  ╱ Trend Kanalı\n"
+                  "Stoch: kırmızı=%K  sarı=%D  |  ADX: turuncu=ADX  yeşil=+DI  kırmızı=−DI")
         ax.text(0.985, 0.895, legend, transform=ax.transAxes,
-                va="top", ha="right", fontsize=6.4, color="#787b86", linespacing=1.5,
+                va="top", ha="right", fontsize=6.2, color="#787b86", linespacing=1.5,
                 bbox=dict(boxstyle="round,pad=0.4", fc="#131722", ec="#2a2e39", alpha=0.88))
 
-        # ── Watermark ──────────────────────────────────────────────────────
+        # ── Watermark ────────────────────────────────────────────────────────
         ax.text(0.5, 0.5, "TITAN PRIME", transform=ax.transAxes,
-                va="center", ha="center", fontsize=34, fontweight="bold",
-                color="#ffffff", alpha=0.03, zorder=0)
+                va="center", ha="center", fontsize=36, fontweight="bold",
+                color="#ffffff", alpha=0.025, zorder=0)
 
         buf = _io.BytesIO()
         fig.savefig(buf, dpi=150, bbox_inches="tight", facecolor="#0d1017", pad_inches=0.15)
         _plt.close(fig); buf.seek(0)
         return buf.read()
     except Exception:
+        import traceback; traceback.print_exc()
         return None
 
 
@@ -987,133 +1088,188 @@ def fp_plain(v):
     return f"{v:.5f}"
 
 def tg_setup_alert(s):
-    """VIP-grade trade signal alert."""
-    key=f"{s['sym']}_{s['direction']}_{round(s['score'])}"
+    """Dinamik, araştırmaya dayalı kurumsal sinyal bildirimi. Hiçbir sabit metin yok."""
+    key = f"{s['sym']}_{s['direction']}_{round(s['score'])}"
     if key in _tg_setup_sent: return
     _tg_setup_sent.add(key)
-    # Assign signal ID for tracking
-    sig_id=s.get("db_id") or abs(hash(key))%100000
-    s["_tg_signal_id"]=sig_id
-    sz=s.get("sizing",{}); rr=s["rr"]; q=s["quality"]
-    sc=s["score"]; regime=s.get("regime","Nötr")
-    direction=s["direction"]; sym=s["sym"]
-    c_score=s.get("contrarian_score",0); c_label=s.get("contrarian_label","—")
-    duration=s.get("duration","Intraday")
-    hold_h=s.get("hold_h",0)
-    sm=s.get("sm_notes",[])
-    traps=s.get("trap_warnings",[])
-    cv=s.get("consensus_view",""); smv=s.get("sm_view","")
-    news_risk=s.get("news_risk","—")
+    sig_id = s.get("db_id") or abs(hash(key)) % 100000
+    s["_tg_signal_id"] = sig_id
+    at_key = f"{s['sym']}_{s['direction']}"
 
-    # Grade styling
-    if q=="A+":
-        grade_hdr="🔥 A+ SETUPu — KURUMSAL ONAYLI 🔥"
-        grade_bar="★★★★★"
-    elif q=="A":
-        grade_hdr="✅ A SETUPu — YÜKSEK OLASILIK"
-        grade_bar="★★★★☆"
-    else:
-        grade_hdr="🔔 B+ SETUPu — GÜÇLÜ FIRSAT"
-        grade_bar="★★★☆☆"
+    # ── Temel veriler ──────────────────────────────────────────────────────
+    sym        = s["sym"]; direction = s["direction"]; sc = s["score"]
+    q          = s["quality"]; rr = s["rr"]
+    regime     = s.get("regime","Nötr"); regime_code = s.get("regime_code","")
+    setup_type = s.get("setup_type","")
+    timing_lbl = s.get("timing_label",""); timing_bonus = s.get("timing_bonus",0)
+    in_sess    = s.get("in_session", True)
+    ct_veto    = s.get("counter_trend_veto", False)
+    late_entry = s.get("late_entry", False)
+    story      = s.get("story","")
+    chart_read = s.get("chart_read") or []
+    chart_data = s.get("chart_data") or {}
+    replay     = s.get("replay")
+    sz         = s.get("sizing",{}) or {}
+    sm         = s.get("sm_notes") or []
+    traps      = s.get("trap_warnings") or []
+    cv         = s.get("consensus_view",""); smv = s.get("sm_view","")
+    news_risk  = s.get("news_risk","—"); news_imp = s.get("news_imp",0)
+    mtf_ok     = s.get("mtf_aligned",0); mtf_tot = s.get("mtf_total",0)
+    c_score    = s.get("contrarian_score",0); c_label = s.get("contrarian_label","")
+    hold_h     = s.get("hold_h",0); duration = s.get("duration","Intraday")
+    prob       = signal_probability(s); sess = signal_session(); strat = signal_strategy(s)
+    reasons    = s.get("reasons") or []; negs = s.get("neg_factors") or []
+    ai         = ai_decision_scores(s)
 
-    dir_emoji="📈" if direction=="LONG" else "📉"
-    regime_emoji=("🟢" if regime=="Risk-On" else "🔴" if regime=="Risk-Off" else "🟡")
+    # ── Dinamik başlık — skor + kurulum + yön bileşimi ────────────────────
+    dir_emoji = "📈" if direction=="LONG" else "📉"
+    if sc >= 90:   grade_hdr = f"🔥 {q} — Kurumsal Onaylı Kurulum"
+    elif sc >= 80: grade_hdr = f"✅ {q} — Yüksek Olasılıklı Fırsat"
+    elif sc >= 70: grade_hdr = f"🎯 {q} — Sağlam Kurulum"
+    else:          grade_hdr = f"👁 {q} — İzleme Listesi"
 
-    # Score bar (10 blocks)
-    filled=int(sc/10); bar="█"*filled+"░"*(10-filled)
+    # ── Piyasa bağlamı paragrafı ───────────────────────────────────────────
+    regime_desc = {
+        "TRENDING": "Piyasa net trend içinde — momentum takip stratejisi geçerli.",
+        "RANGING":  "Piyasa yatay/range modunda — bant içi işlem fırsatı.",
+        "VOLATILE": "Volatilite yüksek — daha geniş perspektif, daha az pozisyon.",
+        "LOW_VOL":  "Düşük volatilite — kırılım öncesi sıkışma dönemi.",
+    }.get(regime_code, f"Piyasa rejimi: {regime}.")
 
-    # Sizing block — front and center
-    sz_block=""
-    if sz:
-        margin=sz.get('margin',0); lev2=sz.get('leverage',1)
-        exp_loss=sz.get('exp_loss',0); exp_profit=sz.get('exp_profit',0)
-        notional=sz.get('notional',0); risk_pct2=sz.get('risk_pct',0)
-        sz_block=(
-            f"\n┌──────────────────────────────┐\n"
-            f"│  💷 HESABINDAN KAÇ POUND GİR?  │\n"
-            f"└──────────────────────────────┘\n"
-            f"🔑 Trade212'ye yatır  : <b>£{margin:.2f}</b> (marj)\n"
-            f"⚡ Kaldıraç            : <b>{lev2}:1</b>  →  £{notional:.0f} nominal pozisyon\n"
-            f"⚖️ Hesabının riski     : <b>%{risk_pct2:.2f}</b>\n"
-            f"❌ Maksimum kayıp      : <b>£{exp_loss:.2f}</b>  (SL'de)\n"
-            f"✅ Hedef kâr           : <b>£{exp_profit:.2f}</b>  (TP'de)\n")
+    mtf_desc = ""
+    if mtf_tot > 0:
+        if mtf_ok == mtf_tot:
+            mtf_desc = f"Tüm {mtf_tot} üst zaman dilimi ({mtf_ok}/{mtf_tot}) yönü teyit ediyor."
+        elif mtf_ok == 0:
+            mtf_desc = f"Üst zaman dilimleri ({mtf_ok}/{mtf_tot}) ters yönde — konjonktüre dikkat."
+        else:
+            mtf_desc = f"Kısmi TF teyidi: {mtf_ok}/{mtf_tot} üst dilim uyumlu."
 
-    # Smart money block
-    sm_block=""
+    # ── Teknik analiz özeti ────────────────────────────────────────────────
+    adx_v   = chart_data.get("adx");    stoch_k = chart_data.get("stoch_k")
+    cci_v   = chart_data.get("cci");    div     = chart_data.get("divergence")
+    cp_name = chart_data.get("chart_pattern")
+    ta_lines = []
+    if adx_v is not None:
+        adx_txt = ("güçlü trend" if adx_v>=40 else "sağlıklı trend" if adx_v>=25 else "zayıf/range")
+        ta_lines.append(f"ADX {adx_v:.0f} — {adx_txt}")
+    if stoch_k is not None:
+        sto_txt = ("aşırı alım bölgesi" if stoch_k>80 else "aşırı satım bölgesi" if stoch_k<20 else "nötr bölge")
+        ta_lines.append(f"Stochastic {stoch_k:.0f} — {sto_txt}")
+    if cci_v is not None:
+        ta_lines.append(f"CCI {cci_v:.0f}")
+    if div:
+        div_txt = "⭐ Boğa uyumsuzluğu — fiyat düşük dip RSI yüksek dip" if div=="BULL" else "⭐ Ayı uyumsuzluğu — fiyat yüksek tepe RSI düşük tepe"
+        ta_lines.append(div_txt)
+    if cp_name:
+        ta_lines.append(f"Formasyon: {cp_name}")
+    # chart_read satırları — emoji + text (en fazla 4 tane)
+    for line in chart_read[:4]:
+        clean = line.replace("✅","✓").replace("⚠️","!").replace("⭐","★")
+        ta_lines.append(clean)
+
+    # ── Geçmiş performans bloğu ───────────────────────────────────────────
+    replay_block = ""
+    if replay and replay.get("n",0) >= 3:
+        wr = replay["wr"]; n_r = replay["n"]; avg_r = replay.get("avg_rr",0)
+        pf  = replay.get("pf",0)
+        perf_desc = "güçlü geçmiş" if wr>=60 else "ortalama geçmiş" if wr>=45 else "zayıf geçmiş"
+        replay_block = (f"\n📊 <b>GEÇMİŞ PERFORMANS — \"{setup_type}\" Kurulumu</b>\n"
+                        f"  Bu arketip sistemde {n_r} kez görüldü → <b>%{wr:.0f} WR</b>, "
+                        f"ortalama <b>{avg_r:+.1f}R</b>, Profit Factor <b>{pf:.1f}</b>.\n"
+                        f"  Sistem değerlendirmesi: <b>{perf_desc}</b>.\n")
+    elif setup_type:
+        replay_block = f"\n📊 \"{setup_type}\" kurulumu için henüz yeterli geçmiş veri yok — sistem öğreniyor.\n"
+
+    # ── Uyarı bloğu ───────────────────────────────────────────────────────
+    warn_lines = []
+    if ct_veto:    warn_lines.append("⛔ Tüm üst TF'ler karşı yönde — bu sinyal SADECE İZLEME içindir")
+    if late_entry: warn_lines.append("⏱️ Hareket uzamış — giriş zamanlaması zayıf, geri çekilme bekle")
+    if not in_sess:warn_lines.append("🌙 Aktif seans dışı (Tokyo/off-hours) — volatilite düşük, slippage riski")
+    for t in traps[:2]: warn_lines.append(t)
+    warn_block = ("\n⚠️ <b>UYARILAR</b>\n" + "\n".join(f"  {w}" for w in warn_lines) + "\n") if warn_lines else ""
+
+    # ── Smart Money bloğu ─────────────────────────────────────────────────
+    sm_block = ""
     if sm:
-        sm_block="\n🧠 <b>SMART MONEY ANALİZİ</b>\n"
-        for n in sm[:3]: sm_block+=f"  ◈ {n}\n"
+        sm_block = "\n🧠 <b>SMART MONEY</b>\n" + "\n".join(f"  ◈ {n}" for n in sm[:3]) + "\n"
 
-    # Trap warning block
-    trap_block=""
-    if traps:
-        trap_block="\n⚠️ <b>TUZAK UYARISI</b>\n"
-        for t in traps[:2]: trap_block+=f"  {t}\n"
+    # ── AI Karar Motoru ───────────────────────────────────────────────────
+    def _mini(v): f=int(v/20); return "▰"*f+"▱"*(5-f)
+    ai_block = (f"\n🤖 <b>AI KARAR MOTORU</b>\n"
+        f"  Trend     {_mini(ai['Trend'])} {ai['Trend']}   "
+        f"Yapı      {_mini(ai['Yapı'])} {ai['Yapı']}\n"
+        f"  Likidite  {_mini(ai['Likidite'])} {ai['Likidite']}   "
+        f"Hacim     {_mini(ai['Hacim'])} {ai['Hacim']}\n"
+        f"  Momentum  {_mini(ai['Momentum'])} {ai['Momentum']}   "
+        f"Risk      {_mini(ai['Risk'])} {ai['Risk']}\n")
 
-    # Consensus block
-    cv_block=""
-    if cv:
-        cv_block=(f"\n🔍 <b>GÖRÜŞ KARŞILAŞTIRMASI</b>\n"
-                  f"  {cv}\n"
-                  f"  {smv}\n")
+    # ── Pozisyon büyüklüğü ────────────────────────────────────────────────
+    sz_block = ""
+    if sz:
+        sz_block = (f"\n💷 <b>POZİSYON BÜYÜKLÜĞÜ (Trade212 CFD)</b>\n"
+            f"  Marj: <b>£{sz.get('margin',0):.2f}</b>  "
+            f"Kaldıraç: <b>{sz.get('leverage',1)}:1</b>  "
+            f"Nominal: £{sz.get('notional',0):.0f}\n"
+            f"  Risk: <b>%{sz.get('risk_pct',0):.2f}</b>  "
+            f"Max Kayıp: <b>£{sz.get('exp_loss',0):.2f}</b>  "
+            f"Hedef Kâr: <b>£{sz.get('exp_profit',0):.2f}</b>\n")
 
-    # Contrarian bar
-    c_bar="█"*int(c_score/10)+"░"*(10-int(c_score/10))
-    c_emoji="⚡" if c_score>=70 else "〰️" if c_score>=40 else "➡️"
+    # ── Sebep / negatif faktör ────────────────────────────────────────────
+    reasons_block = ""
+    if reasons:
+        reasons_block = "\n✅ <b>NEDEN BU İŞLEM</b>\n"
+        for r in reasons[:4]: reasons_block += f"  + {r}\n"
+    if negs:
+        reasons_block += "⚡ <b>Dikkat Edilmesi Gerekenler</b>\n"
+        for n in negs[:3]: reasons_block += f"  − {n}\n"
 
-    # AI Karar Motoru bireysel skorları
-    ai=ai_decision_scores(s)
-    def _mini(v):
-        f=int(v/20); return "▰"*f+"▱"*(5-f)
-    ai_block=("\n🤖 <b>AI KARAR MOTORU</b>\n"
-        f"  Trend     {_mini(ai['Trend'])} {ai['Trend']}\n"
-        f"  Yapı      {_mini(ai['Yapı'])} {ai['Yapı']}\n"
-        f"  Likidite  {_mini(ai['Likidite'])} {ai['Likidite']}\n"
-        f"  Hacim     {_mini(ai['Hacim'])} {ai['Hacim']}\n"
-        f"  Momentum  {_mini(ai['Momentum'])} {ai['Momentum']}\n"
-        f"  Risk      {_mini(ai['Risk'])} {ai['Risk']}\n")
-    prob=signal_probability(s); sess=signal_session(); strat=signal_strategy(s)
-    meta_block=(f"🎲 Olasılık : <b>%{prob:.0f}</b>  |  🕑 Seans: <b>{sess}</b>\n"
-                f"🧩 Strateji : <b>{strat}</b>\n")
+    # ── Piyasa hikayesi ───────────────────────────────────────────────────
+    story_block = f"\n📖 <b>PİYASA HİKAYESİ</b>\n{story}\n" if story else ""
 
-    now_str=datetime.now().strftime("%d.%m.%Y %H:%M")
+    # ── Teknik analiz bloğu ───────────────────────────────────────────────
+    ta_block = ""
+    if ta_lines:
+        ta_block = "\n📐 <b>TEKNİK ANALİZ</b>\n" + "\n".join(f"  {l}" for l in ta_lines) + "\n"
 
-    msg=(
-        f"╔══════════════════════════╗\n"
-        f"║  🏆 <b>TITAN PRIME ELITE</b>  🏆  ║\n"
-        f"╚══════════════════════════╝\n\n"
+    # ── Skor çubuğu ───────────────────────────────────────────────────────
+    filled = int(sc/10); bar = "█"*filled + "░"*(10-filled)
+    now_str = datetime.now().strftime("%d.%m.%Y %H:%M")
+
+    msg = (
         f"<b>{grade_hdr}</b>\n"
-        f"{grade_bar}  <b>{sc:.0f}/100</b>  {bar}\n\n"
-        f"━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"{bar}  <b>{sc:.0f}/100</b>\n\n"
         f"{dir_emoji} <b>{sym}</b>  —  <b>{direction}</b>\n"
-        f"{regime_emoji} Rejim: <b>{regime}</b>  |  Süre: <b>{duration}</b> (~{hold_h:.0f}s)\n"
-        f"━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+        f"{'🟢' if regime=='Risk-On' else '🔴' if regime=='Risk-Off' else '🟡'} "
+        f"Rejim: <b>{regime}</b>  |  <b>{setup_type}</b>\n"
+        f"⏱️ Süre: <b>{duration}</b> (~{hold_h:.0f}s)  |  🎯 Seans: <b>{sess}</b>\n\n"
         f"📌 <b>GİRİŞ ZON</b>  <code>{fp(s['el'])} — {fp(s['eh'])}</code>\n"
-        f"🔴 <b>STOP LOSS</b>  <code>{fp(s['sl'])}</code>\n"
+        f"🔴 <b>STOP LOSS</b>   <code>{fp(s['sl'])}</code>\n"
         f"🟢 <b>TAKE PROFIT</b>  <code>{fp(s['tp'])}</code>\n\n"
-        f"⚖️ <b>Risk/Ödül : 1:{rr}</b>\n"
-        f"🎯 Güven    : <b>{s.get('confidence',sc):.0f}/100</b>\n"
-        f"📰 Haber    : <b>{news_risk}</b>\n"
-        f"{meta_block}\n"
-        f"{c_emoji} <b>Kontraryan Skoru</b>: {c_score}/100\n"
-        f"   {c_bar}  {c_label}\n"
-        f"{ai_block}{cv_block}{sm_block}{trap_block}{sz_block}\n"
-        f"━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-        f"🕐 {now_str}\n"
-        f"🔖 Sinyal ID: <code>#{s.get('_tg_signal_id',0):05d}</code>\n"
-        f"⚡ <b>BU SİNYAL ÖZEL VE KİŞİSELDİR</b> ⚡")
-    at_key = f"{sym}_{direction}"
+        f"⚖️ Risk/Ödül: <b>1:{rr}</b>  |  Olasılık: <b>%{prob:.0f}</b>  |  Güven: <b>{sc:.0f}/100</b>\n"
+        f"{timing_lbl and f'⏱️ Zamanlama: <b>{timing_lbl}</b>' or ''}\n"
+        f"{mtf_desc and f'📐 {mtf_desc}' or ''}\n\n"
+        f"<i>{regime_desc}</i>\n"
+        f"{story_block}"
+        f"{ta_block}"
+        f"{replay_block}"
+        f"{reasons_block}"
+        f"{sm_block}"
+        f"{warn_block}"
+        f"{ai_block}"
+        f"{sz_block}"
+        f"\n🕐 {now_str}  |  🔖 <code>#{sig_id:05d}</code>"
+    )
+
     def _send():
         try:
             png = _tg_chart_png(s)
             mid = None
             if png:
-                # Tek geniş grafik + tam mesaj caption olarak
                 cap = msg if len(msg) <= 1024 else msg[:1015] + "…"
                 requests.post(f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendPhoto",
                     data={"chat_id":TELEGRAM_CHAT_ID,"caption":cap,"parse_mode":"HTML"},
-                    files={"photo":("chart.png", png, "image/png")}, timeout=20)
-                # Mesaj 1024+ ise tam metni ayrıca gönder — bu mesajı izle (düzenlenebilir)
+                    files={"photo":("chart.png", png, "image/png")}, timeout=25)
                 if len(msg) > 1024:
                     mid = tg_send_get_id(msg)
             else:
