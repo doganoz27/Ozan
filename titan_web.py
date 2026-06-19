@@ -36,11 +36,23 @@ except ImportError:
     pass
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
-from fastapi.responses import HTMLResponse, JSONResponse, Response
+from fastapi.responses import HTMLResponse, JSONResponse as _RawJSONResponse, Response
 from fastapi.middleware.cors import CORSMiddleware
 import uvicorn
 
 import titan_flow as tf
+
+
+class JSONResponse(_RawJSONResponse):
+    """NaN/Infinity güvenli JSON yanıtı. Starlette varsayılanı allow_nan=False
+    kullandığından tek bir NaN tüm endpoint'i 500'e düşürür ve sinyaller/detay
+    ekrana hiç ulaşmaz. Burada NaN/Inf değerleri null'a çevrilir."""
+    def render(self, content) -> bytes:
+        return json.dumps(
+            _json_safe(content),
+            ensure_ascii=False, allow_nan=False,
+            separators=(",", ":"), default=str,
+        ).encode("utf-8")
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 _START_TIME = time.time()
@@ -287,10 +299,22 @@ def _signal_to_dict(s):
         "liq_target": _fp(liq_target),
     }
 
+def _json_safe(obj):
+    """NaN / Infinity → None (geçersiz JSON token üretmesini önler).
+    Starlette JSONResponse allow_nan=False kullanır; tek bir NaN tüm
+    yanıtı 500'e düşürür ve WS JSON.parse'ı kırar → sinyaller görünmez."""
+    if isinstance(obj, float):
+        return obj if math.isfinite(obj) else None
+    if isinstance(obj, dict):
+        return {k: _json_safe(v) for k, v in obj.items()}
+    if isinstance(obj, (list, tuple)):
+        return [_json_safe(v) for v in obj]
+    return obj
+
 def live_signals():
     with tf.lock:
         sts = list(tf.setups)
-    return [_signal_to_dict(s) for s in sts]
+    return [_json_safe(_signal_to_dict(s)) for s in sts]
 
 def active_trades_live():
     out = []
@@ -941,7 +965,9 @@ def _refresh_ws_cache():
                 },
             }
             with _ws_cache_lock:
-                _ws_cache["payload"] = json.dumps(payload, default=str)
+                # allow_nan=False → NaN/Inf'i önce temizle; aksi halde tarayıcıda
+                # JSON.parse kırılır ve hiçbir güncelleme ekrana ulaşmaz.
+                _ws_cache["payload"] = json.dumps(_json_safe(payload), default=str)
                 _ws_cache["ts"] = time.time()
         except Exception as e:
             _log(f"WS önbellek hatası: {e}", "WARN")
