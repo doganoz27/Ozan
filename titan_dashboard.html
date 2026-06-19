@@ -422,12 +422,14 @@ let WS = null, lastData = {}, sigFilter = 'ALL', jTab = 'analytics', perfPeriod 
 const fmt = (v,d=4) => v==null ? '—' : (typeof v==='number' ? v.toFixed(d) : v);
 const money = v => v==null ? '£—' : (v>=0?'£':'-£')+Math.abs(v).toFixed(2);
 const pct = v => (v>=0?'+':'')+(v||0).toFixed(2)+'%';
-const gradeColor = q => ({'A+':'text-grn','A':'text-grn','B+':'text-ylw','B':'text-blu','WATCH':'text-dim','WATCHLIST':'text-dim'}[q]||'text-dim');
+// TRADERCLK notlama: A+ 95-100 · A 90-94 · B+ 80-89 · B 70-79 · C 60-69 · WATCH 50-59 · LOW <50
+const gradeColor = q => ({'A+':'text-grn','A':'text-grn','B+':'text-ylw','B':'text-blu','C':'text-dim','WATCH':'text-dim','WATCHLIST':'text-dim','LOW':'text-dim'}[q]||'text-dim');
 const dirBadge = d => d==='LONG'
   ? '<span class="px-2 py-0.5 rounded bg-grn/15 text-grn text-xs font-bold">LONG</span>'
   : '<span class="px-2 py-0.5 rounded bg-red/15 text-red text-xs font-bold">SHORT</span>';
 const statusBadge = s => {
   const m={'APPROVED':['bg-grn/15','text-grn','AKTİF'],'WATCHLIST':['bg-ylw/15','text-ylw','İZLEME'],
+           'LOW':['bg-border2','text-dim','DÜŞÜK OLASILIK'],
            'OPEN':['bg-blu/15','text-blu','AÇIK'],'TP':['bg-grn/15','text-grn','TP'],'SL':['bg-red/15','text-red','SL']};
   const x=m[s]||['bg-border2','text-dim',s||'—']; return `<span class="px-2 py-0.5 rounded ${x[0]} ${x[1]} text-xs font-bold">${x[2]}</span>`;
 };
@@ -662,7 +664,7 @@ function renderSignals(){
       <td class="p-3 text-right text-red">${fmt(s.sl)}</td>
       <td class="p-3 text-right text-grn">${fmt(s.tp)}</td>
       <td class="p-3 text-right font-bold">1:${s.rr}</td>
-      <td class="p-3 text-dim">${s.strategy||'—'}</td>
+      <td class="p-3 text-dim">${s.setup_type||s.strategy||'—'}</td>
       <td class="p-3 text-dim">${s.session||'—'}</td>
       <td class="p-3">${statusBadge(s.status)}</td>
     </tr>`).join('') : '<tr><td colspan="13" class="p-6 text-center text-dim">Fırsat taranıyor…</td></tr>';
@@ -692,9 +694,11 @@ function showDetail(i){
     <div class="flex items-center justify-between mb-4 flex-wrap gap-2">
       <div class="flex items-center gap-3"><span class="font-bold text-lg ${gradeColor(s.quality)}">${s.quality}</span>
       <span class="font-bold text-lg">${s.sym}</span>${dirBadge(s.direction)}
+      ${s.setup_type?`<span class="px-2 py-0.5 rounded bg-grn/15 text-grn text-xs font-bold">${s.setup_type}</span>`:''}
       <span class="px-2 py-0.5 rounded bg-border2 text-xs">${s.strategy||''}</span>
       <span class="px-2 py-0.5 rounded bg-blu/15 text-blu text-xs">${s.session||''}</span>
       ${s.regime_tech?`<span class="px-2 py-0.5 rounded bg-prp/15 text-prp text-xs">${s.regime_tech}</span>`:''}
+      ${s.auto_ok?'<span class="px-2 py-0.5 rounded bg-grn/15 text-grn text-xs font-bold">⚡ OTOMATİK İŞLEM</span>':'<span class="px-2 py-0.5 rounded bg-border2 text-dim text-xs">👁 SADECE İZLEME</span>'}
       ${s.mtf_total?`<span class="px-2 py-0.5 rounded ${s.mtf_aligned===s.mtf_total?'bg-grn/15 text-grn':s.mtf_aligned===0?'bg-red/15 text-red':'bg-ylw/15 text-ylw'} text-xs font-bold">📐 ${s.mtf_aligned}/${s.mtf_total} TF teyit</span>`:''}
       </div>
       <div class="text-right">
@@ -731,6 +735,19 @@ function showDetail(i){
         ${(s.trap_warnings||[]).map(t=>`<div class="text-xs text-red mt-1">⚠ ${t}</div>`).join('')}
       </div>
     </div>
+    ${s.story?`<div class="mt-4 bg-prp/5 border border-prp/30 rounded-lg p-4">
+      <div class="font-bold text-xs mb-2 text-prp">📖 PİYASA HİKAYESİ — ne oldu · ne oluyor · sırada ne var · neden</div>
+      <div class="text-sm text-dim leading-relaxed">${s.story}</div>
+    </div>`:''}
+    ${s.replay?`<div class="mt-4 bg-blu/5 border border-blu/30 rounded-lg p-4">
+      <div class="font-bold text-xs mb-3 text-blu">🔁 GEÇMİŞ KARŞILAŞTIRMA — "${s.setup_type||''}" kurulumu</div>
+      <div class="grid grid-cols-2 md:grid-cols-4 gap-3">
+        <div class="bg-border2/30 rounded p-3"><div class="text-dim text-xs">Benzer İşlem</div><div class="font-bold text-lg">${s.replay.n}</div></div>
+        <div class="bg-border2/30 rounded p-3"><div class="text-dim text-xs">Kazanç Oranı</div><div class="font-bold text-lg ${s.replay.wr>=55?'text-grn':s.replay.wr>=45?'text-ylw':'text-red'}">%${(s.replay.wr||0).toFixed(0)}</div></div>
+        <div class="bg-border2/30 rounded p-3"><div class="text-dim text-xs">Ort. R:R</div><div class="font-bold text-lg ${s.replay.avg_rr>=0?'text-grn':'text-red'}">${s.replay.avg_rr>=0?'+':''}${s.replay.avg_rr}R</div></div>
+        <div class="bg-border2/30 rounded p-3"><div class="text-dim text-xs">Profit Factor</div><div class="font-bold text-lg ${s.replay.pf>=1.5?'text-grn':s.replay.pf>=1?'text-ylw':'text-red'}">${s.replay.pf}</div></div>
+      </div>
+    </div>`:(s.setup_type?`<div class="mt-4 bg-border2/20 rounded-lg p-3 text-xs text-dim">🔁 "${s.setup_type}" kurulumu için henüz yeterli geçmiş veri yok — sistem öğreniyor.</div>`:'')}
     <div class="mt-4 bg-border2/20 rounded-lg p-4">
       <div class="font-bold text-xs mb-2">✅ NEDEN BU İŞLEM?</div>
       <div class="grid grid-cols-1 md:grid-cols-2 gap-x-6">

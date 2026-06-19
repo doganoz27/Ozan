@@ -2770,7 +2770,11 @@ def update_watchlist(new_setups):
         _wl_active.pop(k,None)
 
     # ── Add new setups to watchlist if not already there ─────────
+    # TRADERCLK: tüm fırsatlar tarayıcıda görünür ama yalnızca anlamlı güvenli
+    # olanlar (skor ≥ 50 = WATCHLIST/APPROVED) izleme listesine alınır.
     for k,s in new_keys.items():
+        if (s.get("score") or 0) < 50:
+            continue
         if k not in _wl_active:
             _wl_active[k]={**s,"_wl_added":now,"_wl_status":"ACTIVE","_wl_updated":now,"_wl_reason":"Yeni setup tespit edildi"}
 
@@ -2848,6 +2852,22 @@ RECENTLY_CLOSED_TTL = 7200  # 2 hours — matches DEDUP_SEC
 TRADE_BUDGET      = 50.0    # Total budget to split across trades
 MAX_CONCURRENT    = int(os.getenv("TITAN_MAX_TRADES", "6"))   # Max simultaneous open trades
 _budget_lock      = threading.Lock()
+
+# ── TRADERCLK Intelligence Engine v3.0 ────────────────────────────────────────
+# Felsefe: HARD FILTER YOK. Fırsat reddedilmez — olasılığa göre PUANLANIR ve
+# SIRALANIR. Düşük olasılık bile görünür kalır; sadece YÜKSEK güvenli olanlar
+# otomatik işleme döner. "Analist, sinyal spam'cısı değil."
+AUTO_TRADE_MIN_SCORE = float(os.getenv("TITAN_AUTO_MIN", "72"))  # auto-exec eşiği
+# Yeni not sistemi (TRADERCLK): A+ 95-100 · A 90-94 · B+ 80-89 · B 70-79
+#                                C 60-69 · WATCHLIST 50-59 · <50 Düşük Olasılık
+def _grade_from_score(sc):
+    if sc >= 95: return "A+"
+    if sc >= 90: return "A"
+    if sc >= 80: return "B+"
+    if sc >= 70: return "B"
+    if sc >= 60: return "C"
+    if sc >= 50: return "WATCH"
+    return "LOW"
 
 # ── Break-even / trade lifecycle state ────────────────────────────────────────
 BE_TRIGGER_R      = 1.0     # Move SL to entry when price reaches +1.0R profit
@@ -2943,10 +2963,15 @@ def db_init():
             ("exit_logic",  "ALTER TABLE signals ADD COLUMN exit_logic TEXT"),
             ("chart_path",  "ALTER TABLE signals ADD COLUMN chart_path TEXT"),
             ("strategy",    "ALTER TABLE signals ADD COLUMN strategy TEXT"),
+            # TRADERCLK: setup arketipi + tespit edilen rejim (geçmiş-replay öğrenmesi)
+            ("setup_type",  "ALTER TABLE signals ADD COLUMN setup_type TEXT"),
+            ("regime_code", "ALTER TABLE signals ADD COLUMN regime_code TEXT"),
         ]:
             if col not in existing_cols:
                 try: c.execute(ddl)
                 except Exception: pass
+        try: c.execute("CREATE INDEX IF NOT EXISTS i4 ON signals(setup_type)")
+        except Exception: pass
         c.commit()
 
 db_init()
@@ -3474,6 +3499,139 @@ def _mtf_confluence(candles, direction):
     return aligned, total, detail
 
 
+# ═══════════════════════════════════════════════════════════════
+# TRADERCLK INTELLIGENCE ENGINE v3.0 — yardımcı motorlar
+# ═══════════════════════════════════════════════════════════════
+def _classify_setup(direction, fl, st, sw, near_top, near_bot):
+    """
+    Fırsatı kurumsal setup arketipine ayırır (Setup Win Rate Engine için).
+    Tek bir etiket döner — geçmiş performans bu etikete göre izlenir.
+    """
+    has_sweep  = bool(sw)
+    has_ob     = bool(fl.get("f_ob"))
+    has_fvg    = bool(fl.get("f_fvg"))
+    trend_long  = (st == "BULL" and direction == "LONG")
+    trend_short = (st == "BEAR" and direction == "SHORT")
+    counter     = (st == "BULL" and direction == "SHORT") or (st == "BEAR" and direction == "LONG")
+
+    if has_sweep and has_ob:  return "Sweep + OB"
+    if has_sweep and has_fvg: return "Sweep + FVG"
+    if has_sweep:             return "Liquidity Reversal"
+    if (trend_long or trend_short) and (has_ob or has_fvg): return "Trend Pullback"
+    if trend_long or trend_short:                          return "BOS Continuation"
+    if st == "RANGE" and (near_top or near_bot):           return "Range Reversal"
+    if counter:                                            return "Counter-Trend"
+    if near_top or near_bot:                               return "Breakout"
+    return "Momentum"
+
+
+# Hafif önbellek: replay sorgusunu her mum için DB'ye gitmeden saklar (60sn)
+_replay_cache = {}
+_replay_cache_ts = 0
+def _market_replay(setup_type, direction):
+    """
+    MARKET REPLAY LEARNING — geçmişte aynı setup arketipinin sonuçları.
+    Döner: {"n":adet, "wr":kazanç%, "avg_rr":ort R, "pf":profit factor} | None
+    """
+    global _replay_cache, _replay_cache_ts
+    if not setup_type: return None
+    now = time.time()
+    if now - _replay_cache_ts > 60:
+        # tüm setup tiplerini tek seferde çek, önbelleğe al
+        try:
+            with db() as c:
+                rows = c.execute(
+                    "SELECT setup_type, direction, status, act_rr FROM signals "
+                    "WHERE status IN ('TP','SL','EXPIRED') AND setup_type IS NOT NULL"
+                ).fetchall()
+            agg = {}
+            for r in rows:
+                for key in (r["setup_type"], f"{r['setup_type']}|{r['direction']}"):
+                    d = agg.setdefault(key, {"n":0,"w":0,"rr":[]})
+                    d["n"] += 1
+                    if r["status"] == "TP": d["w"] += 1
+                    if r["act_rr"] is not None: d["rr"].append(r["act_rr"])
+            _replay_cache = agg
+            _replay_cache_ts = now
+        except Exception:
+            _replay_cache = {}; _replay_cache_ts = now
+    # yön-özel veri yeterliyse onu, değilse genel setup verisini kullan
+    d = _replay_cache.get(f"{setup_type}|{direction}")
+    if not d or d["n"] < 4:
+        d = _replay_cache.get(setup_type)
+    if not d or d["n"] < 1: return None
+    wr = round(d["w"] / d["n"] * 100, 1)
+    avg_rr = round(sum(d["rr"]) / len(d["rr"]), 2) if d["rr"] else 0
+    gw = sum(r for r in d["rr"] if r > 0); gl = abs(sum(r for r in d["rr"] if r < 0))
+    pf = round(gw / gl, 2) if gl else (99.0 if gw else 0)
+    return {"n": d["n"], "wr": wr, "avg_rr": avg_rr, "pf": pf}
+
+
+def _regime_weight_factors(regime_code):
+    """
+    REGIME-ADAPTIVE WEIGHTING — tespit edilen rejime göre faktör çarpanları.
+    Trend rejiminde yapı+momentum, range rejiminde likidite+ortalama-dönüş öne çıkar.
+    """
+    base = {"f_ema":1.0,"f_rsi":1.0,"f_macd":1.0,"f_sweep":1.0,
+            "f_ob":1.0,"f_fvg":1.0,"f_struct":1.0,"f_cot":1.0,"f_news":1.0}
+    if regime_code == "TRENDING":
+        base.update({"f_struct":1.30,"f_ema":1.25,"f_macd":1.20,"f_rsi":0.80,"f_sweep":0.90})
+    elif regime_code == "RANGING":
+        base.update({"f_sweep":1.30,"f_ob":1.25,"f_rsi":1.25,"f_fvg":1.15,"f_ema":0.80,"f_struct":0.85})
+    elif regime_code == "VOLATILE":
+        base.update({"f_sweep":1.20,"f_news":1.20,"f_struct":1.10,"f_macd":0.85})
+    elif regime_code == "LOW_VOL":
+        base.update({"f_ob":1.20,"f_fvg":1.20,"f_sweep":1.10,"f_macd":0.85})
+    return base
+
+
+def _market_story(sym, direction, price, sw, bOB, beOB, bFVG, st, regime_tech,
+                  near_top, near_bot, rv, setup_type, replay):
+    """
+    MARKET STORY ENGINE — her sinyal için BENZERSİZ anlatı:
+    ne oldu / ne oluyor / sırada ne var / neden. Şablon değil, duruma özel.
+    """
+    yon  = "yükseliş" if direction == "LONG" else "düşüş"
+    parts = []
+
+    # 1) NE OLDU
+    if sw and sw[0] == "BULL" and direction == "LONG":
+        parts.append(f"{sym} fiyatı {sw[1]:.5f} altındaki likiditeyi süpürdü — perakende stop'ları toplandı, akıllı para alıcı tarafta absorbe etti.")
+    elif sw and sw[0] == "BEAR" and direction == "SHORT":
+        parts.append(f"{sym} {sw[1]:.5f} üstündeki likiditeyi süpürdü — geç kalan alıcılar tuzaklandı, dağıtım tamamlandı.")
+    elif near_bot and direction == "LONG":
+        parts.append(f"{sym} son dönem dibine yakın işlem görüyor; bu bölge tarihsel olarak alıcıların savunduğu bir talep alanı.")
+    elif near_top and direction == "SHORT":
+        parts.append(f"{sym} son dönem zirvesine yakın; bu seviye genelde kâr satışı ve dağıtımın görüldüğü bir arz bölgesi.")
+    else:
+        parts.append(f"{sym} {regime_tech.split('—')[0].strip() if regime_tech else 'mevcut'} koşulda; fiyat anlamlı bir denge bölgesinde konumlanıyor.")
+
+    # 2) NE OLUYOR
+    struct_txt = ("yükselen yapı (HH+HL) bozulmadan sürüyor" if st == "BULL"
+                  else "alçalan yapı (LH+LL) korunuyor" if st == "BEAR"
+                  else "fiyat yatay bir bantta sıkışmış, net yön arıyor")
+    if bOB and direction == "LONG":
+        parts.append(f"Şu an {bOB[0]:.5f}–{bOB[1]:.5f} boğa order block'una geri çekilme yaşanıyor; {struct_txt}.")
+    elif beOB and direction == "SHORT":
+        parts.append(f"Şu an {beOB[0]:.5f}–{beOB[1]:.5f} ayı order block'u test ediliyor; {struct_txt}.")
+    elif bFVG and direction == "LONG":
+        parts.append(f"Fiyat {bFVG[0]:.5f}–{bFVG[1]:.5f} adil değer boşluğunu (FVG) dolduruyor; {struct_txt}.")
+    else:
+        rsi_txt = (f"RSI {rv:.0f} ile {'aşırı satım' if rv and rv<35 else 'aşırı alım' if rv and rv>65 else 'nötr'} bölgesinde" if rv else "momentum dengede")
+        parts.append(f"Fiyat şu an {rsi_txt}; {struct_txt}.")
+
+    # 3) SIRADA NE VAR + 4) NEDEN
+    if replay and replay.get("n", 0) >= 3:
+        parts.append(f"Sırada: kurumlar indirimli fiyattan {yon} devamı arayabilir. "
+                     f"Neden: '{setup_type}' arketipi geçmişte {replay['n']} kez görüldü, "
+                     f"%{replay['wr']:.0f} kazanç ve ort. {replay['avg_rr']:+.2f}R üretti.")
+    else:
+        parts.append(f"Sırada: teyit gelirse {yon} yönünde devam beklenir. "
+                     f"Neden: '{setup_type}' kurulumu kurumsal niyetle uyumlu, "
+                     f"ancak bu arketip için henüz yeterli geçmiş veri yok — pozisyon temkinli tutulmalı.")
+    return " ".join(parts)
+
+
 def score_setup(sym, candles, price, news_items=None):
     if len(candles) < 40: return None
     cl=[c[4] for c in candles]
@@ -3607,10 +3765,17 @@ def score_setup(sym, candles, price, news_items=None):
         neg_l.append("COT data unavailable — no open-interest confirmation")
         neg_s.append("COT data unavailable — no open-interest confirmation")
 
-    # ── Portfolio heat check ─────────────────────────────────────
+    # ── Portfolio heat — TRADERCLK: reddetme, güveni düşür ──────
     heat=portfolio_state.get("heat",0)
+    heat_penalty=0
     if heat>=15:
-        return None   # HARD REJECT — portfolio heat too high
+        heat_penalty=14   # aşırı ısı → güçlü güven düşüşü (ama fırsat görünür kalır)
+        neg_l.append(f"🔥 Portföy ısısı çok yüksek ({heat:.0f}) — risk azalt, güven düşürüldü")
+        neg_s.append(f"🔥 Portföy ısısı çok yüksek ({heat:.0f}) — risk azalt, güven düşürüldü")
+    elif heat>=10:
+        heat_penalty=6
+        neg_l.append(f"🌡️ Portföy ısısı yükseliyor ({heat:.0f}) — yeni risk seçici alınmalı")
+        neg_s.append(f"🌡️ Portföy ısısı yükseliyor ({heat:.0f}) — yeni risk seçici alınmalı")
 
     # ── News Risk Check (caution only — never blocks trading) ──
     n_imp, n_rl, n_caution = news_risk_for_sym(sym)
@@ -3647,10 +3812,15 @@ def score_setup(sym, candles, price, news_items=None):
         neg_l.append("No news data available")
         neg_s.append("No news data available")
 
-    # ── Adaptive weight bonus (max ±5) ───────────────────────────
+    # ── Teknik rejim (TRENDING/RANGING/VOLATILE/LOW_VOL) — ağırlık öncesi ──
+    regime_code, regime_tech, regime_atr = _technical_regime(candles)
+    rgf = _regime_weight_factors(regime_code)
+
+    # ── Adaptive + Regime-adaptive weight bonus ──────────────────
+    # Performans ağırlığı (adap_weights) × rejim çarpanı (rgf) birlikte uygulanır.
     for feat,val in fl.items():
         if val:
-            w=adap_weights.get(feat,1.0)
+            w = adap_weights.get(feat,1.0) * rgf.get(feat,1.0)
             sl_=sl_+(w-1.0)*2 if sl_>=sr_ else sl_
             sr_=sr_+(w-1.0)*2 if sr_>sl_ else sr_
 
@@ -3670,9 +3840,13 @@ def score_setup(sym, candles, price, news_items=None):
     sl=structural_sl(candles, direction, price, av)
     if sl is None: return None
 
-    # ── Structural TP (S/R based, min 1:2.0) ────────────────────
+    # ── Structural TP (S/R based, hedef 1:2.0 — £2 risk / £4 ödül) ──
+    # TRADERCLK: düşük RR'yi reddetme; puanla. Ama 1:2 hedefi korunur (auto-trade
+    # bunu ister) — degenerasyon (rr<1.2) dışında her fırsat görünür kalır.
     tp, rr=structural_tp(candles, direction, price, sl, min_rr=2.0)
-    if tp is None or rr<2.0: return None   # HARD REJECT
+    if tp is None: return None              # TP hesaplanamıyorsa boyutlandırılamaz
+    rr = rr or 0
+    low_rr = rr < 2.0                        # 1:2 altı → güven düşürülür, auto-trade dışı
 
     # ── RR bonus scoring ─────────────────────────────────────────
     rr_bonus = 16 if rr>=3.5 else 14 if rr>=3.0 else 12 if rr>=2.5 else 9 if rr>=2.0 else 6
@@ -3732,8 +3906,7 @@ def score_setup(sym, candles, price, news_items=None):
     elif st=="BEAR" and (rv or 50)>35: regime="Risk-Off"
     else: regime="Nötr"
 
-    # ── Teknik rejim (Trending/Ranging/Volatile/Low-Vol) ─────────
-    regime_code, regime_tech, regime_atr = _technical_regime(candles)
+    # (Teknik rejim ağırlık hesabından önce hesaplandı: regime_code/regime_tech)
 
     # ── Çoklu zaman dilimi teyidi (4H + Günlük) ──────────────────
     mtf_aligned, mtf_total, mtf_detail = _mtf_confluence(candles, direction)
@@ -3754,8 +3927,30 @@ def score_setup(sym, candles, price, news_items=None):
     if get_asset_class(sym) in ("stocks","indices") and fl["f_ema"] and fl["f_struct"]:
         eq_bonus=4
 
-    # ── Normalise to 100 then blend RR bonus ─────────────────────
-    score_100=round(min(max(raw/MAX_RAW*85+rr_bonus+eq_bonus+conf_bonus-news_penalty,0),100),1)
+    # ── Setup arketipi (Setup Win Rate Engine) ──────────────────
+    setup_type = _classify_setup(direction, fl, st, sw, near_top, near_bot)
+    replay = _market_replay(setup_type, direction)
+
+    # ── Market Replay güven düzeltmesi ───────────────────────────
+    # Geçmişte iyi performans → güven artar; kötü → düşer. HARD REJECT YOK.
+    replay_bonus = 0
+    if replay and replay.get("n", 0) >= 3:
+        wr_h = replay["wr"]
+        if   wr_h >= 65: replay_bonus = 10; reasons.append(f"'{setup_type}' geçmişi güçlü (%{wr_h:.0f} WR, {replay['n']} işlem)")
+        elif wr_h >= 55: replay_bonus = 5;  reasons.append(f"'{setup_type}' geçmişi olumlu (%{wr_h:.0f} WR)")
+        elif wr_h <= 35: replay_bonus = -12; neg_factors.append(f"'{setup_type}' geçmişi zayıf (%{wr_h:.0f} WR, {replay['n']} işlem) — güven düşürüldü")
+        elif wr_h <= 45: replay_bonus = -6;  neg_factors.append(f"'{setup_type}' geçmişi ortalama altı (%{wr_h:.0f} WR)")
+
+    # ── Düşük RR / ısı güven düşüşleri (reddetme değil) ──────────
+    rr_penalty = 0
+    if low_rr:
+        rr_penalty = 8
+        neg_factors.append(f"RR 1:{rr} — 1:2 hedefinin altında, güven düşürüldü (auto-trade dışı)")
+
+    # ── Normalise to 100 then blend all modifiers ────────────────
+    score_100=round(min(max(
+        raw/MAX_RAW*85 + rr_bonus + eq_bonus + conf_bonus
+        + replay_bonus - news_penalty - heat_penalty - rr_penalty, 0), 100), 1)
 
     # ── Expected hold time (TP distance ÷ ATR = hours) ───────────
     hold_h=round(abs(tp-price)/av,1) if av else 8.0
@@ -3765,32 +3960,32 @@ def score_setup(sym, candles, price, news_items=None):
     if hold_h>24: neg_factors.append(f"Hold time ~{hold_h:.0f}h — capital locked overnight+")
     elif hold_h>8: neg_factors.append(f"Hold time ~{hold_h:.0f}h — crosses session boundary")
 
-    # ── HARD REJECT: score too low ───────────────────────────────
-    if score_100<38: return None
-
-    # ── Quality thresholds ───────────────────────────────────────
-    if   score_100>=80: quality="A+"
-    elif score_100>=66: quality="A"
-    elif score_100>=50: quality="B+"
-    elif score_100>=38: quality="WATCH"
-    else: return None
-
-    # A+ requires liquidity sweep
+    # ── TRADERCLK GRADING — hard reject YOK, her fırsat puanlanır ─
+    # A+ 95-100 · A 90-94 · B+ 80-89 · B 70-79 · C 60-69 · WATCH 50-59 · LOW <50
+    quality = _grade_from_score(score_100)
+    # A+ için likidite süpürmesi şart — yoksa bir kademe düşür
     if quality=="A+" and not sweep_confirmed:
         quality="A"
 
-    # Status: score>=58 → APPROVED directly
-    if score_100>=58:
-        status="APPROVED"
-    elif score_100>=38:
-        status="WATCHLIST"
+    # ── Status / auto-trade eligibility ──────────────────────────
+    # Geçmişi kanıtlanmış kötü olan arketip (wr<=35, n>=5) auto-trade DIŞI tutulur.
+    hist_bad = bool(replay and replay.get("n",0) >= 5 and replay.get("wr",100) <= 35)
+    auto_ok  = (score_100 >= AUTO_TRADE_MIN_SCORE) and (not low_rr) and (not hist_bad)
+    if auto_ok:
+        status="APPROVED"          # yüksek güven + sağlam RR + kötü geçmiş yok → işleme aday
+    elif score_100>=50:
+        status="WATCHLIST"         # görünür, izlenir; otomatik işleme girmez
     else:
-        status="REJECTED"
+        status="LOW"               # düşük olasılık — yine de gizlenmez, taranır
 
     confidence=score_100
 
     news_risk_label=("NO RISK" if n_imp<20 else "LOW" if n_imp<40
                      else "MEDIUM" if n_imp<60 else "HIGH" if n_imp<80 else "CRITICAL")
+
+    # ── Market Story (benzersiz anlatı) ──────────────────────────
+    story = _market_story(sym, direction, price, sw, bOB, beOB, bFVG, st,
+                          regime_tech, near_top, near_bot, rv, setup_type, replay)
 
     # Build placeholder setup for sizing (fill in entry/sl/tp before calling)
     _tmp={"sym":sym,"price":price,"sl":sl,"rr":rr}
@@ -3826,6 +4021,9 @@ def score_setup(sym, candles, price, news_items=None):
         "regime_tech":regime_tech,"regime_code":regime_code,
         "mtf_aligned":mtf_aligned,"mtf_total":mtf_total,
         "mtf_detail":[{"tf":d[0],"dir":d[1],"ok":d[2]} for d in mtf_detail],
+        # ── TRADERCLK v3.0 alanları ──
+        "setup_type":setup_type, "replay":replay, "story":story,
+        "auto_ok":auto_ok, "low_rr":low_rr,
         "time":datetime.now().strftime("%H:%M:%S"),
         "narrative": _narrative(sym,direction,price,el,eh,sl,tp,rr,av,rv,mh,st,sw,bOB,beOB,bFVG,beFVG,cot,news_rl+news_rs,news_score),
     }
@@ -4178,14 +4376,15 @@ def log_signal(s):
             strategy = _derive_strategy(s)
             cur = c.execute("""INSERT INTO signals(sym,quality,direction,entry,sl,tp,
                 rr_t,score,f_ema,f_rsi,f_macd,f_sweep,f_ob,f_fvg,f_struct,f_cot,f_news,
-                status,created,narrative,entry_logic,strategy)
-                VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                status,created,narrative,entry_logic,strategy,setup_type,regime_code)
+                VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                 (s["sym"], s["quality"], s["direction"], s["price"], s["sl"],
                  s["tp"], s["rr"], s["score"],
                  fl.get("f_ema",0), fl.get("f_rsi",0), fl.get("f_macd",0), fl.get("f_sweep",0),
                  fl.get("f_ob",0),  fl.get("f_fvg",0),  fl.get("f_struct",0), fl.get("f_cot",0),
                  fl.get("f_news",0), "OPEN", created,
-                 s.get("narrative",""), entry_logic, strategy))
+                 s.get("narrative",""), entry_logic, strategy,
+                 s.get("setup_type"), s.get("regime_code")))
             sig_id = cur.lastrowid
             _last_logged[key] = now
             if sz:
@@ -4614,6 +4813,23 @@ def compute_stats():
             sess_stats[sess]["t"]+=1
             if r["status"]=="TP": sess_stats[sess]["w"]+=1
 
+        # ── SETUP WIN RATE ENGINE — arketip bazlı performans ──
+        setup_perf={}
+        for r in closed:
+            stp=r.get("setup_type")
+            if not stp: continue
+            d=setup_perf.setdefault(stp,{"t":0,"w":0,"l":0,"rr":[]})
+            d["t"]+=1
+            if r["status"]=="TP": d["w"]+=1
+            elif r["status"]=="SL": d["l"]+=1
+            if r.get("act_rr") is not None: d["rr"].append(r["act_rr"])
+        for stp,d in setup_perf.items():
+            d["wr"]=round(d["w"]/d["t"]*100,1) if d["t"] else 0
+            d["avg_rr"]=round(sum(d["rr"])/len(d["rr"]),2) if d["rr"] else 0
+            gw=sum(x for x in d["rr"] if x>0); gl=abs(sum(x for x in d["rr"] if x<0))
+            d["pf"]=round(gw/gl,2) if gl else (99.0 if gw else 0)
+            d.pop("rr",None)
+
         # Consecutive streak
         streak=0; streak_type=""
         for r in reversed(closed):
@@ -4636,6 +4852,7 @@ def compute_stats():
                 "mdd":mdd,"var95":var95,"kelly":kelly,
                 "avg_win":avg_win,"avg_loss":avg_loss,
                 "sess_stats":sess_stats,"sym_perf":sym_perf,"mc":mc,
+                "setup_perf":setup_perf,
                 "best_syms":best_syms,"equity_curve":equity[-50:],
                 "streak":streak,"streak_type":streak_type,
             }
@@ -4797,6 +5014,22 @@ def ai_coach_insights() -> list:
         out.append({"type":"edge","icon":"🔥",
             "text":f"<b>{streak} ardışık kazanç</b>! Momentum iyi ama aşırı güvene kapılma — "
                    f"risk yönetimini aynı tut."})
+
+    # ── Setup Win Rate Engine — en iyi/en kötü arketip ──
+    setup_perf = sc.get("setup_perf", {})
+    valid_sp = [(k,v) for k,v in setup_perf.items() if v.get("t",0) >= 3]
+    if valid_sp:
+        best_sp = max(valid_sp, key=lambda x: x[1]["wr"])
+        worst_sp = min(valid_sp, key=lambda x: x[1]["wr"])
+        if best_sp[1]["wr"] >= 55:
+            out.append({"type":"setup","icon":"🏗️",
+                "text":f"En iyi kurulum tipin <b>{best_sp[0]}</b> "
+                       f"(%{best_sp[1]['wr']:.0f} WR, {best_sp[1]['t']} işlem, ort. {best_sp[1]['avg_rr']:+.2f}R). "
+                       f"Bu arketipteki fırsatları öncele."})
+        if worst_sp[0] != best_sp[0] and worst_sp[1]["wr"] <= 40:
+            out.append({"type":"warn","icon":"🚫",
+                "text":f"<b>{worst_sp[0]}</b> kurulumu zayıf (%{worst_sp[1]['wr']:.0f} WR, {worst_sp[1]['t']} işlem). "
+                       f"Sistem bu arketipi otomatik işleme kapattı — sadece izleme listesinde tutuyor."})
 
     # ── Adaptif öğrenme durumu ──
     if adap_weights:
@@ -5094,9 +5327,10 @@ def run_analysis():
             r=score_setup(sym,candles,md.price,sn.get(sym,[]))
             if r:
                 results.append(r)
-                # Sadece GERÇEKTEN onaylı A+/A/B+ sinyaller DB'ye yazılır ve
-                # izlenen işleme dönüşür — böylece "onaylı görünüp kaybolma" biter.
-                if r.get("quality") in ("A+","A","B+") and r.get("status")=="APPROVED":
+                # TRADERCLK: TÜM fırsatlar `results`'ta görünür/sıralanır, ama yalnızca
+                # status==APPROVED (yüksek güven + sağlam RR + kötü geçmişi olmayan
+                # arketip) DB'ye yazılır ve otomatik izlenen işleme döner.
+                if r.get("status")=="APPROVED" and r.get("auto_ok"):
                     at_key = f"{r['sym']}_{r['direction']}"
                     with lock: open_count = len(active_trades)
                     with _budget_lock: just_closed = at_key in _recently_closed
@@ -5109,7 +5343,8 @@ def run_analysis():
                         try: tg_setup_alert(r)
                         except: pass
         except: pass
-    results.sort(key=lambda x:({"A+":0,"A":1,"B+":2}.get(x["quality"],9),-x["score"]))
+    # TRADERCLK: fırsatları olasılığa (skor) göre sırala — en yüksek güven üstte
+    results.sort(key=lambda x:-(x.get("score") or 0))
     setups=results
     try: update_watchlist(results)
     except: pass
