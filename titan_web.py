@@ -788,7 +788,13 @@ def _startup():
 def index():
     path = os.path.join(HERE, "titan_dashboard.html")
     with open(path, encoding="utf-8") as f:
-        return f.read()
+        html = f.read()
+    # Tarayıcının eski sürümü önbellekten göstermesini engelle — her zaman taze UI
+    return HTMLResponse(html, headers={
+        "Cache-Control": "no-store, no-cache, must-revalidate, max-age=0",
+        "Pragma": "no-cache",
+        "Expires": "0",
+    })
 
 @app.get("/health")
 def api_health():
