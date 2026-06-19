@@ -3507,6 +3507,76 @@ def _mtf_confluence(candles, direction):
     return aligned, total, detail
 
 
+def _entry_timing(candles, direction, price, av):
+    """
+    GİRİŞ ZAMANLAMASI MOTORU — hareketin neresinde olduğumuzu ölçer.
+    Uzamış/yorgun bir harekete geç girmek = erken stop. Taze/geri-çekilmiş
+    girişler kazanır. Döner: (timing_bonus, etiket, detay_listesi)
+      +bonus → ideal giriş (geri çekilme, taze ivme, fitil teyidi)
+      −ceza  → uzamış/yorgun hareket, EMA'dan aşırı sapma
+    """
+    if len(candles) < 25 or not av:
+        return 0, "Belirsiz", []
+    cl = [c[4] for c in candles]
+    notes = []
+    bonus = 0
+
+    e20 = ema(cl, 20)
+    ema20 = e20[-1] if e20 else price
+
+    # 1) EMA20'den sapma (ATR cinsinden) — aşırı uzaklık = yorgun hareket
+    stretch = (price - ema20) / av if av else 0
+    if direction == "LONG":
+        if stretch > 2.5:
+            bonus -= 8; notes.append(f"⚠️ Fiyat EMA20'nin {stretch:.1f} ATR üstünde — aşırı uzamış, geri çekilme riski")
+        elif stretch > 1.5:
+            bonus -= 3; notes.append(f"Fiyat EMA20'den {stretch:.1f} ATR uzakta — biraz uzamış")
+        elif -0.5 <= stretch <= 1.0:
+            bonus += 5; notes.append("✅ Fiyat EMA20'ye yakın — taze giriş bölgesi (geri çekilme)")
+    else:
+        if stretch < -2.5:
+            bonus -= 8; notes.append(f"⚠️ Fiyat EMA20'nin {abs(stretch):.1f} ATR altında — aşırı uzamış, tepki riski")
+        elif stretch < -1.5:
+            bonus -= 3; notes.append(f"Fiyat EMA20'den {abs(stretch):.1f} ATR uzakta — biraz uzamış")
+        elif -1.0 <= stretch <= 0.5:
+            bonus += 5; notes.append("✅ Fiyat EMA20'ye yakın — taze giriş bölgesi (geri çekilme)")
+
+    # 2) Ardışık aynı-yön mum sayısı — tükenme göstergesi
+    run = 0
+    for i in range(len(candles)-1, max(0, len(candles)-8), -1):
+        c = candles[i]
+        bull = c[4] > c[1]; bear = c[4] < c[1]
+        if direction == "LONG" and bull: run += 1
+        elif direction == "SHORT" and bear: run += 1
+        else: break
+    if run >= 5:
+        bonus -= 6; notes.append(f"⚠️ {run} ardışık {'yeşil' if direction=='LONG' else 'kırmızı'} mum — hareket yorgun, tükenme yakın")
+    elif run >= 4:
+        bonus -= 2; notes.append(f"{run} ardışık mum — momentum güçlü ama dikkat")
+
+    # 3) Son mumun fitil teyidi — seviyeden ret = kurumsal giriş
+    last = candles[-1]
+    body = abs(last[4] - last[1]) or (av * 0.01)
+    lo_wick = min(last[1], last[4]) - last[3]
+    hi_wick = last[2] - max(last[1], last[4])
+    if direction == "LONG" and lo_wick > body * 1.5:
+        bonus += 4; notes.append("✅ Alt fitil reddi — alıcılar seviyeyi savundu")
+    elif direction == "SHORT" and hi_wick > body * 1.5:
+        bonus += 4; notes.append("✅ Üst fitil reddi — satıcılar seviyeyi savundu")
+
+    # 4) Momentum ivmesi — son 3 mumun ortalama gövdesi artıyor mu?
+    bodies = [abs(candles[i][4] - candles[i][1]) for i in range(-4, 0)]
+    if len(bodies) == 4 and bodies[-1] < (sum(bodies[:3])/3) * 0.5:
+        bonus += 2; notes.append("Momentum yavaşlıyor — konsolidasyon, sıçramaya hazır olabilir")
+
+    # Etiket
+    if bonus >= 6:    label = "🟢 İdeal Giriş"
+    elif bonus >= 0:  label = "🟡 Kabul Edilebilir"
+    elif bonus >= -6: label = "🟠 Geç Giriş"
+    else:             label = "🔴 Çok Geç / Uzamış"
+    return bonus, label, notes
+
+
 # ═══════════════════════════════════════════════════════════════
 # TRADERCLK INTELLIGENCE ENGINE v3.0 — yardımcı motorlar
 # ═══════════════════════════════════════════════════════════════
@@ -3955,6 +4025,12 @@ def score_setup(sym, candles, price, news_items=None):
         rr_penalty = 8
         neg_factors.append(f"RR 1:{rr} — 1:2 hedefinin altında, güven düşürüldü (auto-trade dışı)")
 
+    # ── Giriş zamanlaması motoru ──────────────────────────────────
+    # Hareketin neresindeyiz? Taze geri-çekilme mi, yorgun uzamış hareket mi?
+    timing_bonus, timing_label, timing_notes = _entry_timing(candles, direction, price, av)
+    for tn in timing_notes:
+        (reasons if tn.startswith("✅") else neg_factors).append(tn)
+
     # ── Yapısal karşı-trend cezası ────────────────────────────────
     # Yapı + MTF tamamen karşı yöndeyse ek skor düşüşü
     counter_struct_penalty = 0
@@ -3967,7 +4043,7 @@ def score_setup(sym, candles, price, news_items=None):
 
     # ── Normalise to 100 then blend all modifiers ────────────────
     score_100=round(min(max(
-        raw/MAX_RAW*85 + rr_bonus + eq_bonus + conf_bonus
+        raw/MAX_RAW*85 + rr_bonus + eq_bonus + conf_bonus + timing_bonus
         + replay_bonus - news_penalty - heat_penalty - rr_penalty - counter_struct_penalty, 0), 100), 1)
 
     # ── Expected hold time (TP distance ÷ ATR = hours) ───────────
@@ -4000,12 +4076,18 @@ def score_setup(sym, candles, price, news_items=None):
     if not in_session and score_100 < 80:
         neg_factors.append("🌙 Aktif seans dışı (Tokyo/off-hours) ve skor <80 — otomatik işlem iptal")
 
+    # Çok geç/uzamış girişte (timing_bonus çok negatif) otomatik işlem yok
+    late_entry = timing_bonus <= -8
+    if late_entry:
+        neg_factors.append("⏱️ Giriş zamanlaması zayıf (hareket çok uzamış) — otomatik işlem iptal")
+
     auto_ok = (
         score_100 >= AUTO_TRADE_MIN_SCORE
         and (not low_rr)
         and (not hist_bad)
         and (not counter_trend_veto)
         and session_ok
+        and (not late_entry)
     )
     if auto_ok:
         status="APPROVED"          # yüksek güven + sağlam RR + kötü geçmiş yok → işleme aday
@@ -4061,6 +4143,7 @@ def score_setup(sym, candles, price, news_items=None):
         "setup_type":setup_type, "replay":replay, "story":story,
         "auto_ok":auto_ok, "low_rr":low_rr,
         "in_session":in_session, "counter_trend_veto":counter_trend_veto,
+        "timing_label":timing_label, "timing_bonus":timing_bonus, "late_entry":late_entry,
         "time":datetime.now().strftime("%H:%M:%S"),
         "narrative": _narrative(sym,direction,price,el,eh,sl,tp,rr,av,rv,mh,st,sw,bOB,beOB,bFVG,beFVG,cot,news_rl+news_rs,news_score),
     }

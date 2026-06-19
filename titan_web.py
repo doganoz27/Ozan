@@ -272,6 +272,9 @@ def _signal_to_dict(s):
         # ── TRADERCLK v3.0 ──
         "setup_type": s.get("setup_type"), "story": s.get("story"),
         "replay": s.get("replay"), "auto_ok": s.get("auto_ok"), "low_rr": s.get("low_rr"),
+        "in_session": s.get("in_session"), "counter_trend_veto": s.get("counter_trend_veto"),
+        "timing_label": s.get("timing_label"), "timing_bonus": s.get("timing_bonus"),
+        "late_entry": s.get("late_entry"),
         "margin": sz.get("margin"), "exp_loss": sz.get("exp_loss"),
         "exp_profit": sz.get("exp_profit"), "leverage": sz.get("leverage"),
         "risk_pct": sz.get("risk_pct"), "notional": sz.get("notional"),
