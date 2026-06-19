@@ -1207,13 +1207,18 @@ def tg_setup_alert(s):
     # ── Pozisyon büyüklüğü ────────────────────────────────────────────────
     sz_block = ""
     if sz:
+        cap_note = ""
+        if sz.get("margin_capped"):
+            cap_note = (f"  ⚠️ Serbest marj sınırlı (£{sz.get('free_margin',0):.2f}) — "
+                        f"pozisyon küçültüldü, risk £2'nin altında\n")
         sz_block = (f"\n💷 <b>POZİSYON BÜYÜKLÜĞÜ (Trade212 CFD)</b>\n"
             f"  Marj: <b>£{sz.get('margin',0):.2f}</b>  "
             f"Kaldıraç: <b>{sz.get('leverage',1)}:1</b>  "
             f"Nominal: £{sz.get('notional',0):.0f}\n"
             f"  Risk: <b>%{sz.get('risk_pct',0):.2f}</b>  "
             f"Max Kayıp: <b>£{sz.get('exp_loss',0):.2f}</b>  "
-            f"Hedef Kâr: <b>£{sz.get('exp_profit',0):.2f}</b>\n")
+            f"Hedef Kâr: <b>£{sz.get('exp_profit',0):.2f}</b>\n"
+            f"{cap_note}")
 
     # ── Sebep / negatif faktör ────────────────────────────────────────────
     reasons_block = ""
@@ -3169,11 +3174,20 @@ db_cleanup()
 # ═══════════════════════════════════════════════════════════════
 # PORTFOLIO ENGINE
 # ═══════════════════════════════════════════════════════════════
+def _used_margin():
+    """Açık (OPEN) shadow işlemlerin toplam kullanılan marjı (£)."""
+    try:
+        with db() as c:
+            rows = c.execute("SELECT capital FROM shadow_trades WHERE status='OPEN'").fetchall()
+        return round(sum((r["capital"] or 0) for r in rows), 2)
+    except: return 0.0
+
 def calc_sizing(setup):
     """
-    Fixed-risk sizing (Trade212 CFD): size the position so the loss at SL is
-    exactly FIXED_RISK_GBP (£2). Profit at TP = risk × signal R:R, so a 1:2
-    setup risks £2 to make £4. Same numbers feed the shadow trade.
+    Fixed-risk sizing (Trade212 CFD): SL'de kayıp tam FIXED_RISK_GBP (£2) olacak
+    şekilde boyutlandırır. ANCAK gerekli marj asla serbest bakiyeyi aşamaz —
+    çok dar SL'de notional patlayıp marj bakiyeyi geçerse pozisyon küçültülür
+    (risk £2'nin altına iner). Bakiyeden büyük işlem ASLA açılmaz.
     """
     sym=setup["sym"]; entry=setup["price"]; sl=setup["sl"]
     rr=setup["rr"]
@@ -3183,28 +3197,50 @@ def calc_sizing(setup):
         heat=portfolio_state["heat"]
         open_count=len(active_trades)
     sl_dist_pct=abs(entry-sl)/entry if entry else 0
-    if not sl_dist_pct: return None
+    if not sl_dist_pct or bal<=0: return None
 
-    # Risk EXACTLY £2 per trade (halve if portfolio is overheated;
-    # never risk more than 50% of a very small balance).
+    # ── Hedef risk: tam £2 (ısı yüksekse yarıya indir, küçük bakiyede %50 sınır) ──
     risk_amt = FIXED_RISK_GBP
     if heat > 10:
         risk_amt = round(risk_amt * 0.5, 2)
     risk_amt = round(min(risk_amt, bal * 0.5), 2)
     if risk_amt <= 0: return None
 
-    # Notional required to lose exactly risk_amt at SL; margin = notional/leverage
+    # ── Serbest marj: bakiyeden açık işlemlerin marjını düş ──
+    used = _used_margin()
+    free_margin = max(0.0, bal - used)
+    # Tek pozisyon en fazla serbest marjın %90'ını kullanabilir (tampon bırak)
+    MARGIN_CAP_PCT = 0.90
+    max_margin = round(free_margin * MARGIN_CAP_PCT, 2)
+    if max_margin <= 0:
+        return None   # serbest marj yok → yeni pozisyon açılamaz
+
+    # ── İdeal notional/marj (tam £2 risk için) ──
     notional = risk_amt / sl_dist_pct
-    margin   = round(notional / lev, 2)
-    exp_profit = round(risk_amt * rr, 2)   # 1:2 → £4
-    return {
-        "margin":margin,"notional":round(notional,2),
-        "risk_amt":risk_amt,"leverage":lev,
+    margin   = notional / lev
+
+    # ── KRİTİK: marj serbest bakiyeyi aşıyorsa pozisyonu küçült ──
+    capped = False
+    if margin > max_margin:
+        capped   = True
+        margin   = max_margin
+        notional = margin * lev
+        risk_amt = round(notional * sl_dist_pct, 2)   # gerçek risk düşer
+        if risk_amt <= 0: return None
+
+    margin     = round(margin, 2)
+    exp_profit = round(risk_amt * rr, 2)
+    out = {
+        "margin":margin, "notional":round(notional,2),
+        "risk_amt":risk_amt, "leverage":lev,
         "exp_loss":risk_amt,
         "exp_profit":exp_profit,
         "risk_pct":round(risk_amt/bal*100,2) if bal else 0,
         "asset_class":get_asset_class(sym),
+        "free_margin":round(free_margin,2),
+        "margin_capped":capped,
     }
+    return out
 
 def calc_portfolio_heat():
     """Sum risk% of all open positions from shadow_trades."""
@@ -5863,7 +5899,10 @@ def run_analysis():
                     # Bütçe bitmişse ve bu zaten açık bir pozisyon değilse yeni sinyal ekleme
                     budget_full = (open_count >= MAX_CONCURRENT)
                     with lock: already_open = at_key in active_trades
-                    if (not budget_full or already_open) and not just_closed:
+                    # Marj yetersizse (sizing None/boş) yeni pozisyon AÇMA —
+                    # bakiyeden büyük işlem açılmasını kökten engeller
+                    sz_ok = bool(r.get("sizing")) and (r["sizing"].get("margin",0) > 0)
+                    if (not budget_full or already_open) and not just_closed and sz_ok:
                         try: log_signal(r)
                         except: pass
                         try: tg_setup_alert(r)
